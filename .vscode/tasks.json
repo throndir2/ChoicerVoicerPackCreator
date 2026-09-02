@@ -26,10 +26,17 @@
       "problemMatcher": []
     },
     {
-      "label": "Pack Creator: Build Windows App",
+      "label": "Pack Creator: Build Portable Windows App",
       "type": "shell",
-      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
-      "args": ["scripts\\build.py"],
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\Build-Portable.ps1"
+      ],
       "group": "build",
       "problemMatcher": []
     },

@@ -5,20 +5,32 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_EXE = (
-    ROOT
-    / "dist"
-    / "v0.2.2"
-    / "Choicer Voicer Pack Creator"
-    / "Choicer Voicer Pack Creator.exe"
-)
+with (ROOT / "pyproject.toml").open("rb") as project_file:
+    APP_VERSION = str(tomllib.load(project_file)["project"]["version"])
+DIST = ROOT / "dist" / f"v{APP_VERSION}"
+LATEST_BUILD_MANIFEST = DIST / "latest-portable.json"
+
+
+def default_executable() -> Path:
+    if not LATEST_BUILD_MANIFEST.is_file():
+        raise FileNotFoundError(LATEST_BUILD_MANIFEST)
+    manifest = json.loads(LATEST_BUILD_MANIFEST.read_text(encoding="utf-8"))
+    if manifest.get("version") != APP_VERSION:
+        raise RuntimeError("Latest portable-build manifest has the wrong version")
+    executable = (ROOT / str(manifest["executable"])).resolve()
+    try:
+        executable.relative_to(DIST.resolve())
+    except ValueError as error:
+        raise RuntimeError("Latest portable-build executable escapes dist") from error
+    return executable
 
 
 def main() -> int:
-    executable = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else DEFAULT_EXE
+    executable = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else default_executable()
     if not executable.is_file():
         raise FileNotFoundError(executable)
     expected_bin = executable.parent / "bin"

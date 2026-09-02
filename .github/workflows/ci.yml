@@ -30,18 +30,22 @@ jobs:
           path: .cache/ffmpeg
           key: ffmpeg-win64-lgpl-shared-562ea50b4f2d213e
       - name: Build Windows application
-        run: python scripts/build.py
+        shell: powershell
+        run: .\Build-Portable.ps1
       - name: Smoke-test bundled FFmpeg application
         run: python scripts/smoke_packaged.py
       - name: Export pack with bundled FFmpeg
-        run: >-
-          python scripts/create_validation_fixture.py build/bundled-ffmpeg-validation
-          --ffmpeg-dir "dist/v0.2.2/Choicer Voicer Pack Creator/bin"
+        shell: powershell
+        run: |
+          $manifest = Get-Content "dist/v0.2.3/latest-portable.json" -Raw | ConvertFrom-Json
+          $ffmpegDir = Join-Path $PWD (Join-Path $manifest.application_directory "bin")
+          python scripts/create_validation_fixture.py build/bundled-ffmpeg-validation --ffmpeg-dir "$ffmpegDir"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload self-contained Windows bundle
         uses: actions/upload-artifact@v4
         with:
-          name: Choicer-Voicer-Pack-Creator-0.2.2-Windows-x64
-          path: dist/v0.2.2/Choicer-Voicer-Pack-Creator-0.2.2-Windows-x64.zip
+          name: Choicer-Voicer-Pack-Creator-0.2.3-Windows-x64
+          path: dist/v0.2.3/Choicer-Voicer-Pack-Creator-0.2.3-Windows-x64.zip
           if-no-files-found: error
 
   runtime-validation:

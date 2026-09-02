@@ -56,6 +56,47 @@ dub_characters=["Speaker"]
 - Source development and tests require FFmpeg/FFprobe on `PATH`, built with `libtheora`,
 	`libvorbis`, and `libmp3lame`.
 
+## Build a portable Windows package locally
+
+On a Windows x86-64 computer, double-click `Build-Portable.cmd`. From PowerShell, the equivalent is:
+
+```powershell
+.\Build-Portable.ps1
+```
+
+The build computer needs **64-bit Python 3.12** and an internet connection for the first build. The
+script creates an isolated `.build-venv`, installs the pinned Python packaging dependencies, securely
+downloads and verifies the pinned LGPL FFmpeg runtime, builds the application, and smoke-tests the
+finished executable. It does not require a system FFmpeg installation. Use
+`-ResetBuildEnvironment` if the isolated environment ever needs to be recreated.
+
+The finished outputs are:
+
+```text
+dist/v0.2.3/portable-<build-id>/Choicer Voicer Pack Creator/
+dist/v0.2.3/Choicer-Voicer-Pack-Creator-0.2.3-Windows-x64.zip
+```
+
+The script prints the exact generated application-folder path. Each rebuild uses a new path to avoid
+a Windows executable/DLL cache issue that can affect tools replaced repeatedly at the same location;
+older `portable-*` generation folders can be deleted when no copy of the app is running.
+
+This is a **portable application folder**, not an installer. To use or share it:
+
+1. Extract the complete ZIP; do not run the executable from inside the ZIP viewer.
+2. Keep the extracted directory together, including its `bin` and `_internal` directories.
+3. Run `Choicer Voicer Pack Creator.exe`.
+
+The receiving computer does not need Python, FFmpeg, FFprobe, Godot, administrator access, or an
+installation step. The folder can be moved or deleted as a unit. The app keeps only small
+recent-directory preferences in the current Windows user's normal per-user settings, rather than in
+the application folder. A folder-based package is used instead of a self-extracting single EXE for
+faster startup, simpler antivirus behavior, and replaceable LGPL FFmpeg components.
+
+Community builds are not currently code-signed, so Windows SmartScreen may show an unrecognized-app
+warning. Verify the ZIP's SHA-256 printed by the build script and use only a package from a trusted
+source.
+
 ## Run from source
 
 ```powershell
@@ -172,8 +213,8 @@ with another compatible pair.
 .\.venv\Scripts\python.exe scripts\build.py
 ```
 
-The Windows application folder is written to `dist/v0.2.2/Choicer Voicer Pack Creator/`, with a
-shareable `Choicer-Voicer-Pack-Creator-0.2.2-Windows-x64.zip` beside it. The first build downloads
+The Windows application folder is written below `dist/v0.2.3/portable-<build-id>/`, with a
+shareable `Choicer-Voicer-Pack-Creator-0.2.3-Windows-x64.zip` beside it. The first build downloads
 about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. Startup rejects a
 missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or `libmp3lame`.
 

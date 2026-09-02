@@ -1,25 +1,38 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
+import tomllib
+import uuid
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ffmpeg_bundle import prepare_bundle
 
 ROOT = Path(__file__).resolve().parents[1]
-DIST = ROOT / "dist" / "v0.2.2"
-BUILD = ROOT / "build" / "pyinstaller-v0.2.2"
+with (ROOT / "pyproject.toml").open("rb") as project_file:
+    APP_VERSION = str(tomllib.load(project_file)["project"]["version"])
+DIST = ROOT / "dist" / f"v{APP_VERSION}"
+BUILD = ROOT / "build" / f"pyinstaller-v{APP_VERSION}"
 APP_NAME = "Choicer Voicer Pack Creator"
 FFMPEG_STAGE = ROOT / "build" / "ffmpeg-windows-x64-562ea50b4f2d213e"
+LATEST_BUILD_MANIFEST = DIST / "latest-portable.json"
 
 
 def main() -> int:
-    for path in (DIST, BUILD):
-        if path.exists():
-            shutil.rmtree(path)
+    if BUILD.exists():
+        shutil.rmtree(BUILD)
+    DIST.mkdir(parents=True, exist_ok=True)
+    build_id = (
+        datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        + "-"
+        + uuid.uuid4().hex[:8]
+    )
+    portable_root = DIST / f"portable-{build_id}"
     print("Preparing pinned LGPL FFmpeg runtime…", flush=True)
     prepare_bundle(FFMPEG_STAGE)
     command = [
@@ -33,7 +46,7 @@ def main() -> int:
         "--clean",
         "--noconfirm",
         "--distpath",
-        str(DIST),
+        str(portable_root),
         "--workpath",
         str(BUILD),
         "--specpath",
@@ -52,7 +65,7 @@ def main() -> int:
     if completed.returncode != 0:
         return completed.returncode
 
-    app_dir = DIST / APP_NAME
+    app_dir = portable_root / APP_NAME
     shutil.copytree(FFMPEG_STAGE / "bin", app_dir / "bin", dirs_exist_ok=True)
     shutil.copytree(FFMPEG_STAGE / "licenses", app_dir / "licenses", dirs_exist_ok=True)
     shutil.copy2(FFMPEG_STAGE / "THIRD_PARTY_NOTICES.md", app_dir / "THIRD_PARTY_NOTICES.md")
@@ -91,17 +104,44 @@ def main() -> int:
         if result.returncode != 0:
             print(f"Bundled tool failed to start: {executable}", file=sys.stderr)
             return 1
-    archive = DIST / "Choicer-Voicer-Pack-Creator-0.2.2-Windows-x64.zip"
-    archive.unlink(missing_ok=True)
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as package:
-        for path in sorted(app_dir.rglob("*")):
-            if path.is_file():
-                package.write(path, f"{APP_NAME}/{path.relative_to(app_dir).as_posix()}")
-    with zipfile.ZipFile(archive) as package:
-        bad_member = package.testzip()
-        if bad_member:
-            print(f"Generated ZIP failed CRC validation: {bad_member}", file=sys.stderr)
-            return 1
+    archive = DIST / f"Choicer-Voicer-Pack-Creator-{APP_VERSION}-Windows-x64.zip"
+    partial_archive = DIST / f".{archive.name}.{build_id}.partial"
+    try:
+        with zipfile.ZipFile(
+            partial_archive, "w", zipfile.ZIP_DEFLATED, compresslevel=6
+        ) as package:
+            for path in sorted(app_dir.rglob("*")):
+                if path.is_file():
+                    package.write(
+                        path, f"{APP_NAME}/{path.relative_to(app_dir).as_posix()}"
+                    )
+        with zipfile.ZipFile(partial_archive) as package:
+            bad_member = package.testzip()
+            if bad_member:
+                print(
+                    f"Generated ZIP failed CRC validation: {bad_member}",
+                    file=sys.stderr,
+                )
+                return 1
+        os.replace(partial_archive, archive)
+    finally:
+        partial_archive.unlink(missing_ok=True)
+
+    manifest = {
+        "version": APP_VERSION,
+        "build_id": build_id,
+        "application_directory": app_dir.relative_to(ROOT).as_posix(),
+        "executable": (app_dir / f"{APP_NAME}.exe").relative_to(ROOT).as_posix(),
+        "archive": archive.relative_to(ROOT).as_posix(),
+    }
+    temporary_manifest = DIST / f".latest-portable.{build_id}.json.partial"
+    try:
+        temporary_manifest.write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
+        os.replace(temporary_manifest, LATEST_BUILD_MANIFEST)
+    finally:
+        temporary_manifest.unlink(missing_ok=True)
     print(f"Bundled application with FFmpeg: {app_dir}", flush=True)
     print(f"Distributable ZIP: {archive}", flush=True)
     return 0

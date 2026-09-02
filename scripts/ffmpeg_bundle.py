@@ -5,12 +5,15 @@ import json
 import os
 import shutil
 import sys
+import tomllib
 import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+with (ROOT / "pyproject.toml").open("rb") as project_file:
+    APP_VERSION = str(tomllib.load(project_file)["project"]["version"])
 DEFAULT_MANIFEST = ROOT / "third_party" / "ffmpeg-windows-x64.json"
 DEFAULT_CACHE = ROOT / ".cache" / "ffmpeg"
 BUFFER_SIZE = 1024 * 1024
@@ -59,7 +62,7 @@ def download_archive(manifest: dict[str, Any], cache_dir: Path = DEFAULT_CACHE) 
     partial.unlink(missing_ok=True)
     request = urllib.request.Request(
         str(manifest["archive_url"]),
-        headers={"User-Agent": "ChoicerVoicerPackCreator-build/0.2.2"},
+        headers={"User-Agent": f"ChoicerVoicerPackCreator-build/{APP_VERSION}"},
     )
     try:
         with urllib.request.urlopen(request, timeout=120) as response, partial.open("wb") as output:
