@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=75,<82"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "choicer-voicer-pack-creator"
+version = "0.1.0"
+description = "A visual desktop editor for creating and modifying Choicer Voicer dub packs."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Choicer Voicer Pack Creator contributors" }]
+keywords = ["choicer-voicer", "dub", "voice-acting", "video", "editor"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Win32 (MS Windows)",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Video",
+]
+dependencies = [
+  "PySide6>=6.8,<7",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<8",
+  "pytest-qt>=4.4,<5",
+]
+build = [
+  "pyinstaller>=6.11,<7",
+]
+dev = [
+  "choicer-voicer-pack-creator[test,build]",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+choicer-voicer-pack-creator = "choicer_voicer_pack_creator.app:main"
+
+[project.urls]
+Repository = "https://github.com/throndir2/ChoicerVoicerPackCreator"
+Issues = "https://github.com/throndir2/ChoicerVoicerPackCreator/issues"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+markers = [
+  "integration: requires local FFmpeg and FFprobe executables",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]

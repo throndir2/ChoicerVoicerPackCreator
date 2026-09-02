@@ -1,0 +1,57 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Pack Creator: Run",
+      "type": "shell",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "choicer_voicer_pack_creator"],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Pack Creator: Test",
+      "type": "shell",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "pytest", "-ra"],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Pack Creator: Lint",
+      "type": "shell",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "ruff", "check", "."],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Pack Creator: Build Windows App",
+      "type": "shell",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": ["scripts\\build.py"],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Pack Creator: External Validate",
+      "type": "shell",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": [
+        "scripts\\validate_external.py",
+        "${input:packPath}",
+        "--require-godot",
+        "--require-xiph"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "packPath",
+      "type": "promptString",
+      "description": "Absolute path to the exported pack folder"
+    }
+  ]
+}
