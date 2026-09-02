@@ -3,7 +3,7 @@ from __future__ import annotations
 import getpass
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QSignalBlocker, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QSettings, QSignalBlocker, Qt, QThread, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -44,27 +43,34 @@ from choicer_voicer_pack_creator.exporter import (
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.pack_io import PackImporter
-from choicer_voicer_pack_creator.project_io import ProjectStore
+from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
+from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
 
 
 class WaveformWorker(QThread):
-    completed = Signal(str, float, list)
-    failed = Signal(str, str)
+    completed = Signal(int, str, float, list)
+    failed = Signal(int, str, str)
 
-    def __init__(self, media: MediaTools, path: str, duration: float) -> None:
+    def __init__(self, media: MediaTools, request_id: int, path: str, duration: float) -> None:
         super().__init__()
         self.media = media
+        self.request_id = request_id
         self.path = path
         self.duration = duration
 
     def run(self) -> None:
         try:
-            info = self.media.probe(Path(self.path))
-            peaks = self.media.waveform_peaks(Path(self.path), info.duration)
-            self.completed.emit(self.path, info.duration, peaks)
+            if self.isInterruptionRequested():
+                return
+            peaks = self.media.waveform_peaks(
+                Path(self.path), self.duration, cancelled=self.isInterruptionRequested
+            )
+            if self.isInterruptionRequested():
+                return
+            self.completed.emit(self.request_id, self.path, self.duration, peaks)
         except Exception as error:
-            self.failed.emit(self.path, str(error))
+            self.failed.emit(self.request_id, self.path, str(error))
 
 
 class ExportWorker(QThread):
@@ -99,12 +105,22 @@ def format_time(seconds: float) -> str:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, media: MediaTools, initial_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        media: MediaTools,
+        initial_path: Path | None = None,
+        *,
+        settings: QSettings | None = None,
+        recovery_store: RecoveryStore | None = None,
+    ) -> None:
         super().__init__()
         self.media = media
         self.importer = PackImporter(media)
         self.exporter = PackExporter(media)
-        self.settings = QSettings("ChoicerVoicerCommunity", "ChoicerVoicerPackCreator")
+        self.settings = settings or QSettings(
+            "ChoicerVoicerCommunity", "ChoicerVoicerPackCreator"
+        )
+        self.recovery_store = recovery_store
         self.project = PackProject(authors=[getpass.getuser()])
         self.project_path: Path | None = None
         self.selected_segment_id = ""
@@ -113,7 +129,19 @@ class MainWindow(QMainWindow):
         self._slider_dragging = False
         self._preview_end: float | None = None
         self._waveform_workers: list[WaveformWorker] = []
+        self._waveform_request_id = 0
         self._export_worker: ExportWorker | None = None
+        self._restoring_layout = False
+        self._range_edit_record: tuple[str, float, float, bool] | None = None
+        self._discard_recovery_on_transition = False
+        self._recovery_timer = QTimer(self)
+        self._recovery_timer.setSingleShot(True)
+        self._recovery_timer.setInterval(750)
+        self._recovery_timer.timeout.connect(self._write_recovery_snapshot)
+        self._layout_save_timer = QTimer(self)
+        self._layout_save_timer.setSingleShot(True)
+        self._layout_save_timer.setInterval(250)
+        self._layout_save_timer.timeout.connect(self._save_layout_state)
 
         self.setWindowTitle("Choicer Voicer Pack Creator")
         self.resize(1500, 900)
@@ -122,9 +150,12 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._connect_player()
         self._set_project(self.project, None, mark_dirty=False)
+        QTimer.singleShot(0, self._restore_layout_state)
 
         if initial_path:
-            QTimer.singleShot(0, lambda: self.open_path(initial_path))
+            QTimer.singleShot(0, lambda: self._open_initial_path(initial_path))
+        elif self.recovery_store:
+            QTimer.singleShot(0, self._offer_recovery)
 
     # ---------- UI construction ----------
 
@@ -144,6 +175,8 @@ class MainWindow(QMainWindow):
         self.action_save_as = QAction("Save Project As…", self)
         self.action_save_as.setShortcut(QKeySequence.StandardKey.SaveAs)
         self.action_save_as.triggered.connect(lambda: self.save_project(save_as=True))
+        self.action_restore_previous = QAction("Restore Previous Save…", self)
+        self.action_restore_previous.triggered.connect(self.restore_previous_save)
         self.action_export = QAction("Export Pack + ZIP…", self)
         self.action_export.setShortcut(QKeySequence("Ctrl+E"))
         self.action_export.triggered.connect(self.export_pack)
@@ -166,7 +199,9 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addActions([self.action_new, self.action_open, self.action_import])
         file_menu.addSeparator()
-        file_menu.addActions([self.action_save, self.action_save_as, self.action_export])
+        file_menu.addActions([self.action_save, self.action_save_as, self.action_restore_previous])
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_export)
         file_menu.addSeparator()
         file_menu.addAction(self.action_exit)
         edit_menu = self.menuBar().addMenu("&Segments")
@@ -233,11 +268,25 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(transport)
 
         self.timeline = TimelineWidget(left)
+        self.timeline.setToolTip(
+            "Drag IN/OUT handles to trim, drag inside the highlighted waveform range to move it, "
+            "or drag across empty waveform space to define a range. Segment blocks can also be "
+            "moved by their center or trimmed by their edges."
+        )
         self.timeline.seek_requested.connect(self.seek)
         self.timeline.segment_selected.connect(self.select_segment)
-        self.timeline.boundary_changed.connect(self._timeline_boundary_changed)
+        self.timeline.range_edit_started.connect(self._timeline_range_edit_started)
+        self.timeline.range_changed.connect(self._timeline_range_changed)
+        self.timeline.range_edit_finished.connect(self._timeline_range_edit_finished)
         self.timeline.zoom_changed.connect(self._timeline_zoom_changed)
         left_layout.addWidget(self.timeline)
+        timeline_hint = QLabel(
+            "Drag the waveform highlight or its IN/OUT handles to edit a range. "
+            "Drag a segment block to move it, or drag its edges to trim."
+        )
+        timeline_hint.setObjectName("muted")
+        timeline_hint.setWordWrap(True)
+        left_layout.addWidget(timeline_hint)
 
         cutter = QHBoxLayout()
         self.mark_in_spin = self._time_spin()
@@ -283,8 +332,14 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(6, 0, 0, 0)
         right_layout.setSpacing(8)
 
-        project_group = QGroupBox("PACK DETAILS", right)
-        project_form = QFormLayout(project_group)
+        self.inspector_splitter = QSplitter(Qt.Orientation.Vertical, right)
+        self.inspector_splitter.setChildrenCollapsible(False)
+        self.inspector_splitter.setHandleWidth(7)
+        right_layout.addWidget(self.inspector_splitter, 1)
+
+        self.project_section = CollapsibleSection("PACK DETAILS", self.inspector_splitter)
+        project_content = QWidget(self.project_section)
+        project_form = QFormLayout(project_content)
         self.title_edit = QLineEdit()
         self.title_edit.editingFinished.connect(self._pack_details_changed)
         self.title_edit.textEdited.connect(self._pack_details_changed)
@@ -340,10 +395,13 @@ class MainWindow(QMainWindow):
         self.preserve_video_check = QCheckBox("Preserve imported compatible OGV without re-encoding")
         self.preserve_video_check.toggled.connect(self._pack_details_changed)
         project_form.addRow("Video mode", self.preserve_video_check)
-        right_layout.addWidget(project_group)
+        self.project_section.set_content(project_content, scrollable=True)
+        self.inspector_splitter.addWidget(self.project_section)
 
-        segment_group = QGroupBox("SEGMENTS", right)
-        segment_layout = QVBoxLayout(segment_group)
+        self.segments_section = CollapsibleSection("SEGMENTS", self.inspector_splitter)
+        segment_content = QWidget(self.segments_section)
+        segment_layout = QVBoxLayout(segment_content)
+        segment_layout.setContentsMargins(0, 0, 0, 0)
         self.segment_table = QTableWidget(0, 6)
         self.segment_table.setHorizontalHeaderLabels(
             ["#", "In", "Out", "Speaker(s)", "Line", "Audio"]
@@ -376,10 +434,12 @@ class MainWindow(QMainWindow):
             row_buttons.addWidget(button)
         row_buttons.addStretch()
         segment_layout.addLayout(row_buttons)
-        right_layout.addWidget(segment_group, 1)
+        self.segments_section.set_content(segment_content)
+        self.inspector_splitter.addWidget(self.segments_section)
 
-        editor_group = QGroupBox("SELECTED SEGMENT", right)
-        editor_form = QFormLayout(editor_group)
+        self.selected_section = CollapsibleSection("SELECTED SEGMENT", self.inspector_splitter)
+        editor_content = QWidget(self.selected_section)
+        editor_form = QFormLayout(editor_content)
         self.speakers_edit = QLineEdit()
         self.speakers_edit.setPlaceholderText("Speaker, Second Speaker")
         self.speakers_edit.editingFinished.connect(self._selected_speakers_changed)
@@ -391,7 +451,7 @@ class MainWindow(QMainWindow):
         self.caption_edit.textChanged.connect(self._selected_caption_changed)
         editor_form.addRow("Line", self.caption_edit)
         self.audio_mode_combo = QComboBox()
-        self.audio_mode_combo.addItem("Extract from source video", "video")
+        self.audio_mode_combo.addItem("Extract from source video (rebuilt on export)", "video")
         self.audio_mode_combo.addItem("Preserve / use an audio file", "file")
         self.audio_mode_combo.currentIndexChanged.connect(self._audio_mode_changed)
         editor_form.addRow("Prompt audio", self.audio_mode_combo)
@@ -403,7 +463,26 @@ class MainWindow(QMainWindow):
             self.choose_segment_image, self.clear_segment_image
         )
         editor_form.addRow("Still image", image_row)
-        right_layout.addWidget(editor_group)
+        self.segment_audio_help = QLabel()
+        self.segment_audio_help.setObjectName("muted")
+        self.segment_audio_help.setWordWrap(True)
+        editor_form.addRow("", self.segment_audio_help)
+        self.selected_section.set_content(editor_content, scrollable=True)
+        self.inspector_splitter.addWidget(self.selected_section)
+
+        self.inspector_sections = (
+            self.project_section,
+            self.segments_section,
+            self.selected_section,
+        )
+        for index, section in enumerate(self.inspector_sections):
+            section.collapsed_changed.connect(
+                lambda collapsed, section_index=index: self._section_collapsed_changed(
+                    section_index, collapsed
+                )
+            )
+            self.inspector_splitter.setStretchFactor(index, 1 if index == 1 else 0)
+        self.inspector_splitter.splitterMoved.connect(self._schedule_layout_save)
 
         self.validation_label = QLabel()
         self.validation_label.setWordWrap(True)
@@ -414,7 +493,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 7)
         splitter.setStretchFactor(1, 3)
-        QTimer.singleShot(0, lambda: splitter.setSizes([1030, 470]))
+        splitter.splitterMoved.connect(self._schedule_layout_save)
 
         progress_row = QHBoxLayout()
         self.progress_label = QLabel("Ready")
@@ -454,6 +533,95 @@ class MainWindow(QMainWindow):
         layout.addWidget(clear_button)
         return label, container
 
+    def _setting_is_true(self, key: str) -> bool:
+        value = self.settings.value(key, False)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().casefold() in {"1", "true", "yes", "on"}
+
+    def _restore_layout_state(self) -> None:
+        self._restoring_layout = True
+        try:
+            collapse_keys = (
+                "layout/packDetailsCollapsedV1",
+                "layout/segmentsCollapsedV1",
+                "layout/selectedSegmentCollapsedV1",
+            )
+            height_keys = (
+                "layout/packDetailsExpandedHeightV1",
+                "layout/segmentsExpandedHeightV1",
+                "layout/selectedSegmentExpandedHeightV1",
+            )
+            for section, key, height_key in zip(
+                self.inspector_sections, collapse_keys, height_keys, strict=True
+            ):
+                try:
+                    saved_height = int(
+                        self.settings.value(height_key, section.last_expanded_height)
+                    )
+                except (TypeError, ValueError):
+                    saved_height = section.last_expanded_height
+                section.set_collapsed(self._setting_is_true(key))
+                section.set_last_expanded_height(min(10_000, saved_height))
+
+            editor_state = self.settings.value("layout/editorSplitterV1")
+            if editor_state is None or not self.editor_splitter.restoreState(editor_state):
+                self.editor_splitter.setSizes([1030, 470])
+
+            inspector_state = self.settings.value("layout/inspectorSplitterV1")
+            if inspector_state is None or not self.inspector_splitter.restoreState(
+                inspector_state
+            ):
+                self.inspector_splitter.setSizes([285, 355, 235])
+        finally:
+            self._restoring_layout = False
+
+    def _schedule_layout_save(self, *_args: object) -> None:
+        if not self._restoring_layout:
+            self._layout_save_timer.start()
+
+    def _save_layout_state(self) -> None:
+        if self._restoring_layout:
+            return
+        self.settings.setValue("layout/editorSplitterV1", self.editor_splitter.saveState())
+        self.settings.setValue(
+            "layout/inspectorSplitterV1", self.inspector_splitter.saveState()
+        )
+        collapse_keys = (
+            "layout/packDetailsCollapsedV1",
+            "layout/segmentsCollapsedV1",
+            "layout/selectedSegmentCollapsedV1",
+        )
+        height_keys = (
+            "layout/packDetailsExpandedHeightV1",
+            "layout/segmentsExpandedHeightV1",
+            "layout/selectedSegmentExpandedHeightV1",
+        )
+        sizes = self.inspector_splitter.sizes()
+        for index, (section, key, height_key) in enumerate(
+            zip(self.inspector_sections, collapse_keys, height_keys, strict=True)
+        ):
+            if not section.is_collapsed and index < len(sizes):
+                section.set_last_expanded_height(sizes[index])
+            self.settings.setValue(key, section.is_collapsed)
+            self.settings.setValue(height_key, section.last_expanded_height)
+        self.settings.sync()
+
+    def _section_collapsed_changed(self, index: int, collapsed: bool) -> None:
+        if not collapsed:
+            QTimer.singleShot(0, lambda: self._restore_section_height(index))
+        self._schedule_layout_save()
+
+    def _restore_section_height(self, index: int) -> None:
+        if not 0 <= index < len(self.inspector_sections):
+            return
+        sizes = self.inspector_splitter.sizes()
+        if len(sizes) != len(self.inspector_sections):
+            return
+        section = self.inspector_sections[index]
+        sizes[index] = max(120, section.last_expanded_height)
+        self.inspector_splitter.setSizes(sizes)
+
     def _connect_player(self) -> None:
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
@@ -476,6 +644,120 @@ class MainWindow(QMainWindow):
         self.prompt_audio_output.setVolume(volume)
 
     # ---------- Project lifecycle ----------
+
+    def _write_recovery_snapshot(self) -> None:
+        if not self.recovery_store or not self.dirty:
+            return
+        try:
+            self.recovery_store.save(self.project, self.project_path)
+        except Exception as error:
+            self.statusBar().showMessage(f"Could not update recovery snapshot: {error}")
+
+    def _clear_recovery_snapshot(self) -> None:
+        self._recovery_timer.stop()
+        self._discard_recovery_on_transition = False
+        if not self.recovery_store:
+            return
+        try:
+            self.recovery_store.clear()
+        except OSError as error:
+            self.statusBar().showMessage(f"Could not remove recovery snapshot: {error}")
+
+    def _open_initial_path(self, initial_path: Path) -> None:
+        self.open_path(initial_path)
+        self._offer_recovery()
+
+    def _offer_recovery(self) -> None:
+        if not self.recovery_store:
+            return
+        try:
+            record = self.recovery_store.load()
+        except Exception as error:
+            QMessageBox.warning(
+                self,
+                "Recovery snapshot could not be read",
+                f"An automatic recovery file exists but is not readable. It has been left "
+                f"untouched for manual inspection.\n\n{error}",
+            )
+            return
+        if record is None:
+            return
+        if self.recovery_store.is_redundant(record):
+            self._clear_recovery_snapshot()
+            return
+        original = str(record.project_path) if record.project_path else "an unsaved new project"
+        saved_project_changed = self.recovery_store.saved_project_changed(record)
+        conflict_note = (
+            "\n\nThe saved project changed after this snapshot was recorded. No is the safer "
+            "choice and keeps the newer saved project; choose Yes only to inspect the snapshot "
+            "as unsaved edits."
+            if saved_project_changed
+            else ""
+        )
+        answer = QMessageBox.question(
+            self,
+            "Recover unsaved project changes?",
+            f"The editor found automatic recovery data for {original}.\n\n"
+            f"Snapshot time: {record.created_at_utc or 'unknown'}\n\n"
+            "Choose Yes to recover the unsaved edits. The saved project is not overwritten; "
+            "after recovery, use Save to replace it or Save As to preserve both versions. "
+            f"Choose No to discard this recovery snapshot.{conflict_note}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            (
+                QMessageBox.StandardButton.No
+                if saved_project_changed
+                else QMessageBox.StandardButton.Yes
+            ),
+        )
+        if answer == QMessageBox.StandardButton.No:
+            self._clear_recovery_snapshot()
+            return
+        self._set_project(record.project, record.project_path, mark_dirty=True)
+        if self.project.segments:
+            self.select_segment(self.project.segments[0].id)
+        self.statusBar().showMessage(
+            "Recovered unsaved edits. Use Save As to preserve the currently saved project."
+        )
+
+    def restore_previous_save(self) -> None:
+        if self.project_path is None:
+            QMessageBox.information(
+                self,
+                "No saved project",
+                "Save this project first. A recoverable previous version is created on the next Save.",
+            )
+            return
+        if not self._maybe_save():
+            return
+        previous = ProjectStore.previous_path(self.project_path)
+        if not previous.is_file():
+            QMessageBox.information(
+                self,
+                "No previous save",
+                "No previous saved version exists yet. Saving over this project once will create one.",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Restore previous save?",
+            "Load the previous saved version as unsaved edits? The current saved project will "
+            "remain untouched until you choose Save. Use Save As afterward to preserve both versions.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            project = ProjectStore.load(previous)
+        except Exception as error:
+            QMessageBox.critical(self, "Could not restore previous save", str(error))
+            return
+        self._set_project(project, self.project_path, mark_dirty=True)
+        if project.segments:
+            self.select_segment(project.segments[0].id)
+        self.statusBar().showMessage(
+            "Previous save loaded as unsaved edits. Use Save or Save As when ready."
+        )
 
     def new_from_video(self) -> None:
         if not self._maybe_save():
@@ -530,6 +812,28 @@ class MainWindow(QMainWindow):
                 self._set_project(project, path.resolve(), mark_dirty=False)
                 self.settings.setValue("lastProjectDir", str(path.resolve().parent))
         except Exception as error:
+            previous = ProjectStore.previous_path(path) if not path.is_dir() else None
+            if previous and previous.is_file():
+                answer = QMessageBox.question(
+                    self,
+                    "Current project could not be opened",
+                    f"{error}\n\nA previous saved version is available. Load it as unsaved "
+                    "recovery data? The current file will not be overwritten unless Save is chosen.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if answer == QMessageBox.StandardButton.Yes:
+                    try:
+                        recovered = ProjectStore.load(previous)
+                        self._set_project(recovered, path.resolve(), mark_dirty=True)
+                        self.statusBar().showMessage(
+                            "Loaded the previous save as unsaved edits. Use Save As to preserve both files."
+                        )
+                        return
+                    except Exception as previous_error:
+                        error = RuntimeError(
+                            f"Current project: {error}\n\nPrevious save: {previous_error}"
+                        )
             QMessageBox.critical(self, "Could not open project", str(error))
 
     def import_pack(self) -> None:
@@ -559,6 +863,7 @@ class MainWindow(QMainWindow):
 
     def save_project(self, save_as: bool = False) -> bool:
         self._commit_editors()
+        original_project_path = self.project_path
         destination = self.project_path
         if destination is None or save_as:
             path, _ = QFileDialog.getSaveFileName(
@@ -575,6 +880,7 @@ class MainWindow(QMainWindow):
             destination = Path(path)
             if not destination.name.casefold().endswith(".cvpack.json"):
                 destination = destination.with_name(destination.name + ".cvpack.json")
+        replacing_existing = destination.is_file()
         try:
             ProjectStore.save(self.project, destination)
         except Exception as error:
@@ -582,8 +888,24 @@ class MainWindow(QMainWindow):
             return False
         self.project_path = destination.resolve()
         self.settings.setValue("lastProjectDir", str(self.project_path.parent))
+        self._clear_recovery_snapshot()
         self._set_dirty(False)
-        self.statusBar().showMessage(f"Saved project to {self.project_path}")
+        saved_as_distinct_copy = (
+            save_as
+            and original_project_path is not None
+            and original_project_path.resolve() != self.project_path
+        )
+        if saved_as_distinct_copy:
+            suffix = " A previous target version was also retained." if replacing_existing else ""
+            self.statusBar().showMessage(
+                f"Saved a new project copy to {self.project_path}; the original was not changed.{suffix}"
+            )
+        elif replacing_existing:
+            self.statusBar().showMessage(
+                f"Saved project to {self.project_path} · previous save retained for recovery"
+            )
+        else:
+            self.statusBar().showMessage(f"Saved project to {self.project_path}")
         return True
 
     def _set_project(
@@ -592,6 +914,9 @@ class MainWindow(QMainWindow):
         project_path: Path | None,
         mark_dirty: bool,
     ) -> None:
+        if self._discard_recovery_on_transition:
+            self._clear_recovery_snapshot()
+        self._cancel_waveform_workers()
         self.player.stop() if hasattr(self, "player") else None
         self.project = project
         self.project.sort_segments()
@@ -637,21 +962,36 @@ class MainWindow(QMainWindow):
     # ---------- Media and timeline ----------
 
     def _start_waveform(self, path: str, duration: float) -> None:
-        worker = WaveformWorker(self.media, path, duration)
+        self._cancel_waveform_workers()
+        self._waveform_request_id += 1
+        request_id = self._waveform_request_id
+        worker = WaveformWorker(self.media, request_id, path, duration)
         self._waveform_workers.append(worker)
         worker.completed.connect(self._waveform_ready)
         worker.failed.connect(self._waveform_failed)
-        worker.finished.connect(lambda: self._retire_waveform_worker(worker))
+        worker.finished.connect(self._retire_waveform_worker)
         self.progress_label.setText("Reading waveform…")
         worker.start()
 
-    def _retire_waveform_worker(self, worker: WaveformWorker) -> None:
+    def _cancel_waveform_workers(self) -> None:
+        self._waveform_request_id += 1
+        for worker in self._waveform_workers:
+            worker.requestInterruption()
+
+    @Slot()
+    def _retire_waveform_worker(self) -> None:
+        worker = self.sender()
+        if not isinstance(worker, WaveformWorker):
+            return
         if worker in self._waveform_workers:
             self._waveform_workers.remove(worker)
         worker.deleteLater()
 
-    def _waveform_ready(self, path: str, duration: float, peaks: list[float]) -> None:
-        if path == self.project.video_path:
+    @Slot(int, str, float, list)
+    def _waveform_ready(
+        self, request_id: int, path: str, duration: float, peaks: list[float]
+    ) -> None:
+        if request_id == self._waveform_request_id and path == self.project.video_path:
             self.project.video_duration = duration
             self.timeline.set_duration(duration)
             self.mark_in_spin.setMaximum(duration)
@@ -659,8 +999,9 @@ class MainWindow(QMainWindow):
             self.timeline.set_waveform(peaks)
             self.progress_label.setText(f"Waveform ready · {len(peaks):,} peaks")
 
-    def _waveform_failed(self, path: str, message: str) -> None:
-        if path == self.project.video_path:
+    @Slot(int, str, str)
+    def _waveform_failed(self, request_id: int, path: str, message: str) -> None:
+        if request_id == self._waveform_request_id and path == self.project.video_path:
             self.progress_label.setText("Waveform unavailable")
             self.statusBar().showMessage(message)
 
@@ -769,24 +1110,16 @@ class MainWindow(QMainWindow):
         if end - start < 0.05:
             QMessageBox.warning(self, "Invalid range", "A segment must be at least 0.05 seconds long.")
             return
+        original_start, original_end = segment.start, segment.end
+        was_dirty = self.dirty
         segment.start, segment.end = start, end
-        if segment.audio_mode == "file":
-            answer = QMessageBox.question(
-                self,
-                "Keep imported audio?",
-                "This segment currently preserves an audio file. Keep that audio while changing its "
-                "timeline position? Choose No to regenerate it from the video.",
-            )
-            if answer == QMessageBox.StandardButton.No:
-                segment.audio_mode = "video"
-                segment.audio_path = ""
-                segment.source_range_known = True
-        else:
-            segment.source_range_known = True
-        self.project.sort_segments()
-        self._set_dirty(True)
-        self._refresh_table(segment.id)
-        self.timeline.set_segments(self.project.segments)
+        self._complete_segment_range_edit(
+            segment,
+            original_start,
+            original_end,
+            was_dirty,
+            review_file_audio=True,
+        )
 
     def split_segment(self) -> None:
         segment = self.selected_segment()
@@ -799,7 +1132,7 @@ class MainWindow(QMainWindow):
                 "Set source range first",
                 "A preserved recording cannot be split safely because existing packs do not store "
                 "its original source-video cut. Mark the exact spoken In/Out range, click Apply "
-                "Range, and choose No when asked whether to keep imported audio. Then split it.",
+                "Range, and choose Yes when asked whether to regenerate prompt audio. Then split it.",
             )
             return
         split_at = self.current_position()
@@ -882,26 +1215,168 @@ class MainWindow(QMainWindow):
                 self.mark_out_spin.setValue(segment.end)
             finally:
                 self._syncing = False
-            self.timeline.set_marks(segment.start, segment.end)
+            self.timeline.set_marks(segment.start, segment.end, segment.id)
 
     def selected_segment(self) -> Segment | None:
         return self.project.segment_by_id(self.selected_segment_id)
 
-    def _timeline_boundary_changed(self, segment_id: str, start: float, end: float) -> None:
-        segment = self.project.segment_by_id(segment_id)
-        if not segment:
-            return
-        segment.start, segment.end = start, end
-        self.selected_segment_id = segment_id
+    def _timeline_range_edit_started(
+        self, segment_id: str, original_start: float, original_end: float
+    ) -> None:
+        self._range_edit_record = (
+            segment_id,
+            original_start,
+            original_end,
+            self.dirty,
+        )
+
+    def _timeline_range_changed(self, segment_id: str, start: float, end: float) -> None:
         self._syncing = True
         try:
             self.mark_in_spin.setValue(start)
             self.mark_out_spin.setValue(end)
         finally:
             self._syncing = False
-        self.timeline.set_marks(start, end)
+        self.timeline.set_marks(start, end, segment_id)
+        if not segment_id:
+            return
+        segment = self.project.segment_by_id(segment_id)
+        if not segment:
+            return
+        segment.start, segment.end = start, end
+        self.selected_segment_id = segment_id
         self._set_dirty(True)
-        self._refresh_table(segment_id)
+        row = self._row_for_segment(segment_id)
+        if row >= 0:
+            self.segment_table.item(row, 1).setText(format_time(start))
+            self.segment_table.item(row, 2).setText(format_time(end))
+        self._refresh_validation_label()
+
+    def _timeline_range_edit_finished(
+        self,
+        segment_id: str,
+        original_start: float,
+        original_end: float,
+        final_start: float,
+        final_end: float,
+    ) -> None:
+        record = self._range_edit_record
+        self._range_edit_record = None
+        was_dirty = record[3] if record and record[0] == segment_id else self.dirty
+        if not segment_id:
+            self.statusBar().showMessage(
+                f"Range set to {final_start:.3f}–{final_end:.3f}s. Add a segment when ready."
+            )
+            return
+        segment = self.project.segment_by_id(segment_id)
+        if not segment:
+            return
+        segment.start, segment.end = final_start, final_end
+        self._complete_segment_range_edit(
+            segment,
+            original_start,
+            original_end,
+            was_dirty,
+            review_file_audio=(
+                abs(final_start - original_start) > 0.0005
+                or abs(final_end - original_end) > 0.0005
+            ),
+        )
+
+    def _complete_segment_range_edit(
+        self,
+        segment: Segment,
+        original_start: float,
+        original_end: float,
+        was_dirty: bool,
+        *,
+        review_file_audio: bool,
+    ) -> bool:
+        changed = (
+            abs(segment.start - original_start) > 0.0005
+            or abs(segment.end - original_end) > 0.0005
+        )
+        if not changed and not review_file_audio:
+            self._restore_dirty_after_canceled_range(was_dirty)
+            self._refresh_table(segment.id)
+            return False
+
+        audio_result = "preserve" if segment.audio_mode == "file" else "regenerate"
+        if segment.audio_mode == "file" and review_file_audio:
+            if not self.project.video_path or not Path(self.project.video_path).is_file():
+                QMessageBox.warning(
+                    self,
+                    "Source video unavailable",
+                    "The range changed, but the source video is unavailable, so the preserved "
+                    "prompt audio cannot be regenerated yet. The existing file will remain "
+                    "unchanged. Relink the video before switching this prompt to source audio.",
+                )
+                audio_result = "preserve"
+            else:
+                answer = QMessageBox.question(
+                    self,
+                    "Update prompt audio for this range?",
+                    f"The range changed from {original_start:.3f}–{original_end:.3f}s to "
+                    f"{segment.start:.3f}–{segment.end:.3f}s, but this segment currently uses "
+                    "a preserved audio file.\n\n"
+                    "Yes — regenerate the prompt MP3 from the source video on the next export.\n"
+                    "No — keep the existing recording unchanged; Out will match its decoded duration.\n"
+                    "Cancel — undo this range edit.",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No
+                    | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if answer == QMessageBox.StandardButton.Cancel:
+                    segment.start, segment.end = original_start, original_end
+                    self._restore_dirty_after_canceled_range(was_dirty)
+                    self.project.sort_segments()
+                    self._refresh_table(segment.id)
+                    self.select_segment(segment.id)
+                    self.statusBar().showMessage("Range edit undone; preserved audio was not changed.")
+                    return False
+                audio_result = (
+                    "regenerate" if answer == QMessageBox.StandardButton.Yes else "preserve"
+                )
+
+        if segment.audio_mode == "video" or audio_result == "regenerate":
+            segment.audio_mode = "video"
+            segment.audio_path = ""
+            segment.source_range_known = True
+        elif audio_result == "preserve" and segment.audio_path:
+            try:
+                segment.end = round(
+                    segment.start + self.media.probe_audio_duration(Path(segment.audio_path)),
+                    3,
+                )
+            except Exception as error:
+                QMessageBox.warning(
+                    self,
+                    "Could not measure preserved audio",
+                    f"The recording remains selected, but its exact duration could not be read. "
+                    f"The edited Out time was retained.\n\n{error}",
+                )
+
+        self.project.sort_segments()
+        self._set_dirty(True)
+        self._refresh_table(segment.id)
+        self.select_segment(segment.id)
+        if segment.audio_mode == "video":
+            self.statusBar().showMessage(
+                "Segment range updated. Its prompt MP3 will be regenerated on the next export."
+            )
+        else:
+            self.statusBar().showMessage(
+                "Segment range updated; the selected prompt audio file will remain unchanged."
+            )
+        return True
+
+    def _restore_dirty_after_canceled_range(self, was_dirty: bool) -> None:
+        self._set_dirty(was_dirty)
+        if was_dirty:
+            self._recovery_timer.start()
+        else:
+            self._clear_recovery_snapshot()
 
     def _refresh_table(self, selected_id: str | None = None) -> None:
         selected = selected_id if selected_id is not None else self.selected_segment_id
@@ -966,6 +1441,9 @@ class MainWindow(QMainWindow):
                 self.caption_edit.clear()
                 self.segment_audio_label.setText("None")
                 self.segment_image_label.setText("Generated from video")
+                self.segment_audio_help.setText(
+                    "Select a segment to edit its range, prompt source, and still image."
+                )
                 return
             self.speakers_edit.setText(", ".join(segment.characters))
             self.caption_edit.setPlainText(segment.caption)
@@ -979,6 +1457,16 @@ class MainWindow(QMainWindow):
                 Path(segment.image_path).name if segment.image_path else "Generated from video"
             )
             self.segment_image_label.setToolTip(segment.image_path)
+            if segment.audio_mode == "video":
+                self.segment_audio_help.setText(
+                    "Range edits automatically rebuild this prompt MP3 from the source video "
+                    "during the next export."
+                )
+            else:
+                self.segment_audio_help.setText(
+                    "This audio file is preserved unchanged. Editing the range will ask whether "
+                    "to keep it or regenerate from the source video."
+                )
         finally:
             self._syncing = False
 
@@ -1167,6 +1655,7 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         self.player.stop()
+        self._cancel_waveform_workers()
         self.player.setSource(QUrl())
         self.project.video_path = ""
         self.project.video_duration = 0.0
@@ -1244,7 +1733,7 @@ class MainWindow(QMainWindow):
                 "Source range is unknown",
                 "Existing packs store the playback timestamp and padded recording, not the original "
                 "spoken cut. Mark the exact source-video In/Out range, click Apply Range, and "
-                "choose No when asked whether to keep imported audio.",
+                "choose Yes when asked whether to regenerate prompt audio.",
             )
             self._sync_selected_editor()
             return
@@ -1331,6 +1820,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         worker.start()
 
+    @Slot(object)
     def _export_completed(self, value: object) -> None:
         self._set_busy(False, "Export complete")
         self._export_worker = None
@@ -1350,6 +1840,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Exported {result.pack_path.name}")
         QMessageBox.information(self, "Pack exported", message)
 
+    @Slot(str)
     def _export_failed(self, message: str) -> None:
         self._set_busy(False, "Export failed")
         self._export_worker = None
@@ -1366,6 +1857,7 @@ class MainWindow(QMainWindow):
             self.action_import,
             self.action_save,
             self.action_save_as,
+            self.action_restore_previous,
             self.action_export,
             self.action_add,
             self.action_split,
@@ -1394,12 +1886,16 @@ class MainWindow(QMainWindow):
 
     def _set_dirty(self, dirty: bool) -> None:
         self.dirty = dirty
+        if dirty and self.recovery_store:
+            self._discard_recovery_on_transition = False
+            self._recovery_timer.start()
         name = self.project_path.name if self.project_path else self.project.title
         self.setWindowTitle(
             f"{'*' if dirty else ''}{name} — Choicer Voicer Pack Creator"
         )
 
     def _maybe_save(self) -> bool:
+        self._discard_recovery_on_transition = False
         self._commit_editors()
         if not self.dirty:
             return True
@@ -1416,6 +1912,7 @@ class MainWindow(QMainWindow):
             return False
         if answer == QMessageBox.StandardButton.Save:
             return self.save_project()
+        self._discard_recovery_on_transition = True
         return True
 
     def _show_import_warnings(self, warnings: list[str]) -> None:
@@ -1451,8 +1948,19 @@ class MainWindow(QMainWindow):
         if not self._maybe_save():
             event.ignore()
             return
+        self._save_layout_state()
         self.player.stop()
         for worker in self._waveform_workers:
             worker.requestInterruption()
-            worker.wait(2000)
+        for worker in self._waveform_workers:
+            if not worker.wait(3500):
+                QMessageBox.warning(
+                    self,
+                    "Waveform analysis is stopping",
+                    "The source-media analyzer is still shutting down. Wait a moment, then close again.",
+                )
+                event.ignore()
+                return
+        if self._discard_recovery_on_transition:
+            self._clear_recovery_snapshot()
         event.accept()

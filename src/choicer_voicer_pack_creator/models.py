@@ -209,6 +209,8 @@ class PackProject:
         segments_value = value.get("segments", [])
         if not isinstance(segments_value, list):
             raise ValueError("Project segments must be an array")
+        if not all(isinstance(item, dict) for item in segments_value):
+            raise ValueError("Every project segment must be a JSON object")
         import_warnings = value.get("import_warnings", [])
         if not isinstance(import_warnings, list):
             import_warnings = [str(import_warnings)] if import_warnings else []

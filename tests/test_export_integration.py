@@ -73,6 +73,13 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
     assert metadata["dub_timestamps"] == [0.1]
     assert metadata["caption"] == "First line"
 
+    original_duration = media.probe_audio_duration(result.pack_path / "001_Alice.mp3")
+    project.title = "Retimed Integration Pack"
+    project.segments[0].end = 0.95
+    retimed = PackExporter(media).export(project, tmp_path / "retimed-output")
+    retimed_duration = media.probe_audio_duration(retimed.pack_path / "001_Alice.mp3")
+    assert retimed_duration > original_duration + 0.15
+
     imported = PackImporter(media).import_folder(result.pack_path).project
     assert imported.title == "Integration Pack"
     assert len(imported.segments) == 2

@@ -289,6 +289,7 @@ class MediaTools:
         duration: float,
         target_peaks: int = 2400,
         sample_rate: int = 2000,
+        cancelled: Callable[[], bool] | None = None,
     ) -> list[float]:
         if duration <= 0:
             return []
@@ -308,17 +309,31 @@ class MediaTools:
             "f32le",
             "pipe:1",
         ]
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             startupinfo=self._startup_info(),
-            check=False,
         )
-        if completed.returncode != 0:
-            detail = completed.stderr.decode("utf-8", "replace").strip()
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                if not cancelled or not cancelled():
+                    continue
+                process.terminate()
+                try:
+                    process.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate()
+                return []
+        if process.returncode != 0:
+            detail = stderr.decode("utf-8", "replace").strip()
             raise MediaError(f"Extracting waveform failed: {detail}")
         samples = array("f")
-        samples.frombytes(completed.stdout)
+        samples.frombytes(stdout)
         if sys.byteorder != "little":
             samples.byteswap()
         if not samples:

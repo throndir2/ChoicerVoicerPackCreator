@@ -3,8 +3,8 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen, QWheelEvent
-from PySide6.QtWidgets import QToolTip, QWidget
+from PySide6.QtGui import QColor, QFont, QKeyEvent, QMouseEvent, QPainter, QPen, QWheelEvent
+from PySide6.QtWidgets import QApplication, QToolTip, QWidget
 
 from choicer_voicer_pack_creator.models import Segment
 from choicer_voicer_pack_creator.ui.theme import SEGMENT_COLORS
@@ -14,6 +14,9 @@ class TimelineWidget(QWidget):
     seek_requested = Signal(float)
     segment_selected = Signal(str)
     boundary_changed = Signal(str, float, float)
+    range_edit_started = Signal(str, float, float)
+    range_changed = Signal(str, float, float)
+    range_edit_finished = Signal(str, float, float, float, float)
     zoom_changed = Signal(float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -30,8 +33,19 @@ class TimelineWidget(QWidget):
         self.offset = 0.0
         self.mark_in = 0.0
         self.mark_out = 3.0
+        self.mark_segment_id = ""
         self._drag_id = ""
-        self._drag_edge = ""
+        self._drag_kind = ""
+        self._drag_active = False
+        self._drag_press_x = 0.0
+        self._drag_anchor_time = 0.0
+        self._drag_base_start = 0.0
+        self._drag_base_end = 0.0
+        self._drag_original_start = 0.0
+        self._drag_original_end = 0.0
+        self._drag_previous_mark_start = 0.0
+        self._drag_previous_mark_end = 0.0
+        self._drag_previous_mark_segment_id = ""
         self._segment_lanes: dict[str, int] = {}
 
     @property
@@ -74,21 +88,23 @@ class TimelineWidget(QWidget):
         self.setMinimumHeight(max(176, 126 + visible_lanes * 31))
 
     def set_selected(self, segment_id: str) -> None:
+        changed = self.selected_id != segment_id
         self.selected_id = segment_id
         segment = next((item for item in self.segments if item.id == segment_id), None)
-        if segment:
+        if segment and changed:
             self.ensure_visible(segment.start)
         self.update()
 
     def set_playhead(self, seconds: float) -> None:
         self.playhead = max(0.0, min(self.duration, seconds))
-        if not self._drag_id:
+        if not self._drag_kind:
             self.ensure_visible(self.playhead, margin=0.05)
         self.update()
 
-    def set_marks(self, mark_in: float, mark_out: float) -> None:
+    def set_marks(self, mark_in: float, mark_out: float, segment_id: str = "") -> None:
         self.mark_in = max(0.0, min(self.duration, mark_in))
         self.mark_out = max(self.mark_in, min(self.duration, mark_out))
+        self.mark_segment_id = segment_id if self._segment(segment_id) else ""
         self.update()
 
     def set_zoom(self, zoom: float, anchor_time: float | None = None) -> None:
@@ -191,6 +207,13 @@ class TimelineWidget(QWidget):
         painter.drawLine(QPointF(x1, 25), QPointF(x1, 109))
         painter.setPen(QPen(QColor("#ffb454"), 2))
         painter.drawLine(QPointF(x2, 25), QPointF(x2, 109))
+        painter.setFont(QFont("Segoe UI", 7, QFont.Weight.DemiBold))
+        painter.fillRect(QRectF(x1 - 3, 25, 7, 12), QColor("#48dbe7"))
+        painter.fillRect(QRectF(x2 - 3, 25, 7, 12), QColor("#ffb454"))
+        painter.setPen(QColor("#bceff4"))
+        painter.drawText(QPointF(x1 + 5, 36), "IN")
+        painter.setPen(QColor("#ffd6a0"))
+        painter.drawText(QPointF(x2 + 5, 36), "OUT")
 
     def _paint_segments(self, painter: QPainter) -> None:
         for index, segment in enumerate(self.segments):
@@ -218,57 +241,220 @@ class TimelineWidget(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
             return
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
         x = event.position().x()
         for segment in reversed(self.segments):
             rect = self._segment_rect(segment)
             if rect.top() <= event.position().y() <= rect.bottom():
                 if abs(x - rect.left()) <= 7:
-                    self._drag_id, self._drag_edge = segment.id, "start"
+                    self._prepare_drag("segment-start", segment.id, segment.start, segment.end, x)
+                    self.selected_id = segment.id
                     self.segment_selected.emit(segment.id)
+                    self._activate_drag()
                     return
                 if abs(x - rect.right()) <= 7:
-                    self._drag_id, self._drag_edge = segment.id, "end"
+                    self._prepare_drag("segment-end", segment.id, segment.start, segment.end, x)
+                    self.selected_id = segment.id
                     self.segment_selected.emit(segment.id)
+                    self._activate_drag()
                     return
                 if rect.contains(event.position()):
+                    self._prepare_drag("segment-body", segment.id, segment.start, segment.end, x)
+                    self.selected_id = segment.id
                     self.segment_selected.emit(segment.id)
-                    self.seek_requested.emit(self._x_to_time(x))
                     return
+
+        if 25 <= event.position().y() <= 109:
+            x1 = self._time_to_x(self.mark_in)
+            x2 = self._time_to_x(self.mark_out)
+            segment_id = self.mark_segment_id if self._segment(self.mark_segment_id) else ""
+            if abs(x - x1) <= 8:
+                self._prepare_drag("mark-start", segment_id, self.mark_in, self.mark_out, x)
+                self._activate_drag()
+                return
+            if abs(x - x2) <= 8:
+                self._prepare_drag("mark-end", segment_id, self.mark_in, self.mark_out, x)
+                self._activate_drag()
+                return
+            if min(x1, x2) < x < max(x1, x2):
+                self._prepare_drag("mark-body", segment_id, self.mark_in, self.mark_out, x)
+                return
+            self._prepare_drag("mark-new", "", self.mark_in, self.mark_out, x)
+            return
         self.seek_requested.emit(self._x_to_time(x))
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if self._drag_id:
-            segment = next((item for item in self.segments if item.id == self._drag_id), None)
-            if segment is None:
-                return
-            timestamp = self._x_to_time(event.position().x())
-            if self._drag_edge == "start":
-                segment.start = min(timestamp, segment.end - 0.05)
-            else:
-                segment.end = max(timestamp, segment.start + 0.05)
-            self.boundary_changed.emit(segment.id, segment.start, segment.end)
-            self.update()
+        if self._drag_kind:
+            if not self._drag_active:
+                distance = abs(event.position().x() - self._drag_press_x)
+                if distance < QApplication.startDragDistance():
+                    return
+                self._activate_drag()
+            self._update_drag(event.position().x())
             return
 
+        x = event.position().x()
+        if 25 <= event.position().y() <= 109:
+            x1 = self._time_to_x(self.mark_in)
+            x2 = self._time_to_x(self.mark_out)
+            if abs(x - x1) <= 8 or abs(x - x2) <= 8:
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            elif min(x1, x2) < x < max(x1, x2):
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+            else:
+                self.setCursor(Qt.CursorShape.CrossCursor)
+            return
         for segment in reversed(self.segments):
             rect = self._segment_rect(segment)
             if rect.contains(event.position()):
                 if abs(event.position().x() - rect.left()) <= 7 or abs(event.position().x() - rect.right()) <= 7:
                     self.setCursor(Qt.CursorShape.SizeHorCursor)
                 else:
-                    self.setCursor(Qt.CursorShape.PointingHandCursor)
+                    self.setCursor(Qt.CursorShape.SizeAllCursor)
                 QToolTip.showText(
                     event.globalPosition().toPoint(),
-                    f"{segment.primary_character}\n{segment.start:.3f}–{segment.end:.3f}s\n{segment.caption}",
+                    f"{segment.primary_character}\n{segment.start:.3f}–{segment.end:.3f}s\n"
+                    f"Drag the center to move; drag an edge to trim.\n{segment.caption}",
                     self,
                 )
                 return
         self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        self._drag_id = ""
-        self._drag_edge = ""
+        if event.button() != Qt.MouseButton.LeftButton or not self._drag_kind:
+            return
+        if self._drag_active:
+            final_start, final_end = self._current_drag_range()
+            self.range_edit_finished.emit(
+                self._drag_id,
+                self._drag_original_start,
+                self._drag_original_end,
+                final_start,
+                final_end,
+            )
+        else:
+            self.seek_requested.emit(self._drag_anchor_time)
+        self._clear_drag()
         self.setCursor(Qt.CursorShape.ArrowCursor)
+        event.accept()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Escape and self._drag_kind:
+            if self._drag_active:
+                if self._drag_kind == "mark-new":
+                    self._apply_drag_range(
+                        self._drag_previous_mark_start, self._drag_previous_mark_end
+                    )
+                    self.mark_segment_id = self._drag_previous_mark_segment_id
+                else:
+                    self._apply_drag_range(
+                        self._drag_original_start, self._drag_original_end
+                    )
+                self.range_edit_finished.emit(
+                    self._drag_id,
+                    self._drag_original_start,
+                    self._drag_original_end,
+                    *self._current_drag_range(),
+                )
+            self._clear_drag()
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _segment(self, segment_id: str) -> Segment | None:
+        return next((item for item in self.segments if item.id == segment_id), None)
+
+    def _prepare_drag(
+        self,
+        kind: str,
+        segment_id: str,
+        start: float,
+        end: float,
+        press_x: float,
+    ) -> None:
+        self._drag_previous_mark_start = self.mark_in
+        self._drag_previous_mark_end = self.mark_out
+        self._drag_previous_mark_segment_id = self.mark_segment_id
+        self._drag_kind = kind
+        self._drag_id = segment_id
+        self._drag_active = False
+        self._drag_press_x = press_x
+        self._drag_anchor_time = self._x_to_time(press_x)
+        self._drag_base_start = start
+        self._drag_base_end = end
+        segment = self._segment(segment_id)
+        self._drag_original_start = segment.start if segment else start
+        self._drag_original_end = segment.end if segment else end
+
+    def _activate_drag(self) -> None:
+        if self._drag_active:
+            return
+        self._drag_active = True
+        if self._drag_kind == "mark-new":
+            self.mark_segment_id = ""
+        self.range_edit_started.emit(
+            self._drag_id, self._drag_original_start, self._drag_original_end
+        )
+        self.setCursor(
+            Qt.CursorShape.SizeAllCursor
+            if self._drag_kind in {"segment-body", "mark-body"}
+            else Qt.CursorShape.SizeHorCursor
+        )
+
+    def _update_drag(self, x: float) -> None:
+        timestamp = self._x_to_time(x)
+        minimum = 0.05
+        start, end = self._drag_base_start, self._drag_base_end
+        if self._drag_kind in {"segment-start", "mark-start"}:
+            start = min(timestamp, end - minimum)
+        elif self._drag_kind in {"segment-end", "mark-end"}:
+            end = max(timestamp, start + minimum)
+        elif self._drag_kind in {"segment-body", "mark-body"}:
+            duration = end - start
+            shifted_start = start + timestamp - self._drag_anchor_time
+            start = max(0.0, min(self.duration - duration, shifted_start))
+            end = start + duration
+        elif self._drag_kind == "mark-new":
+            anchor = self._drag_anchor_time
+            if timestamp >= anchor:
+                start, end = anchor, max(timestamp, anchor + minimum)
+            else:
+                start, end = min(timestamp, anchor - minimum), anchor
+        start = max(0.0, min(self.duration, round(start, 3)))
+        end = max(0.0, min(self.duration, round(end, 3)))
+        if end - start < minimum:
+            if start + minimum <= self.duration:
+                end = round(start + minimum, 3)
+            else:
+                start = round(max(0.0, end - minimum), 3)
+        self._apply_drag_range(start, end)
+
+    def _apply_drag_range(self, start: float, end: float) -> None:
+        segment = self._segment(self._drag_id)
+        if segment:
+            segment.start, segment.end = start, end
+            if segment.id == self.selected_id:
+                self.mark_in, self.mark_out = start, end
+                self.mark_segment_id = segment.id
+            self._layout_segment_lanes()
+            self.boundary_changed.emit(segment.id, start, end)
+        else:
+            self.mark_in, self.mark_out = start, end
+            self.mark_segment_id = ""
+        self.range_changed.emit(self._drag_id, start, end)
+        self.update()
+
+    def _current_drag_range(self) -> tuple[float, float]:
+        segment = self._segment(self._drag_id)
+        if segment:
+            return segment.start, segment.end
+        return self.mark_in, self.mark_out
+
+    def _clear_drag(self) -> None:
+        self._drag_id = ""
+        self._drag_kind = ""
+        self._drag_active = False
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
         anchor = self._x_to_time(event.position().x())

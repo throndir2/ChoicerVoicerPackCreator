@@ -19,6 +19,27 @@ QGroupBox {
     color: #9eb0c6;
 }
 QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
+QFrame#collapsibleSection {
+    background: #0d141f;
+    border: 1px solid #233246;
+    border-radius: 8px;
+}
+QToolButton#sectionToggle {
+    background: #121d2b;
+    color: #aebed1;
+    border: 0;
+    border-bottom: 1px solid #233246;
+    border-top-left-radius: 7px;
+    border-top-right-radius: 7px;
+    padding: 7px 9px;
+    font-weight: 700;
+    text-align: left;
+}
+QToolButton#sectionToggle:hover { background: #192a3d; color: #d9e7f6; }
+QFrame#sectionBody, QScrollArea#sectionScroll, QScrollArea#sectionScroll > QWidget > QWidget {
+    background: #0d141f;
+    border: 0;
+}
 QLineEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTableWidget {
     background: #111b28;
     border: 1px solid #2a3c52;
@@ -64,6 +85,9 @@ QScrollBar::handle:vertical, QScrollBar::handle:horizontal { background: #30455e
 QScrollBar::handle:hover { background: #3d607c; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QSplitter::handle { background: #182536; }
+QSplitter::handle:hover { background: #2e526d; }
+QSplitter::handle:vertical { height: 7px; margin: 1px 20px; border-radius: 2px; }
+QSplitter::handle:horizontal { width: 7px; margin: 20px 1px; border-radius: 2px; }
 QLabel#muted { color: #7f91a8; }
 QLabel#path { color: #8ea2ba; font-size: 9pt; }
 QProgressBar { background: #111b28; border: 1px solid #2a3c52; border-radius: 4px; text-align: center; }

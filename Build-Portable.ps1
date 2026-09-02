@@ -169,11 +169,7 @@ try {
     Invoke-CheckedCommand `
         -FilePath $buildPython `
         -ArgumentList @("scripts\build.py") `
-        -Description "Building the portable application folder and ZIP"
-    Invoke-CheckedCommand `
-        -FilePath $buildPython `
-        -ArgumentList @("scripts\smoke_packaged.py") `
-        -Description "Smoke-testing the packaged application and bundled FFmpeg"
+        -Description "Building an unpromoted portable application and ZIP candidate"
 
     $versionOutput = & $buildPython -c "import pathlib, tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])"
     if ($LASTEXITCODE -ne 0) {
@@ -181,9 +177,9 @@ try {
     }
     $version = (($versionOutput | ForEach-Object { [string] $_ }) -join "").Trim()
     $distributionRoot = Join-Path $repositoryRoot "dist\v$version"
-    $manifestPath = Join-Path $distributionRoot "latest-portable.json"
+    $manifestPath = Join-Path $distributionRoot "pending-portable.json"
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-        throw "The portable build manifest was not generated: $manifestPath"
+        throw "The pending portable-build manifest was not generated: $manifestPath"
     }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     if ([string] $manifest.version -ne $version) {
@@ -191,13 +187,18 @@ try {
     }
     $applicationDirectory = Join-Path $repositoryRoot ([string] $manifest.application_directory)
     $applicationExecutable = Join-Path $repositoryRoot ([string] $manifest.executable)
-    $archive = Join-Path $repositoryRoot ([string] $manifest.archive)
+    $candidateArchive = Join-Path $repositoryRoot ([string] $manifest.candidate_archive)
     if (-not (Test-Path -LiteralPath $applicationExecutable -PathType Leaf)) {
         throw "The expected portable executable was not generated: $applicationExecutable"
     }
-    if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
-        throw "The expected portable ZIP was not generated: $archive"
+    if (-not (Test-Path -LiteralPath $candidateArchive -PathType Leaf)) {
+        throw "The expected portable ZIP candidate was not generated: $candidateArchive"
     }
+
+    Invoke-CheckedCommand `
+        -FilePath $buildPython `
+        -ArgumentList @("scripts\smoke_packaged.py", $applicationExecutable) `
+        -Description "Smoke-testing the unpromoted application and bundled FFmpeg"
 
     $extractedSmokeRoot = Join-Path `
         ([IO.Path]::GetTempPath()) `
@@ -205,7 +206,7 @@ try {
     New-Item -ItemType Directory -Path $extractedSmokeRoot | Out-Null
     Invoke-CheckedCommand `
         -FilePath $buildPython `
-        -ArgumentList @("-m", "zipfile", "-e", $archive, $extractedSmokeRoot) `
+        -ArgumentList @("-m", "zipfile", "-e", $candidateArchive, $extractedSmokeRoot) `
         -Description "Extracting the distributable ZIP into a clean temporary directory"
     $extractedExecutable = Join-Path `
         $extractedSmokeRoot `
@@ -218,6 +219,23 @@ try {
         -ArgumentList @("scripts\smoke_packaged.py", $extractedExecutable) `
         -Description "Smoke-testing a fresh extraction of the distributable ZIP"
 
+    Invoke-CheckedCommand `
+        -FilePath $buildPython `
+        -ArgumentList @("scripts\build.py", "--promote", ([string] $manifest.build_id)) `
+        -Description "Promoting the validated ZIP to the stable share filename"
+
+    $latestManifestPath = Join-Path $distributionRoot "latest-portable.json"
+    if (-not (Test-Path -LiteralPath $latestManifestPath -PathType Leaf)) {
+        throw "The validated portable-build manifest was not published: $latestManifestPath"
+    }
+    $latestManifest = Get-Content -LiteralPath $latestManifestPath -Raw | ConvertFrom-Json
+    if ([string] $latestManifest.build_id -ne [string] $manifest.build_id) {
+        throw "The published portable-build manifest does not match the validated generation."
+    }
+    $archive = Join-Path $repositoryRoot ([string] $latestManifest.archive)
+    if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+        throw "The validated portable ZIP was not promoted: $archive"
+    }
     $archiveHash = Get-Sha256 -Path $archive
 
     Write-Host ""

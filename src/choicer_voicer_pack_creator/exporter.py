@@ -324,14 +324,22 @@ class PackExporter:
         backup = target.with_name(f".{target.name}.previous-{token}")
         zip_backup = target_zip.with_name(f".{target_zip.name}.previous-{token}") if target_zip else None
         staged_zip_hash = sha256(staged_zip) if staged_zip else None
+        pack_backed_up = False
+        zip_backed_up = False
+        pack_published = False
+        zip_published = False
         try:
             if target.exists():
                 os.replace(target, backup)
+                pack_backed_up = True
             if target_zip and target_zip.exists() and zip_backup:
                 os.replace(target_zip, zip_backup)
+                zip_backed_up = True
             os.replace(stage, target)
+            pack_published = True
             if staged_zip and target_zip:
                 os.replace(staged_zip, target_zip)
+                zip_published = True
             actual_names = {path.name for path in target.iterdir() if path.is_file()}
             if actual_names != set(file_hashes):
                 raise RuntimeError("Published pack inventory differs from validated staging")
@@ -347,22 +355,22 @@ class PackExporter:
                 self.validator.validate_zip(target_zip, folder_name, set(file_hashes))
         except Exception as publish_error:
             rollback_errors: list[str] = []
-            if target.exists():
+            if pack_published and target.exists():
                 try:
                     shutil.rmtree(target)
                 except OSError as error:
                     rollback_errors.append(f"could not remove failed pack: {error}")
-            if backup.exists():
+            if pack_backed_up and backup.exists():
                 try:
                     os.replace(backup, target)
                 except OSError as error:
                     rollback_errors.append(f"could not restore previous pack: {error}")
-            if target_zip and target_zip.exists():
+            if zip_published and target_zip and target_zip.exists():
                 try:
                     target_zip.unlink()
                 except OSError as error:
                     rollback_errors.append(f"could not remove failed ZIP: {error}")
-            if target_zip and zip_backup and zip_backup.exists():
+            if target_zip and zip_backed_up and zip_backup and zip_backup.exists():
                 try:
                     os.replace(zip_backup, target_zip)
                 except OSError as error:

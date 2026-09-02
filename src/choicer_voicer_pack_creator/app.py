@@ -6,17 +6,19 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, Qt, QTimer
+from PySide6.QtCore import QCoreApplication, QLockFile, QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from choicer_voicer_pack_creator.media import MediaError, MediaTools
+from choicer_voicer_pack_creator.project_io import RecoveryStore
 from choicer_voicer_pack_creator.ui.main_window import MainWindow
 from choicer_voicer_pack_creator.ui.theme import APP_STYLESHEET
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(argv) if argv is not None else sys.argv
+    smoke_test = "--smoke-test" in arguments
     QCoreApplication.setOrganizationName("ChoicerVoicerCommunity")
     QCoreApplication.setApplicationName("Choicer Voicer Pack Creator")
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeMenuBar, False)
@@ -27,6 +29,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     icon_path = bundle_root / "assets" / "icon.svg"
     if icon_path.is_file():
         app.setWindowIcon(QIcon(str(icon_path)))
+
+    app_data: Path | None = None
+    instance_lock: QLockFile | None = None
+    if not smoke_test:
+        app_data = Path(
+            QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.AppLocalDataLocation
+            )
+        )
+        app_data.mkdir(parents=True, exist_ok=True)
+        instance_lock = QLockFile(str(app_data / "application-instance.lock"))
+        if not instance_lock.tryLock(100):
+            QMessageBox.warning(
+                None,
+                "Choicer Voicer Pack Creator is already running",
+                "Close the existing editor window before opening another project. This protects "
+                "automatic recovery data from concurrent changes.",
+            )
+            return 3
 
     try:
         media = MediaTools()
@@ -40,7 +61,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
 
-    smoke_test = "--smoke-test" in arguments
     smoke_report = os.environ.get("CHOICER_VOICER_SMOKE_REPORT")
     if smoke_report:
         version = media.run([media.ffmpeg, "-version"], "Reading FFmpeg version").stdout
@@ -58,7 +78,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     paths = [item for item in arguments[1:] if not item.startswith("--")]
     initial_path = Path(paths[0]).resolve() if paths else None
-    window = MainWindow(media, initial_path)
+    recovery_store = None
+    if app_data is not None:
+        recovery_store = RecoveryStore(app_data / "recovery-v2.json")
+    window = MainWindow(media, initial_path, recovery_store=recovery_store)
     window.show()
     if smoke_test:
         window.dirty = False

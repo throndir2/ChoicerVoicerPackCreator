@@ -11,6 +11,10 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Extracts and displays a zoomable waveform.
 - Marks precise In/Out points in seconds.
 - Adds, previews, splits, duplicates, deletes, and re-times segments.
+- Resizes or collapses Pack Details, Segments, and Selected Segment so the segment list can use
+	most of the sidebar when needed.
+- Defines, moves, and trims ranges directly on the waveform; segment blocks also support body and
+	edge dragging.
 - Assigns one or more speakers and an exact performance line to every segment.
 - Duplicates a segment at the same timestamp for independently recorded simultaneous speakers.
 - Imports existing Choicer Voicer pack folders and preserves their prompt audio and still images.
@@ -73,8 +77,8 @@ finished executable. It does not require a system FFmpeg installation. Use
 The finished outputs are:
 
 ```text
-dist/v0.2.3/portable-<build-id>/Choicer Voicer Pack Creator/
-dist/v0.2.3/Choicer-Voicer-Pack-Creator-0.2.3-Windows-x64.zip
+dist/v0.3.0/portable-<build-id>/Choicer Voicer Pack Creator/
+dist/v0.3.0/Choicer-Voicer-Pack-Creator-0.3.0-Windows-x64.zip
 ```
 
 The script prints the exact generated application-folder path. Each rebuild uses a new path to avoid
@@ -88,10 +92,12 @@ This is a **portable application folder**, not an installer. To use or share it:
 3. Run `Choicer Voicer Pack Creator.exe`.
 
 The receiving computer does not need Python, FFmpeg, FFprobe, Godot, administrator access, or an
-installation step. The folder can be moved or deleted as a unit. The app keeps only small
-recent-directory preferences in the current Windows user's normal per-user settings, rather than in
-the application folder. A folder-based package is used instead of a self-extracting single EXE for
-faster startup, simpler antivirus behavior, and replaceable LGPL FFmpeg components.
+installation step. The folder can be moved or deleted as a unit. The app stores recent-directory and
+layout preferences in the current Windows user's settings. While edits are unsaved, local
+application data also contains project recovery metadata, captions, and absolute media references;
+source media itself is never copied there. A folder-based package is used instead of a
+self-extracting single EXE for faster startup, simpler antivirus behavior, and replaceable LGPL
+FFmpeg components.
 
 Community builds are not currently code-signed, so Windows SmartScreen may show an unrecognized-app
 warning. Verify the ZIP's SHA-256 printed by the build script and use only a package from a trusted
@@ -119,12 +125,44 @@ If `py` is unavailable, invoke your installed Python executable directly.
 8. Save the editable project.
 9. Choose **Export Pack + ZIP** and select an output directory.
 
+### Direct waveform editing
+
+- Drag across empty waveform space to define a new In/Out range.
+- Drag the cyan **IN** or orange **OUT** handle to trim the range precisely.
+- Drag inside the highlighted waveform range to move it without changing its duration.
+- Drag the center of an existing segment block to move that segment, or either edge to trim it.
+- Press **Esc** during a drag to cancel it. The In/Out number fields remain available for exact
+	entry.
+
+For source-video prompts, a range change automatically affects the MP3 generated during the next
+export. The editor does not create or destructively replace prompt MP3s while dragging. Imported or
+manually selected audio files are preserved by default; after changing one of their ranges, the app
+asks whether to keep that recording, regenerate from source video, or undo the range change.
+
 When no backing track is selected, the exporter creates a duration-matched silent backing track;
 it never places the source video's original voices under new recordings.
 
 The exporter stages and validates every file before replacing an existing output. It retains the
 previous folder and ZIP until the newly published copies have been hash-checked and fully validated.
 A failed publication restores both previous artifacts.
+
+## Saving and recovery
+
+**Save Project** updates the current editable project JSON. Before replacing an existing project,
+the editor retains one previous version beside it with a `.previous` suffix. **File → Restore
+Previous Save** loads that version as unsaved edits, so the current saved file remains unchanged
+until Save is chosen again.
+
+**Save Project As** writes a separate project and does not modify the original project. Project
+saves store edit decisions and media references; they do not rewrite imported source packs or media.
+
+While editing, the app also writes debounced recovery snapshots to the current Windows user's local
+application-data directory. After a crash or power loss, the next launch offers to recover those
+edits without overwriting the saved project. A normal Save or an explicit Discard clears the
+snapshot. Only one editor instance runs at a time so two projects cannot race over the recovery
+journal. If a saved project becomes unreadable, opening it offers its adjacent previous version.
+Export independently stages every generated file and retains rollback copies until the new folder
+and ZIP pass final validation.
 
 ## Modify an existing pack
 
@@ -133,7 +171,7 @@ A failed publication restores both previous artifacts.
 3. Edit captions, speakers, or timeline positions.
 4. Existing packs store a trigger timestamp and padded recording, not the original spoken cut. To
 	regenerate one safely, mark the exact source-video In/Out range, click **Apply Range**, and choose
-	**No** when asked whether to keep the imported audio.
+	**Yes** when asked whether to regenerate the prompt audio.
 5. Save as a `.cvpack.json` project, then export.
 
 When one recording is reused at multiple timestamps, import expands it into independent editable segments. Exporting then gives each occurrence its own triplet.
@@ -210,13 +248,15 @@ with another compatible pair.
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check .
 .\.venv\Scripts\python.exe -m pytest -ra
-.\.venv\Scripts\python.exe scripts\build.py
+.\Build-Portable.ps1
 ```
 
-The Windows application folder is written below `dist/v0.2.3/portable-<build-id>/`, with a
-shareable `Choicer-Voicer-Pack-Creator-0.2.3-Windows-x64.zip` beside it. The first build downloads
-about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. Startup rejects a
-missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or `libmp3lame`.
+The Windows application folder is written below `dist/v0.3.0/portable-<build-id>/`, with a
+shareable `Choicer-Voicer-Pack-Creator-0.3.0-Windows-x64.zip` beside it. The first build downloads
+about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. The stable sharing ZIP is not
+replaced until both the application folder and a clean ZIP extraction pass packaged smoke tests.
+Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or
+`libmp3lame`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for project conventions.
 
