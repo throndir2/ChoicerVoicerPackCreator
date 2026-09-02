@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import sys
 import zipfile
@@ -9,12 +10,17 @@ from pathlib import Path
 import pytest
 
 from choicer_voicer_pack_creator.media import MediaTools
-from scripts.ffmpeg_bundle import (
-    BundleError,
-    download_archive,
-    extract_runtime,
-    refresh_metadata,
-)
+
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "ffmpeg_bundle.py"
+SPEC = importlib.util.spec_from_file_location("ffmpeg_bundle_under_test", SCRIPT_PATH)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError(f"Could not load {SCRIPT_PATH}")
+FFMPEG_BUNDLE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(FFMPEG_BUNDLE)
+BundleError = FFMPEG_BUNDLE.BundleError
+download_archive = FFMPEG_BUNDLE.download_archive
+extract_runtime = FFMPEG_BUNDLE.extract_runtime
+refresh_metadata = FFMPEG_BUNDLE.refresh_metadata
 
 
 def test_download_and_extract_runtime_from_verified_archive(tmp_path: Path) -> None:
