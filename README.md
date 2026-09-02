@@ -50,9 +50,11 @@ dub_characters=["Speaker"]
 
 ## Requirements
 
-- Windows 10/11 for the currently tested desktop build. The Python source is designed to remain portable to Linux.
+- Windows 10/11 x86-64 for the packaged desktop build. **FFmpeg and FFprobe are included**;
+	end users do not install them separately.
 - Python 3.11 or newer for development.
-- FFmpeg and FFprobe on `PATH`, built with `libtheora`, `libvorbis`, and `libmp3lame`.
+- Source development and tests require FFmpeg/FFprobe on `PATH`, built with `libtheora`,
+	`libvorbis`, and `libmp3lame`.
 
 ## Run from source
 
@@ -136,6 +138,32 @@ Vorbis, and Theora decoders:
 
 Godot and Docker are only required for these independent release gates, not normal GUI use.
 
+## Why Qt, FFmpeg, and Godot?
+
+- **PySide6/Qt is the application framework.** It provides the native desktop window, controls,
+	multimedia preview, background workers, and custom waveform/timeline rendering.
+- **FFmpeg performs media work.** It probes source files, generates waveform samples, extracts and
+	pads prompt audio, captures stills, and writes the Theora/Vorbis video required by the game.
+	Windows builds bundle a pinned FFmpeg 9.0.1 x86-64 LGPL shared distribution, so users do not
+	need to install it.
+- **Godot is only an independent test oracle.** The Choicer Voicer is made with Godot and consumes
+	pack metadata through Godot's `ConfigFile` parser. Release tests therefore ask the real parser to
+	read every generated metadata file. Godot is not bundled and is not needed to run the editor.
+- **Xiph tools are another release-only oracle.** They independently validate Ogg framing and fully
+	decode Theora and Vorbis streams instead of relying solely on FFmpeg to validate its own output.
+
+## Bundled FFmpeg provenance
+
+`scripts/build.py` downloads the archive specified in
+`third_party/ffmpeg-windows-x64.json`, verifies its SHA-256, extracts only the FFmpeg/FFprobe
+runtime and required DLLs, and checks the required encoders before packaging. The immutable
+archive is cached under `.cache/ffmpeg/` for later builds.
+
+The selected upstream variant is **LGPL shared**, not GPL or nonfree. The output includes the exact
+upstream LGPL text, build-provenance manifest, and [third-party notices](THIRD_PARTY_NOTICES.md).
+The application invokes FFmpeg as a separate program and lets users replace the `bin` directory
+with another compatible pair.
+
 ## Development
 
 ```powershell
@@ -144,10 +172,10 @@ Godot and Docker are only required for these independent release gates, not norm
 .\.venv\Scripts\python.exe scripts\build.py
 ```
 
-The Windows application bundle is written to `dist/v0.1.0/Choicer Voicer Pack Creator/`. FFmpeg is not
-redistributed by this repository; place a matched `ffmpeg.exe` and `ffprobe.exe` pair on `PATH` or
-beside the packaged application. Startup rejects builds missing `libtheora`, `libvorbis`, or
-`libmp3lame`.
+The Windows application folder is written to `dist/v0.2.2/Choicer Voicer Pack Creator/`, with a
+shareable `Choicer-Voicer-Pack-Creator-0.2.2-Windows-x64.zip` beside it. The first build downloads
+about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. Startup rejects a
+missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or `libmp3lame`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for project conventions.
 

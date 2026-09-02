@@ -24,10 +24,25 @@ jobs:
         run: ruff check .
       - name: Test
         run: pytest --cov=choicer_voicer_pack_creator --cov-report=term-missing
+      - name: Cache pinned FFmpeg archive
+        uses: actions/cache@v4
+        with:
+          path: .cache/ffmpeg
+          key: ffmpeg-win64-lgpl-shared-562ea50b4f2d213e
       - name: Build Windows application
         run: python scripts/build.py
-      - name: Smoke-test packaged application
-        run: '& ".\dist\v0.1.0\Choicer Voicer Pack Creator\Choicer Voicer Pack Creator.exe" --smoke-test; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
+      - name: Smoke-test bundled FFmpeg application
+        run: python scripts/smoke_packaged.py
+      - name: Export pack with bundled FFmpeg
+        run: >-
+          python scripts/create_validation_fixture.py build/bundled-ffmpeg-validation
+          --ffmpeg-dir "dist/v0.2.2/Choicer Voicer Pack Creator/bin"
+      - name: Upload self-contained Windows bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Choicer-Voicer-Pack-Creator-0.2.2-Windows-x64
+          path: dist/v0.2.2/Choicer-Voicer-Pack-Creator-0.2.2-Windows-x64.zip
+          if-no-files-found: error
 
   runtime-validation:
     runs-on: ubuntu-24.04

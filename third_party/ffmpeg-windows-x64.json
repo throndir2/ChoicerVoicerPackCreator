@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "component": "FFmpeg",
+  "version": "n9.0.1-11-ge47273f4d9-20260901",
+  "platform": "windows-x86_64",
+  "variant": "lgpl-shared",
+  "license": "LGPL-3.0-or-later",
+  "release_tag": "autobuild-2026-09-01-13-13",
+  "archive_name": "ffmpeg-n9.0.1-11-ge47273f4d9-win64-lgpl-shared-9.0.zip",
+  "archive_url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-01-13-13/ffmpeg-n9.0.1-11-ge47273f4d9-win64-lgpl-shared-9.0.zip",
+  "archive_sha256": "562ea50b4f2d213e3883a8fbef581ca2ccf6c7ab647c0e0b93d55294c5a0ae7a",
+  "archive_root": "ffmpeg-n9.0.1-11-ge47273f4d9-win64-lgpl-shared-9.0",
+  "license_file": "LICENSE.txt",
+  "runtime_files": [
+    "bin/avcodec-63.dll",
+    "bin/avdevice-63.dll",
+    "bin/avfilter-12.dll",
+    "bin/avformat-63.dll",
+    "bin/avutil-61.dll",
+    "bin/ffmpeg.exe",
+    "bin/ffprobe.exe",
+    "bin/swresample-7.dll",
+    "bin/swscale-10.dll"
+  ],
+  "required_encoders": [
+    "libtheora",
+    "libvorbis",
+    "libmp3lame"
+  ],
+  "ffmpeg_source": {
+    "repository": "https://github.com/FFmpeg/FFmpeg",
+    "commit": "e47273f4d9227152dcbf543cebaf9e2430ddbcc4",
+    "archive_url": "https://github.com/FFmpeg/FFmpeg/archive/e47273f4d9227152dcbf543cebaf9e2430ddbcc4.tar.gz"
+  },
+  "build_recipe_source": {
+    "repository": "https://github.com/BtbN/FFmpeg-Builds",
+    "commit": "8267213e26c1031621e6e1210fe3aa4867214f6a",
+    "archive_url": "https://github.com/BtbN/FFmpeg-Builds/archive/8267213e26c1031621e6e1210fe3aa4867214f6a.tar.gz"
+  }
+}

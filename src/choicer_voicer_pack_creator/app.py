@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -31,12 +33,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     except MediaError as error:
         QMessageBox.critical(
             None,
-            "FFmpeg is required",
-            f"{error}\n\nInstall FFmpeg, then restart Choicer Voicer Pack Creator.",
+            "FFmpeg is unavailable",
+            f"{error}\n\nThe Windows bundle normally includes FFmpeg. If its bin folder was "
+            "removed or quarantined, restore the complete application folder. Source runs may "
+            "instead use a compatible ffmpeg/ffprobe pair on PATH.",
         )
         return 2
 
     smoke_test = "--smoke-test" in arguments
+    smoke_report = os.environ.get("CHOICER_VOICER_SMOKE_REPORT")
+    if smoke_report:
+        version = media.run([media.ffmpeg, "-version"], "Reading FFmpeg version").stdout
+        Path(smoke_report).write_text(
+            json.dumps(
+                {
+                    "ffmpeg": media.ffmpeg,
+                    "ffprobe": media.ffprobe,
+                    "version": version.splitlines()[0],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     paths = [item for item in arguments[1:] if not item.startswith("--")]
     initial_path = Path(paths[0]).resolve() if paths else None
     window = MainWindow(media, initial_path)

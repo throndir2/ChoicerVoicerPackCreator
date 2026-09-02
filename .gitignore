@@ -10,6 +10,7 @@ htmlcov/
 
 # Environments and local settings
 .venv/
+.cache/
 .env
 *.local.json
 

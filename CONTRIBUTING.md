@@ -25,3 +25,5 @@ Explain the user-visible behavior, list validation performed, and include tests 
 
 Release candidates should pass `scripts/validate_external.py` with both required flags against an
 exported integration fixture, in addition to lint, pytest, and packaged-application smoke tests.
+The Windows packaging step must use the pinned LGPL manifest and retain all generated FFmpeg
+license/provenance files. Do not substitute a GPL, nonfree, floating, or unchecked binary.

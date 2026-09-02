@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from choicer_voicer_pack_creator import __version__
 from choicer_voicer_pack_creator.exporter import (
     ExportResult,
     PackExporter,
@@ -1430,9 +1431,15 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About Choicer Voicer Pack Creator",
-            "<h3>Choicer Voicer Pack Creator</h3>"
+            f"<h3>Choicer Voicer Pack Creator {__version__}</h3>"
             "<p>An unofficial community desktop editor for creating, importing, and validating "
             "Choicer Voicer dub packs.</p>"
+            "<p>The desktop interface uses PySide6/Qt. Windows bundles include an unmodified "
+            "FFmpeg LGPL shared build for media conversion; its license, provenance, and source "
+            "links are in <code>THIRD_PARTY_NOTICES.md</code>.</p>"
+            "<p>Godot is <b>not</b> the GUI framework or an end-user dependency. Release tests use "
+            "Godot's native <code>ConfigFile</code> parser because The Choicer Voicer is a Godot "
+            "application and reads pack metadata with that parser.</p>"
             "<p>Project files store paths and edit decisions only. Source media remains yours.</p>",
         )
 

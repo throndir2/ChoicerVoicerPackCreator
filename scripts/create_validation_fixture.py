@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import sys
 from pathlib import Path
 
 from choicer_voicer_pack_creator.exporter import PackExporter
@@ -16,13 +17,25 @@ def main() -> int:
         description="Create a small synthetic exported pack for release validation."
     )
     parser.add_argument("destination", type=Path)
+    parser.add_argument(
+        "--ffmpeg-dir",
+        type=Path,
+        help="Directory containing the exact ffmpeg/ffprobe pair to validate",
+    )
     args = parser.parse_args()
     root = args.destination.resolve()
     if root.exists():
         shutil.rmtree(root)
     root.mkdir(parents=True)
 
-    media = MediaTools()
+    if args.ffmpeg_dir:
+        suffix = ".exe" if sys.platform == "win32" else ""
+        media = MediaTools(
+            str(args.ffmpeg_dir / f"ffmpeg{suffix}"),
+            str(args.ffmpeg_dir / f"ffprobe{suffix}"),
+        )
+    else:
+        media = MediaTools()
     source = root / "source.mp4"
     media.run(
         [
