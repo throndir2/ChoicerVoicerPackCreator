@@ -4,8 +4,8 @@ import getpass
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QSignalBlocker, Qt, QThread, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QKeySequence
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
@@ -44,6 +44,10 @@ from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.pack_io import PackImporter
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
+from choicer_voicer_pack_creator.timeline_audit import (
+    TimelineOverlap,
+    audit_timeline_overlaps,
+)
 from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
 
@@ -128,10 +132,14 @@ class MainWindow(QMainWindow):
         self._syncing = False
         self._slider_dragging = False
         self._preview_end: float | None = None
+        self._stopped_seek_active = False
+        self._stopped_seek_target_ms = 0
+        self._stopped_seek_audio_was_muted = False
         self._waveform_workers: list[WaveformWorker] = []
         self._waveform_request_id = 0
         self._export_worker: ExportWorker | None = None
         self._restoring_layout = False
+        self._layout_restored = False
         self._range_edit_record: tuple[str, float, float, bool] | None = None
         self._discard_recovery_on_transition = False
         self._recovery_timer = QTimer(self)
@@ -142,6 +150,14 @@ class MainWindow(QMainWindow):
         self._layout_save_timer.setSingleShot(True)
         self._layout_save_timer.setInterval(250)
         self._layout_save_timer.timeout.connect(self._save_layout_state)
+        self._stopped_seek_timer = QTimer(self)
+        self._stopped_seek_timer.setSingleShot(True)
+        self._stopped_seek_timer.setInterval(1250)
+        self._stopped_seek_timer.timeout.connect(self._stopped_seek_timed_out)
+        self._stopped_seek_debounce_timer = QTimer(self)
+        self._stopped_seek_debounce_timer.setSingleShot(True)
+        self._stopped_seek_debounce_timer.setInterval(35)
+        self._stopped_seek_debounce_timer.timeout.connect(self._start_stopped_seek_decode)
 
         self.setWindowTitle("Choicer Voicer Pack Creator")
         self.resize(1500, 900)
@@ -228,6 +244,7 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Horizontal, root)
         splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(9)
         self.editor_splitter = splitter
         root_layout.addWidget(splitter, 1)
 
@@ -334,7 +351,7 @@ class MainWindow(QMainWindow):
 
         self.inspector_splitter = QSplitter(Qt.Orientation.Vertical, right)
         self.inspector_splitter.setChildrenCollapsible(False)
-        self.inspector_splitter.setHandleWidth(7)
+        self.inspector_splitter.setHandleWidth(9)
         right_layout.addWidget(self.inspector_splitter, 1)
 
         self.project_section = CollapsibleSection("PACK DETAILS", self.inspector_splitter)
@@ -540,6 +557,8 @@ class MainWindow(QMainWindow):
         return str(value).strip().casefold() in {"1", "true", "yes", "on"}
 
     def _restore_layout_state(self) -> None:
+        if self._layout_restored:
+            return
         self._restoring_layout = True
         try:
             collapse_keys = (
@@ -575,6 +594,7 @@ class MainWindow(QMainWindow):
                 self.inspector_splitter.setSizes([285, 355, 235])
         finally:
             self._restoring_layout = False
+            self._layout_restored = True
 
     def _schedule_layout_save(self, *_args: object) -> None:
         if not self._restoring_layout:
@@ -608,9 +628,53 @@ class MainWindow(QMainWindow):
         self.settings.sync()
 
     def _section_collapsed_changed(self, index: int, collapsed: bool) -> None:
-        if not collapsed:
-            QTimer.singleShot(0, lambda: self._restore_section_height(index))
+        QTimer.singleShot(
+            0,
+            lambda: self._rebalance_inspector_sections(index, collapsed),
+        )
         self._schedule_layout_save()
+
+    def _rebalance_inspector_sections(self, index: int, collapsed: bool) -> None:
+        if not 0 <= index < len(self.inspector_sections):
+            return
+        if not collapsed:
+            self._restore_section_height(index)
+            return
+
+        sizes = self.inspector_splitter.sizes()
+        if len(sizes) != len(self.inspector_sections):
+            return
+        total = sum(sizes)
+        target = list(sizes)
+        expanded_indexes: list[int] = []
+        for section_index, section in enumerate(self.inspector_sections):
+            if section.is_collapsed:
+                target[section_index] = section.minimumHeight()
+            else:
+                expanded_indexes.append(section_index)
+        if not expanded_indexes:
+            self.inspector_splitter.setSizes(target)
+            return
+
+        available = max(
+            0,
+            total
+            - sum(target[i] for i in range(len(target)) if i not in expanded_indexes),
+        )
+        if 1 in expanded_indexes:
+            # The segment table benefits most from spare vertical space. Preserve the
+            # other open editors and give every released pixel to Segments.
+            preserved = sum(target[i] for i in expanded_indexes if i != 1)
+            target[1] = max(1, available - preserved)
+        else:
+            current_total = sum(max(1, target[i]) for i in expanded_indexes)
+            remainder = available
+            for section_index in expanded_indexes[:-1]:
+                share = round(available * max(1, target[section_index]) / current_total)
+                target[section_index] = max(1, share)
+                remainder -= target[section_index]
+            target[expanded_indexes[-1]] = max(1, remainder)
+        self.inspector_splitter.setSizes(target)
 
     def _restore_section_height(self, index: int) -> None:
         if not 0 <= index < len(self.inspector_sections):
@@ -619,7 +683,24 @@ class MainWindow(QMainWindow):
         if len(sizes) != len(self.inspector_sections):
             return
         section = self.inspector_sections[index]
-        sizes[index] = max(120, section.last_expanded_height)
+        desired = min(sum(sizes), max(120, section.last_expanded_height))
+        needed = max(0, desired - sizes[index])
+        sizes[index] += needed
+        donors = [
+            donor_index
+            for donor_index, donor in enumerate(self.inspector_sections)
+            if donor_index != index and not donor.is_collapsed
+        ]
+        donors.sort(key=lambda donor_index: (donor_index != 1, -sizes[donor_index]))
+        for donor_index in donors:
+            if needed <= 0:
+                break
+            available = max(0, sizes[donor_index] - 120)
+            donated = min(needed, available)
+            sizes[donor_index] -= donated
+            needed -= donated
+        if needed > 0:
+            sizes[index] -= needed
         self.inspector_splitter.setSizes(sizes)
 
     def _connect_player(self) -> None:
@@ -628,6 +709,7 @@ class MainWindow(QMainWindow):
         self.audio_output.setVolume(0.8)
         self.player.setAudioOutput(self.audio_output)
         self.player.setVideoOutput(self.video_widget)
+        self.video_widget.videoSink().videoFrameChanged.connect(self._video_frame_changed)
         self.player.positionChanged.connect(self._player_position_changed)
         self.player.durationChanged.connect(self._player_duration_changed)
         self.player.playbackStateChanged.connect(self._playback_state_changed)
@@ -917,6 +999,8 @@ class MainWindow(QMainWindow):
         if self._discard_recovery_on_transition:
             self._clear_recovery_snapshot()
         self._cancel_waveform_workers()
+        if hasattr(self, "player"):
+            self._reset_transport_state()
         self.player.stop() if hasattr(self, "player") else None
         self.project = project
         self.project.sort_segments()
@@ -1007,6 +1091,11 @@ class MainWindow(QMainWindow):
 
     def toggle_playback(self) -> None:
         self.prompt_player.stop()
+        if self._stopped_seek_active:
+            self._cancel_stopped_seek(restore_audio=True)
+            self.player.play()
+            self._playback_state_changed(self.player.playbackState())
+            return
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
@@ -1015,11 +1104,83 @@ class MainWindow(QMainWindow):
 
     def stop_playback(self) -> None:
         self.prompt_player.stop()
-        self.player.stop()
+        self._reset_transport_state()
+        self.player.pause()
         self.seek(0.0)
 
     def seek(self, seconds: float) -> None:
-        self.player.setPosition(int(max(0.0, seconds) * 1000))
+        target_ms = int(max(0.0, seconds) * 1000)
+        if (
+            self.player.playbackState() == QMediaPlayer.PlaybackState.StoppedState
+            or self._stopped_seek_active
+        ) and not self.player.source().isEmpty():
+            if not self._stopped_seek_active:
+                self._stopped_seek_audio_was_muted = self.audio_output.isMuted()
+                self.audio_output.setMuted(True)
+            self._stopped_seek_active = True
+            self._stopped_seek_target_ms = target_ms
+            self.player.setPosition(target_ms)
+            self._stopped_seek_debounce_timer.start()
+            return
+        self.player.setPosition(target_ms)
+
+    @Slot()
+    def _start_stopped_seek_decode(self) -> None:
+        if not self._stopped_seek_active:
+            return
+        self.player.setPosition(self._stopped_seek_target_ms)
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.StoppedState:
+            self.player.play()
+        self._stopped_seek_timer.start()
+
+    @Slot(QVideoFrame)
+    def _video_frame_changed(self, frame: QVideoFrame) -> None:
+        if not self._stopped_seek_active or not frame.isValid():
+            return
+        frame_start_ms = frame.startTime() / 1000 if frame.startTime() >= 0 else -1
+        frame_end_ms = frame.endTime() / 1000 if frame.endTime() >= 0 else frame_start_ms
+        target_ms = self._stopped_seek_target_ms
+        if frame_start_ms >= 0 and (
+            frame_start_ms <= target_ms < max(frame_start_ms + 1, frame_end_ms)
+            or abs(frame_start_ms - target_ms) <= 15
+        ):
+            self._finish_stopped_seek()
+
+    @Slot()
+    def _finish_stopped_seek(self) -> None:
+        if not self._stopped_seek_active:
+            return
+        target_ms = self._stopped_seek_target_ms
+        self._stopped_seek_active = False
+        self._stopped_seek_timer.stop()
+        self._stopped_seek_debounce_timer.stop()
+        self.player.pause()
+        self.audio_output.setMuted(self._stopped_seek_audio_was_muted)
+        self.timeline.set_playhead(target_ms / 1000.0)
+        self._playback_state_changed(self.player.playbackState())
+
+    @Slot()
+    def _stopped_seek_timed_out(self) -> None:
+        if not self._stopped_seek_active:
+            return
+        target_ms = self._stopped_seek_target_ms
+        self.player.pause()
+        self._cancel_stopped_seek(restore_audio=True)
+        self.statusBar().showMessage(
+            f"Could not decode the preview frame at {target_ms / 1000:.3f}s. Try seeking nearby."
+        )
+
+    def _cancel_stopped_seek(self, *, restore_audio: bool = False) -> None:
+        was_active = self._stopped_seek_active
+        self._stopped_seek_active = False
+        self._stopped_seek_timer.stop()
+        self._stopped_seek_debounce_timer.stop()
+        if restore_audio and was_active:
+            self.audio_output.setMuted(self._stopped_seek_audio_was_muted)
+
+    def _reset_transport_state(self) -> None:
+        self._preview_end = None
+        self._cancel_stopped_seek(restore_audio=True)
 
     def current_position(self) -> float:
         return self.player.position() / 1000.0
@@ -1049,10 +1210,14 @@ class MainWindow(QMainWindow):
 
     def _playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         self.play_button.setText(
-            "❚❚ Pause" if state == QMediaPlayer.PlaybackState.PlayingState else "▶ Play"
+            "❚❚ Pause"
+            if state == QMediaPlayer.PlaybackState.PlayingState
+            and not self._stopped_seek_active
+            else "▶ Play"
         )
 
     def _player_error(self, _error: QMediaPlayer.Error, message: str) -> None:
+        self._reset_transport_state()
         if message:
             self.statusBar().showMessage(f"Video preview error: {message}")
 
@@ -1189,15 +1354,16 @@ class MainWindow(QMainWindow):
         if segment is None:
             return
         if segment.audio_mode == "file" and segment.audio_path:
+            self._reset_transport_state()
             self.player.pause()
-            self._preview_end = None
             self.prompt_player.setSource(QUrl.fromLocalFile(segment.audio_path))
             self.prompt_player.play()
             self.statusBar().showMessage(f"Auditioning preserved prompt: {Path(segment.audio_path).name}")
             return
         self.prompt_player.stop()
         self._preview_end = segment.end
-        self.seek(segment.start)
+        self._cancel_stopped_seek(restore_audio=True)
+        self.player.setPosition(int(segment.start * 1000))
         self.player.play()
 
     def select_segment(self, segment_id: str) -> None:
@@ -1380,6 +1546,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_table(self, selected_id: str | None = None) -> None:
         selected = selected_id if selected_id is not None else self.selected_segment_id
+        timeline_warnings = audit_timeline_overlaps(self.project.segments)
         self.segment_table.blockSignals(True)
         try:
             self.segment_table.setRowCount(len(self.project.segments))
@@ -1399,12 +1566,49 @@ class MainWindow(QMainWindow):
                     if column in {4, 5}:
                         item.setToolTip(value)
                     self.segment_table.setItem(row, column, item)
+            self._apply_timeline_review_highlights(timeline_warnings)
         finally:
             self.segment_table.blockSignals(False)
         self.timeline.set_segments(self.project.segments)
         if selected:
             self._select_table_row(selected)
         self._refresh_validation_label()
+
+    def _apply_timeline_review_highlights(self, warnings: list[TimelineOverlap]) -> None:
+        warning_ids = {
+            segment_id
+            for warning in warnings
+            for segment_id in (warning.first_id, warning.second_id)
+        }
+        if not warning_ids:
+            return
+        brush = QBrush(QColor("#49351d"))
+        for row in range(self.segment_table.rowCount()):
+            identity = self.segment_table.item(row, 0)
+            if not identity or identity.data(Qt.ItemDataRole.UserRole) not in warning_ids:
+                continue
+            for column in range(self.segment_table.columnCount()):
+                item = self.segment_table.item(row, column)
+                if item:
+                    item.setBackground(brush)
+                    existing = item.toolTip()
+                    note = "Potential timeline overlap — review against the source."
+                    item.setToolTip(f"{existing}\n\n{note}".strip())
+
+    def _timeline_review_details(self, warnings: list[TimelineOverlap]) -> list[str]:
+        indexes = {segment.id: index for index, segment in enumerate(self.project.segments, 1)}
+        details: list[str] = []
+        for warning in warnings:
+            first = self.project.segment_by_id(warning.first_id)
+            second = self.project.segment_by_id(warning.second_id)
+            if not first or not second:
+                continue
+            details.append(
+                f"Segments {indexes[first.id]:03d} ({first.primary_character}) and "
+                f"{indexes[second.id]:03d} ({second.primary_character}) overlap by "
+                f"{warning.seconds:.3f}s."
+            )
+        return details
 
     def _select_table_row(self, segment_id: str) -> None:
         for row in range(self.segment_table.rowCount()):
@@ -1604,6 +1808,7 @@ class MainWindow(QMainWindow):
             return
         finally:
             QApplication.restoreOverrideCursor()
+        self._reset_transport_state()
         self.player.stop()
         self.prompt_player.stop()
         self.project.video_path = str(source)
@@ -1654,6 +1859,7 @@ class MainWindow(QMainWindow):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
+        self._reset_transport_state()
         self.player.stop()
         self._cancel_waveform_workers()
         self.player.setSource(QUrl())
@@ -1869,14 +2075,28 @@ class MainWindow(QMainWindow):
 
     def _refresh_validation_label(self) -> None:
         errors = self.project.validate()
+        timeline_warnings = audit_timeline_overlaps(self.project.segments)
+        warning_details = self._timeline_review_details(timeline_warnings)
+        self.validation_label.setToolTip("\n".join(warning_details))
         if not self.project.segments:
             self.validation_label.setText("No segments yet. Set In/Out points, then add a segment.")
             self.validation_label.setStyleSheet("color: #7f91a8;")
         elif errors:
             self.validation_label.setText(
-                f"{len(self.project.segments)} segments · {len(errors)} item(s) need attention before export."
+                f"{len(self.project.segments)} segments · {len(errors)} item(s) need attention"
+                + (
+                    f" · {len(timeline_warnings)} overlap(s) to review"
+                    if timeline_warnings
+                    else ""
+                )
             )
             self.validation_label.setStyleSheet("color: #ffad7a;")
+        elif timeline_warnings:
+            self.validation_label.setText(
+                f"Ready to export · {len(self.project.segments)} segments · "
+                f"{len(timeline_warnings)} potential overlap(s) to review"
+            )
+            self.validation_label.setStyleSheet("color: #ffbf69;")
         else:
             self.validation_label.setText(
                 f"Ready to export · {len(self.project.segments)} segments · "
@@ -1949,6 +2169,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self._save_layout_state()
+        self._reset_transport_state()
         self.player.stop()
         for worker in self._waveform_workers:
             worker.requestInterruption()

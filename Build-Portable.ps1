@@ -164,6 +164,13 @@ $extractedSmokeRoot = $null
 try {
     Invoke-CheckedCommand `
         -FilePath $buildPython `
+        -ArgumentList @(
+            "-c",
+            "import pathlib,tomllib; from choicer_voicer_pack_creator import __version__; expected=tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version']; raise SystemExit(0 if __version__ == expected else 1)"
+        ) `
+        -Description "Verifying source and package versions match"
+    Invoke-CheckedCommand `
+        -FilePath $buildPython `
         -ArgumentList @("-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--editable", ".[build]") `
         -Description "Installing the pinned application and packaging dependencies"
     Invoke-CheckedCommand `

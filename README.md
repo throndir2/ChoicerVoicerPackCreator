@@ -8,6 +8,7 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 
 - Creates a new project from MP4, MKV, MOV, WebM, OGV, or AVI video.
 - Plays the source video inside the editor.
+- Keeps the decoded video frame visible when seeking while playback is stopped.
 - Extracts and displays a zoomable waveform.
 - Marks precise In/Out points in seconds.
 - Adds, previews, splits, duplicates, deletes, and re-times segments.
@@ -15,6 +16,7 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 	most of the sidebar when needed.
 - Defines, moves, and trims ranges directly on the waveform; segment blocks also support body and
 	edge dragging.
+- Highlights substantial, non-identical segment overlaps for deterministic human review.
 - Assigns one or more speakers and an exact performance line to every segment.
 - Duplicates a segment at the same timestamp for independently recorded simultaneous speakers.
 - Imports existing Choicer Voicer pack folders and preserves their prompt audio and still images.
@@ -77,8 +79,8 @@ finished executable. It does not require a system FFmpeg installation. Use
 The finished outputs are:
 
 ```text
-dist/v0.3.0/portable-<build-id>/Choicer Voicer Pack Creator/
-dist/v0.3.0/Choicer-Voicer-Pack-Creator-0.3.0-Windows-x64.zip
+dist/v0.3.1/portable-<build-id>/Choicer Voicer Pack Creator/
+dist/v0.3.1/Choicer-Voicer-Pack-Creator-0.3.1-Windows-x64.zip
 ```
 
 The script prints the exact generated application-folder path. Each rebuild uses a new path to avoid
@@ -138,6 +140,21 @@ For source-video prompts, a range change automatically affects the MP3 generated
 export. The editor does not create or destructively replace prompt MP3s while dragging. Imported or
 manually selected audio files are preserved by default; after changing one of their ranges, the app
 asks whether to keep that recording, regenerate from source video, or undo the range change.
+
+### Deterministic review assistance
+
+The editor highlights pairs of segments that overlap by more than 125 ms and lists the exact overlap
+duration in the status tooltip. Exact duplicate ranges with disjoint speaker assignments remain
+unflagged because they intentionally support simultaneous speakers; duplicates that repeat any
+speaker are flagged. These amber notices are review evidence, not export-blocking errors; the tool
+never moves a range automatically.
+
+Experimental VAD, OCR, Whisper transcription, source separation, and game-dialogue lookup tools
+were evaluated but are not treated as correctness oracles. Their existing results varied with model
+settings, merged speakers, missed stylized vocalizations, or produced timing that did not match the
+spoken cut. They would also add large model downloads and licensing/provenance work. Automatic
+captions or speaker assignments are therefore not included in the portable app; exact lines still
+require human review against the decoded source.
 
 When no backing track is selected, the exporter creates a duration-matched silent backing track;
 it never places the source video's original voices under new recordings.
@@ -251,8 +268,8 @@ with another compatible pair.
 .\Build-Portable.ps1
 ```
 
-The Windows application folder is written below `dist/v0.3.0/portable-<build-id>/`, with a
-shareable `Choicer-Voicer-Pack-Creator-0.3.0-Windows-x64.zip` beside it. The first build downloads
+The Windows application folder is written below `dist/v0.3.1/portable-<build-id>/`, with a
+shareable `Choicer-Voicer-Pack-Creator-0.3.1-Windows-x64.zip` beside it. The first build downloads
 about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. The stable sharing ZIP is not
 replaced until both the application folder and a clean ZIP extraction pass packaged smoke tests.
 Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or

@@ -4,7 +4,9 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QThread, Slot
+from PySide6.QtCore import QSettings, QThread, QUrl, Slot
+from PySide6.QtGui import QColor
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QMessageBox
 
 from choicer_voicer_pack_creator.models import PackProject, Segment
@@ -77,13 +79,21 @@ def test_inspector_sections_resize_collapse_and_restore(qtbot, tmp_path: Path) -
     qtbot.addWidget(window)
     window.show()
     qtbot.waitUntil(lambda: window.inspector_splitter.height() > 300)
+    window._restore_layout_state()
 
     window.inspector_splitter.setSizes([180, 420, 170])
+    before_collapse = window.inspector_splitter.sizes()
     window.project_section.set_collapsed(True)
     qtbot.waitUntil(lambda: window.project_section.is_collapsed)
+    qtbot.wait(50)
+    after_collapse = window.inspector_splitter.sizes()
     saved_expanded_height = window.project_section.last_expanded_height
     assert window.project_section.body.isHidden()
-    assert window.inspector_splitter.sizes()[1] > window.inspector_splitter.sizes()[0]
+    assert after_collapse[0] <= window.project_section.minimumHeight()
+    assert after_collapse[1] > before_collapse[1]
+    assert after_collapse[1] > after_collapse[0]
+    assert window.editor_splitter.handleWidth() == 9
+    assert window.inspector_splitter.handleWidth() == 9
     window._save_layout_state()
     window.close()
 
@@ -97,8 +107,116 @@ def test_inspector_sections_resize_collapse_and_restore(qtbot, tmp_path: Path) -
     assert restored.project_section.last_expanded_height == saved_expanded_height
     restored.project_section.set_collapsed(False)
     qtbot.waitUntil(lambda: not restored.project_section.is_collapsed)
+    qtbot.waitUntil(
+        lambda: abs(
+            restored.inspector_splitter.sizes()[0]
+            - restored.project_section.last_expanded_height
+        )
+        <= 2
+    )
     assert not restored.project_section.body.isHidden()
     restored.close()
+
+
+def test_seek_from_stopped_state_decodes_then_pauses_on_target(qtbot) -> None:
+    class FakeAudioOutput:
+        def __init__(self) -> None:
+            self.muted = False
+
+        def isMuted(self):
+            return self.muted
+
+        def setMuted(self, muted):
+            self.muted = muted
+
+    class StoppedPlayer:
+        def __init__(self) -> None:
+            self.state = QMediaPlayer.PlaybackState.StoppedState
+            self.position_ms = 0
+            self.calls: list[object] = []
+
+        def playbackState(self):
+            return self.state
+
+        def source(self):
+            return QUrl.fromLocalFile("C:/source.mp4")
+
+        def play(self):
+            self.calls.append("play")
+            self.state = QMediaPlayer.PlaybackState.PlayingState
+
+        def pause(self):
+            self.calls.append("pause")
+            self.state = QMediaPlayer.PlaybackState.PausedState
+
+        def stop(self):
+            self.calls.append("stop")
+            self.state = QMediaPlayer.PlaybackState.StoppedState
+
+        def setPosition(self, milliseconds):
+            self.calls.append(("position", milliseconds))
+            self.position_ms = milliseconds
+
+        def position(self):
+            return self.position_ms
+
+    window = MainWindow(UnusedMedia())  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    player = StoppedPlayer()
+    window.player = player  # type: ignore[assignment]
+    audio_output = FakeAudioOutput()
+    window.audio_output = audio_output  # type: ignore[assignment]
+    window.timeline.set_duration(10)
+
+    window.seek(4.25)
+    assert player.calls == [("position", 4250)]
+    assert audio_output.muted
+    assert window._stopped_seek_active
+    window._start_stopped_seek_decode()
+    assert player.calls[-2:] == [("position", 4250), "play"]
+    window._finish_stopped_seek()
+
+    assert player.calls[-1] == "pause"
+    assert player.state == QMediaPlayer.PlaybackState.PausedState
+    assert not audio_output.muted
+    assert not window._stopped_seek_active
+    assert window.timeline.playhead == 4.25
+    window.dirty = False
+    window.close()
+
+
+def test_overlap_review_is_visible_but_does_not_block_export_readiness(
+    qtbot, tmp_path: Path
+) -> None:
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    first = Segment(1, 3, "First", ["A"])
+    second = Segment(2.5, 4, "Second", ["B"])
+    window = MainWindow(UnusedMedia())  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    window._set_project(
+        PackProject(
+            title="Overlap review",
+            authors=["Creator"],
+            video_path=str(video),
+            video_duration=5,
+            segments=[first, second],
+        ),
+        None,
+        mark_dirty=False,
+    )
+
+    assert "Ready to export" in window.validation_label.text()
+    assert "1 potential overlap" in window.validation_label.text()
+    assert "overlap by 0.500s" in window.validation_label.toolTip()
+    assert window.segment_table.item(0, 0).background().color() == QColor("#49351d")
+
+    second.start = 3
+    window._refresh_table(second.id)
+    assert "potential overlap" not in window.validation_label.text()
+    assert window.validation_label.toolTip() == ""
+    window.dirty = False
+    window.close()
 
 
 def test_range_edit_can_regenerate_or_undo_preserved_audio(

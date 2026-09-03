@@ -84,10 +84,19 @@ QScrollBar:vertical, QScrollBar:horizontal { background: #0b121b; width: 12px; h
 QScrollBar::handle:vertical, QScrollBar::handle:horizontal { background: #30455e; border-radius: 5px; min-height: 24px; min-width: 24px; }
 QScrollBar::handle:hover { background: #3d607c; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
-QSplitter::handle { background: #182536; }
-QSplitter::handle:hover { background: #2e526d; }
-QSplitter::handle:vertical { height: 7px; margin: 1px 20px; border-radius: 2px; }
-QSplitter::handle:horizontal { width: 7px; margin: 20px 1px; border-radius: 2px; }
+QSplitter::handle { background: transparent; }
+QSplitter::handle:vertical {
+    height: 9px;
+    margin: 4px 24px;
+    border-top: 1px solid #2b3d52;
+}
+QSplitter::handle:horizontal {
+    width: 9px;
+    margin: 24px 4px;
+    border-left: 1px solid #2b3d52;
+}
+QSplitter::handle:vertical:hover { border-top-color: #55cfe0; }
+QSplitter::handle:horizontal:hover { border-left-color: #55cfe0; }
 QLabel#muted { color: #7f91a8; }
 QLabel#path { color: #8ea2ba; font-size: 9pt; }
 QProgressBar { background: #111b28; border: 1px solid #2a3c52; border-radius: 4px; text-align: center; }

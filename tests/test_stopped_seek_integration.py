@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+import pytest
+from PySide6.QtMultimedia import QMediaPlayer
+
+from choicer_voicer_pack_creator.media import MediaTools
+from choicer_voicer_pack_creator.models import PackProject
+from choicer_voicer_pack_creator.ui.main_window import MainWindow
+
+
+@pytest.mark.integration
+def test_stopped_seek_retains_requested_video_frame(qtbot, tmp_path: Path) -> None:
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg is not available")
+    media = MediaTools()
+    video = tmp_path / "red-then-blue.mp4"
+    media.run(
+        [
+            media.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=320x180:r=15:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=320x180:r=15:d=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=stereo:d=4",
+            "-filter_complex",
+            "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+            "-map",
+            "[v]",
+            "-map",
+            "2:a:0",
+            "-t",
+            "4",
+            "-c:v",
+            "mpeg4",
+            "-q:v",
+            "3",
+            "-c:a",
+            "aac",
+            str(video),
+        ],
+        "Creating stopped-seek test video",
+    )
+    window = MainWindow(media)
+    qtbot.addWidget(window)
+    frames: list[tuple[float, int, int, int]] = []
+
+    def collect_frame(frame) -> None:
+        image = frame.toImage()
+        if image.isNull():
+            return
+        color = image.pixelColor(image.width() // 2, image.height() // 2)
+        frames.append((frame.startTime() / 1000, color.red(), color.green(), color.blue()))
+
+    window.video_widget.videoSink().videoFrameChanged.connect(collect_frame)
+    window._set_project(
+        PackProject(
+            title="Seek test",
+            authors=["Test"],
+            video_path=str(video),
+            video_duration=4,
+        ),
+        None,
+        mark_dirty=False,
+    )
+    window.show()
+    qtbot.waitUntil(
+        lambda: window.player.mediaStatus()
+        in {
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        },
+        timeout=6000,
+    )
+    window.player.stop()
+    frames.clear()
+
+    window.seek(3.0)
+    qtbot.waitUntil(
+        lambda: not window._stopped_seek_active
+        and window.player.playbackState() == QMediaPlayer.PlaybackState.PausedState,
+        timeout=6000,
+    )
+    qtbot.waitUntil(lambda: bool(frames), timeout=2000)
+    timestamp, red, green, blue = min(frames, key=lambda item: abs(item[0] - 3000))
+
+    assert abs(timestamp - 3000) <= 100
+    assert blue > red * 2 and blue > green * 2
+    assert abs(window.player.position() - 3000) <= 150
+    assert not window.audio_output.isMuted()
+    window.dirty = False
+    window.close()
