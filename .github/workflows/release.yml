@@ -67,6 +67,7 @@ jobs:
             throw "Release or tag $env:RELEASE_TAG already exists; bump the project version first"
           }
           Write-Host "Version $env:RELEASE_TAG is available"
+          exit 0
 
       - name: Build validated portable ZIP
         shell: powershell
