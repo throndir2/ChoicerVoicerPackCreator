@@ -258,6 +258,18 @@ replaced until both the application folder and a clean ZIP extraction pass packa
 Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or
 `libmp3lame`.
 
+## GitHub releases
+
+This repository intentionally has **no automatic push or pull-request CI**. Pushing commits does not
+start an Actions runner. Tests and validation are run locally during development.
+
+The only GitHub Actions workflow is **Create GitHub Release**, and it runs solely when a maintainer
+manually selects **Actions → Create GitHub Release → Run workflow**. It reads the version from
+`pyproject.toml`, builds and smoke-tests the portable Windows package, creates tag `v<version>`, and
+publishes a GitHub Release containing the ZIP and its SHA-256 checksum. Running it again without
+bumping the project version fails before the expensive build rather than replacing an existing
+release or tag. Releases are restricted to the canonical `main` branch.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for project conventions.
 
 ## License

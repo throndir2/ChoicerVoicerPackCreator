@@ -27,3 +27,8 @@ Release candidates should pass `scripts/validate_external.py` with both required
 exported integration fixture, in addition to lint, pytest, and packaged-application smoke tests.
 The Windows packaging step must use the pinned LGPL manifest and retain all generated FFmpeg
 license/provenance files. Do not substitute a GPL, nonfree, floating, or unchecked binary.
+
+Pushes and pull requests do not run GitHub Actions. Complete all checks locally. After bumping and
+committing the release version, a maintainer can manually run **Create GitHub Release** from the
+Actions page. That release-only workflow builds the validated portable ZIP and attaches it, together
+with a SHA-256 checksum, to a new versioned GitHub Release.
