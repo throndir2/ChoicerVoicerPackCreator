@@ -119,6 +119,9 @@ def build_candidate() -> int:
         "PySide6.QtMultimediaWidgets",
         "--add-data",
         f"{ROOT / 'assets'}{os.pathsep}assets",
+        "--add-data",
+        f"{ROOT / 'src' / 'choicer_voicer_pack_creator' / 'resources'}"
+        f"{os.pathsep}choicer_voicer_pack_creator/resources",
         str(ROOT / "src" / "choicer_voicer_pack_creator" / "__main__.py"),
     ]
     completed = subprocess.run(command, cwd=ROOT, check=False)
@@ -135,6 +138,9 @@ def build_candidate() -> int:
         FFMPEG_STAGE / "licenses" / "FFmpeg-LGPL-3.0.txt",
         app_dir / "licenses" / "LGPL-3.0.txt",
     )
+    resource_dir = ROOT / "src" / "choicer_voicer_pack_creator" / "resources"
+    shutil.copy2(resource_dir / "WhisperCpp-MIT.txt", app_dir / "licenses")
+    shutil.copy2(resource_dir / "OpenAI-Whisper-MIT.txt", app_dir / "licenses")
     python_license = Path(sys.base_prefix) / "LICENSE.txt"
     if not python_license.is_file():
         print(f"Python license was not found: {python_license}", file=sys.stderr)

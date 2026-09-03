@@ -3,7 +3,17 @@ from __future__ import annotations
 import getpass
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QSignalBlocker, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import (
+    QSettings,
+    QSignalBlocker,
+    QStandardPaths,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QKeySequence
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -35,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from choicer_voicer_pack_creator import __version__
+from choicer_voicer_pack_creator.analysis import AnalysisSuggestion
 from choicer_voicer_pack_creator.exporter import (
     ExportResult,
     PackExporter,
@@ -48,6 +59,7 @@ from choicer_voicer_pack_creator.timeline_audit import (
     TimelineOverlap,
     audit_timeline_overlaps,
 )
+from choicer_voicer_pack_creator.ui.analysis_dialog import AnalysisDialog
 from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
 
@@ -116,6 +128,7 @@ class MainWindow(QMainWindow):
         *,
         settings: QSettings | None = None,
         recovery_store: RecoveryStore | None = None,
+        analysis_data_root: Path | None = None,
     ) -> None:
         super().__init__()
         self.media = media
@@ -125,6 +138,16 @@ class MainWindow(QMainWindow):
             "ChoicerVoicerCommunity", "ChoicerVoicerPackCreator"
         )
         self.recovery_store = recovery_store
+        self.analysis_data_root = (
+            analysis_data_root.resolve()
+            if analysis_data_root
+            else Path(
+                QStandardPaths.writableLocation(
+                    QStandardPaths.StandardLocation.AppLocalDataLocation
+                )
+            )
+            / "analysis"
+        )
         self.project = PackProject(authors=[getpass.getuser()])
         self.project_path: Path | None = None
         self.selected_segment_id = ""
@@ -198,6 +221,9 @@ class MainWindow(QMainWindow):
         self.action_export.triggered.connect(self.export_pack)
         self.action_exit = QAction("Exit", self)
         self.action_exit.triggered.connect(self.close)
+        self.action_analyze = QAction("Analyze Video && Suggest Segments…", self)
+        self.action_analyze.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        self.action_analyze.triggered.connect(lambda: self.open_analysis_dialog())
 
         self.action_add = QAction("Add Segment", self)
         self.action_add.setShortcut(QKeySequence("Ctrl+Shift+A"))
@@ -224,6 +250,8 @@ class MainWindow(QMainWindow):
         edit_menu.addActions(
             [self.action_add, self.action_split, self.action_duplicate, self.action_delete]
         )
+        tools_menu = self.menuBar().addMenu("&Tools")
+        tools_menu.addAction(self.action_analyze)
         help_menu = self.menuBar().addMenu("&Help")
         about = help_menu.addAction("About")
         about.triggered.connect(self.show_about)
@@ -870,6 +898,86 @@ class MainWindow(QMainWindow):
         )
         self._set_project(project, None, mark_dirty=True)
         self.statusBar().showMessage(f"Loaded {source.name}. Mark a range and add the first segment.")
+        QTimer.singleShot(0, lambda: self.open_analysis_dialog(initial_scan=True))
+
+    def open_analysis_dialog(self, *, initial_scan: bool = False) -> None:
+        if not self.project.video_path or not Path(self.project.video_path).is_file():
+            QMessageBox.information(
+                self,
+                "No source video",
+                "Load or relink a source video before running local analysis.",
+            )
+            return
+        dialog = AnalysisDialog(
+            self.media,
+            Path(self.project.video_path),
+            self.project.video_duration,
+            self.analysis_data_root,
+            len(self.project.segments),
+            self,
+            initial_scan=initial_scan,
+        )
+        dialog.suggestions_accepted.connect(self._add_analysis_suggestions)
+        dialog.preview_requested.connect(self._preview_analysis_range)
+        dialog.exec()
+
+    @Slot(float, float)
+    def _preview_analysis_range(self, start: float, end: float) -> None:
+        self.prompt_player.stop()
+        self._cancel_stopped_seek(restore_audio=True)
+        self._preview_end = end
+        self.player.setPosition(round(start * 1000))
+        self.player.play()
+
+    @Slot(object)
+    def _add_analysis_suggestions(self, value: object) -> None:
+        if not isinstance(value, list) or not all(
+            isinstance(item, AnalysisSuggestion) for item in value
+        ):
+            QMessageBox.critical(self, "Could not add suggestions", "Analysis data was invalid.")
+            return
+        existing_ranges = {
+            (round(segment.start, 3), round(segment.end, 3), segment.caption.casefold())
+            for segment in self.project.segments
+        }
+        added: list[Segment] = []
+        for suggestion in value:
+            key = (
+                round(suggestion.start, 3),
+                round(suggestion.end, 3),
+                suggestion.caption.casefold(),
+            )
+            near_existing = any(
+                abs(round(existing.start * 1000) - round(suggestion.start * 1000)) <= 50
+                and abs(round(existing.end * 1000) - round(suggestion.end * 1000)) <= 50
+                for existing in self.project.segments
+            )
+            if key in existing_ranges or near_existing:
+                continue
+            segment = Segment(
+                start=suggestion.start,
+                end=suggestion.end,
+                caption=suggestion.caption,
+                characters=[],
+                audio_mode="video",
+                source_range_known=True,
+            )
+            self.project.segments.append(segment)
+            existing_ranges.add(key)
+            added.append(segment)
+        if not added:
+            self.statusBar().showMessage("No new analysis suggestions were added.")
+            return
+        self.project.sort_segments()
+        self._set_dirty(True)
+        self.segments_section.set_collapsed(False)
+        self.selected_section.set_collapsed(False)
+        self._refresh_table(added[0].id)
+        self.select_segment(added[0].id)
+        self.speakers_edit.setFocus()
+        self.statusBar().showMessage(
+            f"Added {len(added)} review suggestion(s). Assign speakers and verify every caption/range."
+        )
 
     def open_project(self) -> None:
         if not self._maybe_save():
@@ -2066,6 +2174,7 @@ class MainWindow(QMainWindow):
             self.action_save,
             self.action_save_as,
             self.action_restore_previous,
+            self.action_analyze,
             self.action_export,
             self.action_add,
             self.action_split,
@@ -2159,6 +2268,9 @@ class MainWindow(QMainWindow):
             "<p>Godot is <b>not</b> the GUI framework or an end-user dependency. Release tests use "
             "Godot's native <code>ConfigFile</code> parser because The Choicer Voicer is a Godot "
             "application and reads pack metadata with that parser.</p>"
+            "<p>Optional video analysis uses deterministic audio-energy scanning and can download "
+            "a pinned local whisper.cpp CPU runtime/model. No media is uploaded. Transcripts and "
+            "timestamps are editable suggestions, never correctness claims.</p>"
             "<p>Project files store paths and edit decisions only. Source media remains yours.</p>",
         )
 

@@ -23,7 +23,15 @@ $repositoryRoot = $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($repositoryRoot)) {
     $repositoryRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 }
-$buildEnvironment = Join-Path $repositoryRoot ".build-venv"
+$localApplicationData = [Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::LocalApplicationData
+)
+if ([string]::IsNullOrWhiteSpace($localApplicationData)) {
+    throw "Could not locate the current user's local application-data directory."
+}
+$buildEnvironment = Join-Path `
+    $localApplicationData `
+    "ChoicerVoicerPackCreator\BuildEnvironments\python-3.12-x64"
 $buildPython = Join-Path $buildEnvironment "Scripts\python.exe"
 $pythonProbe = "import struct, sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) and struct.calcsize('P') == 8 else 1)"
 
@@ -156,7 +164,7 @@ if (-not (Test-Path -LiteralPath $buildPython -PathType Leaf)) {
 
 & $buildPython -c $pythonProbe 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) {
-    throw "The existing .build-venv is not 64-bit Python 3.12. Re-run with -ResetBuildEnvironment."
+    throw "The existing isolated build environment is not 64-bit Python 3.12. Re-run with -ResetBuildEnvironment."
 }
 
 Push-Location $repositoryRoot
@@ -164,15 +172,15 @@ $extractedSmokeRoot = $null
 try {
     Invoke-CheckedCommand `
         -FilePath $buildPython `
+        -ArgumentList @("-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--editable", ".[build]") `
+        -Description "Installing the pinned application and packaging dependencies"
+    Invoke-CheckedCommand `
+        -FilePath $buildPython `
         -ArgumentList @(
             "-c",
             "import pathlib,tomllib; from choicer_voicer_pack_creator import __version__; expected=tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version']; raise SystemExit(0 if __version__ == expected else 1)"
         ) `
         -Description "Verifying source and package versions match"
-    Invoke-CheckedCommand `
-        -FilePath $buildPython `
-        -ArgumentList @("-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--editable", ".[build]") `
-        -Description "Installing the pinned application and packaging dependencies"
     Invoke-CheckedCommand `
         -FilePath $buildPython `
         -ArgumentList @("scripts\build.py") `

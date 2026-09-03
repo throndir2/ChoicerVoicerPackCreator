@@ -70,6 +70,30 @@ def main() -> int:
         )
     if "n9.0.1-11-ge47273f4d9-20260901" not in report["version"]:
         raise RuntimeError(f"Unexpected bundled FFmpeg version: {report['version']}")
+    analysis_manifest = Path(report["analysis_manifest"]).resolve()
+    expected_manifest = (
+        executable.parent
+        / "_internal"
+        / "choicer_voicer_pack_creator"
+        / "resources"
+        / "whisper-analysis-windows-x64.json"
+    ).resolve()
+    if analysis_manifest != expected_manifest:
+        raise RuntimeError(f"Unexpected packaged analysis manifest: {analysis_manifest}")
+    if not report.get("analysis_manifest_present") or not report.get(
+        "analysis_licenses_present"
+    ):
+        raise RuntimeError("Packaged optional-analysis provenance or licenses are missing")
+    if report.get("whisper_runtime_build") != "b4938":
+        raise RuntimeError("Packaged optional-analysis runtime metadata is incorrect")
+    if report.get("whisper_models") != ["base", "tiny"]:
+        raise RuntimeError("Packaged optional-analysis model metadata is incomplete")
+    if int(report.get("analysis_cpu_threads", 0)) < 1:
+        raise RuntimeError("Packaged optional-analysis hardware detection failed")
+    if int(report.get("activity_scan_regions", 0)) != 1 or not isinstance(
+        report.get("activity_scan_threshold_db"), (int, float)
+    ):
+        raise RuntimeError("Packaged deterministic activity scanning failed")
     print(json.dumps(report, indent=2))
     print("PACKAGED APPLICATION + BUNDLED FFMPEG SMOKE PASSED")
     return 0

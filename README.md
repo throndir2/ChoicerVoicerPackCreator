@@ -18,6 +18,9 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Defines, moves, and trims ranges directly on the waveform; segment blocks also support body and
 	edge dragging.
 - Highlights substantial, non-identical segment overlaps for deterministic human review.
+- Offers a one-time initial scan that proposes editable ranges from deterministic audio activity.
+- Optionally downloads a pinned local Whisper CPU runtime/model to draft captions and timestamps;
+	source audio and transcripts are not uploaded.
 - Assigns one or more speakers and an exact performance line to every segment.
 - Duplicates a segment at the same timestamp for independently recorded simultaneous speakers.
 - Imports existing Choicer Voicer pack folders and preserves their prompt audio and still images.
@@ -72,7 +75,8 @@ On a Windows x86-64 computer, double-click `Build-Portable.cmd`. From PowerShell
 ```
 
 The build computer needs **64-bit Python 3.12** and an internet connection for the first build. The
-script creates an isolated `.build-venv`, installs the pinned Python packaging dependencies, securely
+script creates an isolated environment under the current user's local application data, installs
+the pinned Python packaging dependencies, securely
 downloads and verifies the pinned LGPL FFmpeg runtime, builds the application, and smoke-tests the
 finished executable. It does not require a system FFmpeg installation. Use
 `-ResetBuildEnvironment` if the isolated environment ever needs to be recreated.
@@ -80,8 +84,8 @@ finished executable. It does not require a system FFmpeg installation. Use
 The finished outputs are:
 
 ```text
-dist/v0.3.2/portable-<build-id>/Choicer Voicer Pack Creator/
-dist/v0.3.2/Choicer-Voicer-Pack-Creator-0.3.2-Windows-x64.zip
+dist/v0.4.0/portable-<build-id>/Choicer Voicer Pack Creator/
+dist/v0.4.0/Choicer-Voicer-Pack-Creator-0.4.0-Windows-x64.zip
 ```
 
 The script prints the exact generated application-folder path. Each rebuild uses a new path to avoid
@@ -119,14 +123,46 @@ If `py` is unavailable, invoke your installed Python executable directly.
 ## Create a pack
 
 1. Choose **File → New from Video**.
-2. Scrub the video or click the waveform to find a line.
-3. Set **In** at the beginning of the spoken line and **Out** after its final phoneme.
-4. Select **Add Segment**.
-5. Enter the speaker name and the exact line in the right panel.
-6. Repeat for the whole video. Drag segment edges on the timeline for fine adjustments.
-7. Optionally choose a clean backing track and custom icon.
-8. Save the editable project.
-9. Choose **Export Pack + ZIP** and select an output directory.
+2. Optionally use the initial analysis window to scan for possible lines and draft local Whisper
+	captions, then check only the suggestions you want to add.
+3. Assign a speaker and verify every suggested caption and boundary against the source video.
+4. Scrub the video or click the waveform to find any remaining line.
+5. Set **In** at the beginning of the spoken line and **Out** after its final phoneme.
+6. Select **Add Segment**.
+7. Enter the speaker name and the exact line in the right panel.
+8. Repeat for the whole video. Drag segment edges on the timeline for fine adjustments.
+9. Optionally choose a clean backing track and custom icon.
+10. Save the editable project.
+11. Choose **Export Pack + ZIP** and select an output directory.
+
+### Analyze and transcribe a video
+
+The initial analysis window opens after **New from Video** and can be reopened with **Tools →
+Analyze Video & Suggest Segments** (`Ctrl+Shift+R`). It always offers a dependency-free activity
+scan with Balanced, Sensitive, and Conservative modes. This scan measures deterministic audio
+energy and suggests possible regions; music, effects, and silence changes can still be false
+positives.
+
+Local transcription is optional. On first use, the app asks before downloading:
+
+- an official, pinned whisper.cpp 1.9.3 Windows x64 CPU runtime (about 8 MiB); and
+- either the multilingual Tiny model (about 74 MiB) or Base model (about 141 MiB).
+
+The app recommends Base when at least 2 GiB of physical memory is currently available and Tiny on
+more constrained systems. The
+CPU runtime automatically selects an optimized instruction-set backend and does not require CUDA.
+Every download uses an immutable upstream revision and is checked for exact size and SHA-256 before
+use. Components are cached in the current user's local application-data directory, while temporary
+analysis audio and transcript JSON are deleted after each scan.
+
+Results list editable In/Out values and draft captions. Double-click a row or use **Preview Row** to
+audition it, uncheck unwanted rows, correct text, then add the checked suggestions. Existing segments
+are never replaced. Suggested segments intentionally have no speaker; assign speakers manually.
+Whisper is probabilistic and can mishear names, stylized vocalizations, non-English speech, music,
+or overlapping speakers, so every result remains review evidence rather than authoritative data.
+One language selection applies to an entire scan; use Auto-detect for primarily single-language
+sources, or rerun selected-language passes when a video deliberately mixes languages. Long videos
+also receive conservative free-disk and memory checks before analysis begins.
 
 ### Direct waveform editing
 
@@ -150,12 +186,12 @@ unflagged because they intentionally support simultaneous speakers; duplicates t
 speaker are flagged. These amber notices are review evidence, not export-blocking errors; the tool
 never moves a range automatically.
 
-Experimental VAD, OCR, Whisper transcription, source separation, and game-dialogue lookup tools
-were evaluated but are not treated as correctness oracles. Their existing results varied with model
-settings, merged speakers, missed stylized vocalizations, or produced timing that did not match the
-spoken cut. They would also add large model downloads and licensing/provenance work. Automatic
-captions or speaker assignments are therefore not included in the portable app; exact lines still
-require human review against the decoded source.
+Experimental Silero VAD, OCR, source separation, and game-dialogue lookup tools were evaluated but
+are not treated as correctness oracles. Their existing results varied with model settings, merged
+speakers, missed stylized vocalizations, or produced timing that did not match the spoken cut.
+Whisper was integrated only as an explicitly optional local drafting tool with pinned provenance;
+it never assigns speakers or silently changes project data. Exact lines still require human review
+against the decoded source.
 
 When no backing track is selected, the exporter creates a duration-matched silent backing track;
 it never places the source video's original voices under new recordings.
@@ -269,8 +305,8 @@ with another compatible pair.
 .\Build-Portable.ps1
 ```
 
-The Windows application folder is written below `dist/v0.3.2/portable-<build-id>/`, with a
-shareable `Choicer-Voicer-Pack-Creator-0.3.2-Windows-x64.zip` beside it. The first build downloads
+The Windows application folder is written below `dist/v0.4.0/portable-<build-id>/`, with a
+shareable `Choicer-Voicer-Pack-Creator-0.4.0-Windows-x64.zip` beside it. The first build downloads
 about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. The stable sharing ZIP is not
 replaced until both the application folder and a clean ZIP extraction pass packaged smoke tests.
 Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or

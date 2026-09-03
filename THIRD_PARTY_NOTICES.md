@@ -21,6 +21,29 @@ The build recipe records the configure command and exact source recipes for FFmp
 
 FFmpeg is a trademark of Fabrice Bellard. Choicer Voicer Pack Creator is not affiliated with the FFmpeg project or BtbN.
 
+## Optional whisper.cpp analysis
+
+The optional **Analyze Video** feature can download an unmodified CPU build of
+[whisper.cpp](https://github.com/ggml-org/whisper.cpp) and a converted OpenAI Whisper model into
+the current user's local application-data directory. These files are not included in the base
+application ZIP and are used only when the user explicitly enables local transcription.
+
+- whisper.cpp version: `1.9.3`, release/build `b4938`
+- whisper.cpp source revision: `371b5a7561823ab2bb32142d2751e35e7534727b`
+- Windows x64 runtime archive SHA-256: `c2a4b60edb11f7e11a9191ffb50929535527d4d91c9903dbe3e554583bbbc63d`
+- Model repository revision: `5359861c739e955e79d9a303bcbc70fb988958b1`
+- Tiny multilingual model SHA-256: `be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21`
+- Base multilingual model SHA-256: `60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe`
+
+Both whisper.cpp and OpenAI Whisper are licensed under the MIT License. Exact license texts are
+stored in `src/choicer_voicer_pack_creator/resources/WhisperCpp-MIT.txt` and
+`src/choicer_voicer_pack_creator/resources/OpenAI-Whisper-MIT.txt` and are copied
+beside downloaded analysis components. Full immutable URLs and file inventory are recorded in
+`src/choicer_voicer_pack_creator/resources/whisper-analysis-windows-x64.json`.
+
+Whisper output is probabilistic review assistance. It is not represented as an exact transcript,
+speaker detector, or authoritative source boundary.
+
 ## Qt for Python / PySide6
 
 The Windows application uses Qt for Python (PySide6 6.11.2) under the LGPL v3 option. The generic

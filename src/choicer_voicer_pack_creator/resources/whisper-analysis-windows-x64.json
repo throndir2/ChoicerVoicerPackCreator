@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "component": "Optional local video analysis",
+  "runtime": {
+    "name": "whisper.cpp",
+    "version": "1.9.3",
+    "build": "b4938",
+    "platform": "windows-x86_64-cpu",
+    "license": "MIT",
+    "source_repository": "https://github.com/ggml-org/whisper.cpp",
+    "source_commit": "371b5a7561823ab2bb32142d2751e35e7534727b",
+    "source_archive": "https://github.com/ggml-org/whisper.cpp/archive/371b5a7561823ab2bb32142d2751e35e7534727b.tar.gz",
+    "archive_name": "whisper-bin-x64-b4938.zip",
+    "archive_url": "https://github.com/ggml-org/whisper.cpp/releases/download/b4938/whisper-bin-x64.zip",
+    "archive_bytes": 8361840,
+    "archive_sha256": "c2a4b60edb11f7e11a9191ffb50929535527d4d91c9903dbe3e554583bbbc63d",
+    "archive_root": "Release",
+    "runtime_files": {
+      "ggml-base.dll": { "bytes": 667648, "sha256": "cb1dfa532b8bf14c3cd54d8bd7ef12b8d07d3f7d85dbef01c135c1475e08ed38" },
+      "ggml-cpu-alderlake.dll": { "bytes": 810496, "sha256": "660886106a61537002c52cf0c7021bc8a8060174cc802ed650b9bfb77eb9183a" },
+      "ggml-cpu-cannonlake.dll": { "bytes": 854016, "sha256": "aab6d7e3c1707bd7cbb4da2061fd59fee5d6e3f4fe71606ab1a43ac814f1d89f" },
+      "ggml-cpu-cascadelake.dll": { "bytes": 851456, "sha256": "bef920f38f26432fa456ad7beda8a35b11d8719d10d198c08e61d1bc33c0ba40" },
+      "ggml-cpu-haswell.dll": { "bytes": 811520, "sha256": "f52a4824868b8d9ac48f814edeb4f7382e28371f093ef6e115077fb7125bf830" },
+      "ggml-cpu-icelake.dll": { "bytes": 851456, "sha256": "161baa9fb0061df74d0f0d83339a68890b2be1ba22b6b406d9a0ea23dbf89628" },
+      "ggml-cpu-sandybridge.dll": { "bytes": 803840, "sha256": "e5cb5b8ecbc52ffc05d54f8456db41eb17036bb6848592f7df8666f0ade12cdb" },
+      "ggml-cpu-skylakex.dll": { "bytes": 853504, "sha256": "4784b7f45e7b5199981e7ba8c391cd1b5d4aa74413a0929cfd0a6d909098c30e" },
+      "ggml-cpu-sse42.dll": { "bytes": 790528, "sha256": "674320166d86f18573f8e0e99efcdb90cfa6b7b05b42d9465976ef5e70e5e4a3" },
+      "ggml-cpu-x64.dll": { "bytes": 794624, "sha256": "ffc1938f2ce3b52cef0e0935c6ce953bb5cc5593757ea55872ae4c4ee8bd577a" },
+      "ggml.dll": { "bytes": 67584, "sha256": "4e77ead4ecc32324f9432acb06ee71444708880ca6780c918baa6903389ba257" },
+      "whisper-cli.exe": { "bytes": 479232, "sha256": "800a0fd754afa75e109c7248286ad735670fb6b23d92ca5d12604647ef638a65" },
+      "whisper.dll": { "bytes": 1368064, "sha256": "0a29e5824c7495185b833ad07df7ab9cadf130a9be848f967c6b88aeca971566" }
+    }
+  },
+  "models": {
+    "tiny": {
+      "name": "Whisper Tiny multilingual",
+      "filename": "ggml-tiny-5359861c.bin",
+      "source_filename": "ggml-tiny.bin",
+      "bytes": 77691713,
+      "sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.bin"
+    },
+    "base": {
+      "name": "Whisper Base multilingual",
+      "filename": "ggml-base-5359861c.bin",
+      "source_filename": "ggml-base.bin",
+      "bytes": 147951465,
+      "sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin"
+    }
+  },
+  "model_source": {
+    "repository": "https://huggingface.co/ggerganov/whisper.cpp",
+    "commit": "5359861c739e955e79d9a303bcbc70fb988958b1",
+    "license": "MIT",
+    "upstream_model_repository": "https://github.com/openai/whisper"
+  }
+}
