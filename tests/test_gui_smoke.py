@@ -185,6 +185,76 @@ def test_seek_from_stopped_state_decodes_then_pauses_on_target(qtbot) -> None:
     window.close()
 
 
+def test_selecting_table_segment_cues_playback_before_play(qtbot) -> None:
+    class PromptPlayer:
+        def __init__(self) -> None:
+            self.stop_count = 0
+
+        def stop(self):
+            self.stop_count += 1
+
+    class PausedPlayer:
+        def __init__(self) -> None:
+            self.state = QMediaPlayer.PlaybackState.PausedState
+            self.position_ms = 250
+            self.calls: list[object] = []
+
+        def playbackState(self):
+            return self.state
+
+        def setPosition(self, milliseconds):
+            self.calls.append(("position", milliseconds))
+            self.position_ms = milliseconds
+
+        def position(self):
+            return self.position_ms
+
+        def play(self):
+            self.calls.append("play")
+            self.state = QMediaPlayer.PlaybackState.PlayingState
+
+        def pause(self):
+            self.calls.append("pause")
+            self.state = QMediaPlayer.PlaybackState.PausedState
+
+        def stop(self):
+            self.calls.append("stop")
+            self.state = QMediaPlayer.PlaybackState.StoppedState
+
+    first = Segment(1, 2, "First", ["A"])
+    second = Segment(6.25, 7.5, "Second", ["B"])
+    window = MainWindow(UnusedMedia())  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    window._set_project(
+        PackProject(
+            title="Selection cue",
+            authors=["Creator"],
+            video_duration=10,
+            segments=[first, second],
+        ),
+        None,
+        mark_dirty=False,
+    )
+    player = PausedPlayer()
+    window.player = player  # type: ignore[assignment]
+    prompt_player = PromptPlayer()
+    window.prompt_player = prompt_player  # type: ignore[assignment]
+
+    window.segment_table.selectRow(1)
+    qtbot.waitUntil(lambda: window.selected_segment_id == second.id)
+
+    assert player.position_ms == 6250
+    assert player.calls == [("position", 6250)]
+    assert prompt_player.stop_count == 1
+    assert window.mark_in_spin.value() == second.start
+    assert window.mark_out_spin.value() == second.end
+    window.toggle_playback()
+    assert player.calls[-1] == "play"
+    assert player.position_ms == 6250
+    window.dirty = False
+    window.close()
+
+
 def test_overlap_review_is_visible_but_does_not_block_export_readiness(
     qtbot, tmp_path: Path
 ) -> None:

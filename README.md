@@ -9,6 +9,7 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Creates a new project from MP4, MKV, MOV, WebM, OGV, or AVI video.
 - Plays the source video inside the editor.
 - Keeps the decoded video frame visible when seeking while playback is stopped.
+- Cues playback to a segment's In point whenever that segment is selected.
 - Extracts and displays a zoomable waveform.
 - Marks precise In/Out points in seconds.
 - Adds, previews, splits, duplicates, deletes, and re-times segments.
@@ -79,8 +80,8 @@ finished executable. It does not require a system FFmpeg installation. Use
 The finished outputs are:
 
 ```text
-dist/v0.3.1/portable-<build-id>/Choicer Voicer Pack Creator/
-dist/v0.3.1/Choicer-Voicer-Pack-Creator-0.3.1-Windows-x64.zip
+dist/v0.3.2/portable-<build-id>/Choicer Voicer Pack Creator/
+dist/v0.3.2/Choicer-Voicer-Pack-Creator-0.3.2-Windows-x64.zip
 ```
 
 The script prints the exact generated application-folder path. Each rebuild uses a new path to avoid
@@ -268,8 +269,8 @@ with another compatible pair.
 .\Build-Portable.ps1
 ```
 
-The Windows application folder is written below `dist/v0.3.1/portable-<build-id>/`, with a
-shareable `Choicer-Voicer-Pack-Creator-0.3.1-Windows-x64.zip` beside it. The first build downloads
+The Windows application folder is written below `dist/v0.3.2/portable-<build-id>/`, with a
+shareable `Choicer-Voicer-Pack-Creator-0.3.2-Windows-x64.zip` beside it. The first build downloads
 about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. The stable sharing ZIP is not
 replaced until both the application folder and a clean ZIP extraction pass packaged smoke tests.
 Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or

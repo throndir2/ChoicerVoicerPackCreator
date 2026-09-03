@@ -1367,21 +1367,23 @@ class MainWindow(QMainWindow):
         self.player.play()
 
     def select_segment(self, segment_id: str) -> None:
-        if not self.project.segment_by_id(segment_id):
+        segment = self.project.segment_by_id(segment_id)
+        if not segment:
             return
+        self.prompt_player.stop()
         self.selected_segment_id = segment_id
         self.timeline.set_selected(segment_id)
         self._select_table_row(segment_id)
         self._sync_selected_editor()
-        segment = self.selected_segment()
-        if segment:
-            self._syncing = True
-            try:
-                self.mark_in_spin.setValue(segment.start)
-                self.mark_out_spin.setValue(segment.end)
-            finally:
-                self._syncing = False
-            self.timeline.set_marks(segment.start, segment.end, segment.id)
+        self._syncing = True
+        try:
+            self.mark_in_spin.setValue(segment.start)
+            self.mark_out_spin.setValue(segment.end)
+        finally:
+            self._syncing = False
+        self.timeline.set_marks(segment.start, segment.end, segment.id)
+        self._preview_end = None
+        self.seek(segment.start)
 
     def selected_segment(self) -> Segment | None:
         return self.project.segment_by_id(self.selected_segment_id)

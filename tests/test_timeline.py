@@ -113,3 +113,102 @@ def test_seek_click_does_not_detach_selected_segment_marks(qtbot) -> None:
 
     assert timeline.mark_segment_id == segment.id
     assert (timeline.mark_in, timeline.mark_out) == (1, 2)
+
+
+def test_segment_click_selects_then_seeks_to_precise_clicked_point(qtbot) -> None:
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 220)
+    timeline.set_duration(10)
+    segment = Segment(2, 4, "Existing", ["Speaker"])
+    timeline.set_segments([segment])
+    timeline.show()
+    selected: list[str] = []
+    seeks: list[float] = []
+    timeline.segment_selected.connect(selected.append)
+    timeline.seek_requested.connect(seeks.append)
+    center_y = round(timeline._segment_rect(segment).center().y())
+
+    qtbot.mouseClick(
+        timeline,
+        Qt.MouseButton.LeftButton,
+        pos=_point(timeline, 3.25, center_y),
+    )
+
+    assert selected == [segment.id]
+    assert seeks == [pytest.approx(3.25, abs=0.01)]
+
+
+def test_narrow_segment_keeps_clickable_and_draggable_center(qtbot) -> None:
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 220)
+    timeline.set_duration(120)
+    segment = Segment(20, 21, "Short", ["Speaker"])
+    timeline.set_segments([segment])
+    timeline.show()
+    rect = timeline._segment_rect(segment)
+    assert 3 < rect.width() < 14
+    center_y = round(rect.center().y())
+    selected: list[str] = []
+    seeks: list[float] = []
+    timeline.segment_selected.connect(selected.append)
+    timeline.seek_requested.connect(seeks.append)
+
+    qtbot.mouseClick(
+        timeline,
+        Qt.MouseButton.LeftButton,
+        pos=_point(timeline, 20.5, center_y),
+    )
+    assert selected == [segment.id]
+    assert seeks == [pytest.approx(20.5, abs=0.07)]
+
+    qtbot.mousePress(
+        timeline,
+        Qt.MouseButton.LeftButton,
+        pos=_point(timeline, 20.5, center_y),
+    )
+    qtbot.mouseMove(timeline, _point(timeline, 22.5, center_y))
+    qtbot.mouseRelease(
+        timeline,
+        Qt.MouseButton.LeftButton,
+        pos=_point(timeline, 22.5, center_y),
+    )
+    assert segment.start == pytest.approx(22.0, abs=0.07)
+    assert segment.end == pytest.approx(23.0, abs=0.07)
+
+
+def test_minimum_width_segment_center_is_clickable_and_blank_lane_seeks(qtbot) -> None:
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 220)
+    timeline.set_duration(1000)
+    segment = Segment(200, 200.1, "Tiny", ["Speaker"])
+    timeline.set_segments([segment])
+    timeline.show()
+    rect = timeline._segment_rect(segment)
+    assert rect.width() == 3.0
+    center_y = round(rect.center().y())
+    selected: list[str] = []
+    seeks: list[float] = []
+    timeline.segment_selected.connect(selected.append)
+    timeline.seek_requested.connect(seeks.append)
+
+    qtbot.mouseClick(
+        timeline,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(round(rect.center().x()), center_y),
+    )
+    assert selected == [segment.id]
+
+    selected.clear()
+    seeks.clear()
+    blank_x = round(rect.right() + 50)
+    qtbot.mouseClick(
+        timeline,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(blank_x, center_y),
+    )
+    assert selected == []
+    assert seeks == [pytest.approx(timeline._x_to_time(blank_x), abs=0.01)]
+    assert (segment.start, segment.end) == (200, 200.1)

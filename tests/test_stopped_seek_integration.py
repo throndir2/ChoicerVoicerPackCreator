@@ -7,7 +7,7 @@ import pytest
 from PySide6.QtMultimedia import QMediaPlayer
 
 from choicer_voicer_pack_creator.media import MediaTools
-from choicer_voicer_pack_creator.models import PackProject
+from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.ui.main_window import MainWindow
 
 
@@ -66,12 +66,15 @@ def test_stopped_seek_retains_requested_video_frame(qtbot, tmp_path: Path) -> No
         frames.append((frame.startTime() / 1000, color.red(), color.green(), color.blue()))
 
     window.video_widget.videoSink().videoFrameChanged.connect(collect_frame)
+    first = Segment(0.5, 1.0, "Red segment", ["Red"])
+    second = Segment(3.0, 3.5, "Blue segment", ["Blue"])
     window._set_project(
         PackProject(
             title="Seek test",
             authors=["Test"],
             video_path=str(video),
             video_duration=4,
+            segments=[first, second],
         ),
         None,
         mark_dirty=False,
@@ -86,12 +89,19 @@ def test_stopped_seek_retains_requested_video_frame(qtbot, tmp_path: Path) -> No
         timeout=6000,
     )
     window.player.stop()
-    frames.clear()
-
-    window.seek(3.0)
+    window.select_segment(first.id)
     qtbot.waitUntil(
         lambda: not window._stopped_seek_active
         and window.player.playbackState() == QMediaPlayer.PlaybackState.PausedState,
+        timeout=6000,
+    )
+    assert abs(window.player.position() - 500) <= 150
+    frames.clear()
+
+    window.segment_table.selectRow(1)
+    qtbot.waitUntil(
+        lambda: window.selected_segment_id == second.id
+        and abs(window.player.position() - 3000) <= 150,
         timeout=6000,
     )
     qtbot.waitUntil(lambda: bool(frames), timeout=2000)
@@ -101,5 +111,11 @@ def test_stopped_seek_retains_requested_video_frame(qtbot, tmp_path: Path) -> No
     assert blue > red * 2 and blue > green * 2
     assert abs(window.player.position() - 3000) <= 150
     assert not window.audio_output.isMuted()
+    window.toggle_playback()
+    qtbot.waitUntil(
+        lambda: window.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState,
+        timeout=2000,
+    )
+    assert window.player.position() >= 2850
     window.dirty = False
     window.close()

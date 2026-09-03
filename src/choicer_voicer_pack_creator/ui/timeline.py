@@ -245,24 +245,24 @@ class TimelineWidget(QWidget):
         x = event.position().x()
         for segment in reversed(self.segments):
             rect = self._segment_rect(segment)
-            if rect.top() <= event.position().y() <= rect.bottom():
-                if abs(x - rect.left()) <= 7:
+            if rect.contains(event.position()):
+                edge_width = min(7.0, rect.width() / 3.0) if rect.width() >= 6.0 else 0.0
+                if x <= rect.left() + edge_width:
                     self._prepare_drag("segment-start", segment.id, segment.start, segment.end, x)
                     self.selected_id = segment.id
                     self.segment_selected.emit(segment.id)
                     self._activate_drag()
                     return
-                if abs(x - rect.right()) <= 7:
+                if x >= rect.right() - edge_width:
                     self._prepare_drag("segment-end", segment.id, segment.start, segment.end, x)
                     self.selected_id = segment.id
                     self.segment_selected.emit(segment.id)
                     self._activate_drag()
                     return
-                if rect.contains(event.position()):
-                    self._prepare_drag("segment-body", segment.id, segment.start, segment.end, x)
-                    self.selected_id = segment.id
-                    self.segment_selected.emit(segment.id)
-                    return
+                self._prepare_drag("segment-body", segment.id, segment.start, segment.end, x)
+                self.selected_id = segment.id
+                self.segment_selected.emit(segment.id)
+                return
 
         if 25 <= event.position().y() <= 109:
             x1 = self._time_to_x(self.mark_in)
@@ -307,7 +307,11 @@ class TimelineWidget(QWidget):
         for segment in reversed(self.segments):
             rect = self._segment_rect(segment)
             if rect.contains(event.position()):
-                if abs(event.position().x() - rect.left()) <= 7 or abs(event.position().x() - rect.right()) <= 7:
+                edge_width = min(7.0, rect.width() / 3.0) if rect.width() >= 6.0 else 0.0
+                if (
+                    event.position().x() <= rect.left() + edge_width
+                    or event.position().x() >= rect.right() - edge_width
+                ):
                     self.setCursor(Qt.CursorShape.SizeHorCursor)
                 else:
                     self.setCursor(Qt.CursorShape.SizeAllCursor)
