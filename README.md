@@ -211,6 +211,22 @@ One language selection applies to an entire scan; use Auto-detect for primarily 
 sources, or rerun selected-language passes when a video deliberately mixes languages. Long videos
 also receive conservative free-disk and memory checks before analysis begins.
 
+New Whisper and Refined YouTube drafts include **up to 0.15 seconds of source audio before**
+and **0.25 seconds after** each range. These are real audio handles, not inserted silence, so
+slightly early consonants and trailing syllables can survive extraction. Short gaps are shared
+at their midpoint to avoid introducing overlaps; touching ranges have no room for extra audio,
+and already-overlapping rows retain their boundaries. The shown, previewed, saved, and imported
+In/Out values include these handles once. Existing saved drafts and manual segment edits are not
+automatically repadded. Adjust In/Out by ear when a boundary still clips speech.
+
+Whisper retains its full segment range rather than shrinking it to lexical-token offsets:
+even complete, ordered token timestamps can exclude a final word, while zero-duration tokens
+can lose the first word. This conservative choice may leave extra silence or music to trim
+manually. Neither segment timings nor small audio handles guarantee phoneme-accurate alignment,
+particularly with music. Export's
+separate head/tail padding still inserts silence around the selected source range; increasing
+that silence cannot recover speech already cut out of the source.
+
 Model download is setup, not transcription completion. The window identifies download,
 checksum verification, model loading, and audio processing as separate steps. During transcription
 it shows Whisper's reported percentage of audio processed and elapsed time; model loading and
@@ -281,19 +297,20 @@ you can also select or type a language code. YouTube-generated translations are 
 creator-uploaded tracks can themselves be translations. Some videos have no accessible captions,
 and caption delivery can fail independently of the video download.
 
-Available captions immediately populate the **YouTube Captions** panel. A local audio-only
-refinement pass runs automatically on a background thread, then selects the **Refined YouTube**
-draft for review and use. It requires no model download and keeps the original captions available.
+The **Refined YouTube** panel stays empty until a local audio-only refinement pass finishes on a
+background thread, then selects the processed draft for review and use. Unprocessed YouTube
+captions are never displayed or offered for import. Refinement requires no model download;
+original caption evidence stays in the project for regeneration, not as another transcript choice.
 After refinement completes, Whisper starts automatically, asking permission first if its
 runtime/model must be downloaded. Its result appears alongside YouTube in the **Whisper Transcript**
 panel without changing the selected draft. Each transcript keeps its own row count, text, and
 In/Out boundaries: a longer Whisper passage is not
 forced onto shorter YouTube captions or flagged as a conflict. You can edit, preview, and uncheck
 rows in each draft independently.
-The playback button names the chosen source: **Play Selected YouTube Line**,
-**Play Selected Refined YouTube Line**, or **Play Selected Whisper Line**.
+The playback button names the chosen source: **Play Selected Refined YouTube Line** or
+**Play Selected Whisper Line**.
 
-To adjust pause-aware segmentation, open the **Refined YouTube** tab and click
+To adjust pause-aware segmentation, use the **Refined YouTube** panel and click
 **Refine YouTube Again...**. Wait for or cancel a running Whisper scan first. Refinement
 uses the original imported YouTube words, not edits made to either draft.
 New imports retain YouTube's available word/text-fragment offsets. Refinement uses these
@@ -303,14 +320,15 @@ defaults to **0.40 seconds** and can be adjusted from 0.20 to 1.00 seconds befor
 Changing the setting alone does not rewrite a draft.
 
 Refinement never invents equally spaced word timings or splits an untimed phrase. Rows without
-usable timing metadata, including captions in older saved projects, retain their original ranges
-with a note in the **Source** column. Hover over that column to read the full note. Review every
+usable timing metadata, including captions in older saved projects, stay as whole phrases with
+the same conservative source-audio handles and a note in the **Source** column. Hover over that
+column to read the full note. Review every
 suggested boundary: this pass measures audio energy, not speaker identity, so music/effects can
 hide pauses and two speakers without a pause can still share a row. It does not correct
 misrecognized words, perform forced alignment, or separate overlapping voices.
 
-Choose the preferred source, then click **Use YouTube Transcript**, **Use Refined YouTube
-Transcript**, or **Use Whisper Transcript**.
+Choose the preferred source, then click **Use Refined YouTube Transcript** or **Use Whisper
+Transcript**.
 The checked rows from that source become editable project segments with that source's timings
 and no assigned speakers. Other sources are not mixed in. Playback also uses the chosen draft's
 own edited In/Out range. Choosing an available draft while another scan runs stops that scan.
@@ -318,14 +336,17 @@ Existing project segments are never
 silently replaced; adding another set requires confirmation.
 
 If captions are unavailable, the same automatic Whisper pass drafts suggestions from the audio.
-Declining Whisper setup or a failed/canceled Whisper scan leaves downloaded media and both
-YouTube drafts intact. If automatic refinement fails or is canceled, the original captions remain
-available and Whisper does not start automatically; either pass can be started manually.
+Declining Whisper setup or a failed/canceled Whisper scan leaves downloaded media and the
+Refined YouTube draft intact. If automatic refinement fails or is canceled, no original rows are
+shown as a fallback and Whisper does not start automatically; either pass can be retried manually.
+Any previously completed refined draft is retained.
 **Cancel Scan** keeps the analysis window open. **Keep Drafts & Close** stops a running scan and
 retains all available drafts, including edits, checked rows, source selection, and the pause setting, without adding
 segments. Draft changes are included in recovery snapshots and **Save Project**, just like other
-project edits. **Tools → Analyze Video & Suggest Segments** restores the saved drafts without
-rerunning analysis. A successful Whisper rescan replaces only the local draft after confirmation;
+project edits. **Tools → Analyze Video & Suggest Segments** restores completed drafts without
+rerunning analysis. If refinement has never completed, reopening resumes that pass without
+starting Whisper. Legacy original-draft edits are preserved in the project file but not displayed
+or imported as refined results. A successful Whisper rescan replaces only the local draft after confirmation;
 refining again replaces only the Refined YouTube draft after confirmation. A failed or canceled
 scan keeps its previous result. Original YouTube caption evidence, fragment timings, and the source URL
 are also retained. Replacing or clearing the source video clears its caption evidence and drafts.

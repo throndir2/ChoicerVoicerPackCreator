@@ -6,15 +6,41 @@ from pathlib import Path
 
 import pytest
 
+from choicer_voicer_pack_creator.captions import refine_captions
 from choicer_voicer_pack_creator.config_format import read_config
 from choicer_voicer_pack_creator.exporter import PackExporter
 from choicer_voicer_pack_creator.media import MediaTools
-from choicer_voicer_pack_creator.models import PackProject, Segment
+from choicer_voicer_pack_creator.models import PackProject, Segment, SourceCaption
 from choicer_voicer_pack_creator.pack_io import PackImporter
 
 
 def file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.integration
+def test_caption_handles_retain_source_audio_outside_subtitle_window(tmp_path: Path) -> None:
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg is not available")
+    media = MediaTools()
+    source = tmp_path / "source.wav"
+    media.run([
+        media.ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
+        "sine=frequency=440:sample_rate=48000:duration=1.27",
+        "-af", "adelay=910,apad=whole_dur=5", str(source),
+    ], "Creating audio that starts before and finishes after its caption")
+    cue = refine_captions(
+        [SourceCaption(1, 2, "Synthetic timing fixture", "YouTube creator (en)")],
+        [(0.91, 2.18)], 5,
+    )[0]
+    prompt = tmp_path / "prompt.mp3"
+    timestamp = media.extract_prompt(source, cue.start, cue.end, 0.15, 0.25, prompt)
+    stats = media.decoded_audio_stats(prompt)
+    assert timestamp == pytest.approx(0.7)
+    assert stats.leading_quiet >= 0.15 - 0.02
+    assert stats.trailing_quiet >= 0.25 - 0.02
+    assert timestamp + stats.leading_quiet == pytest.approx(0.91, abs=0.025)
+    assert timestamp + stats.duration - stats.trailing_quiet == pytest.approx(2.18, abs=0.025)
 
 
 @pytest.mark.integration

@@ -91,7 +91,8 @@ def parse_json3(
     return [cue for cue in cues if cue.end - cue.start >= 0.05]
 
 
-_EDGE_PADDING = 0.10
+SOURCE_HEAD_PADDING = 0.15
+SOURCE_TAIL_PADDING = 0.25
 _ONSET_TOLERANCE = 0.12
 _MAX_JOIN_SECONDS = 6.0
 _MAX_JOIN_CHARACTERS = 120
@@ -102,7 +103,55 @@ def _normalize_text(text: str) -> str:
 
 
 def _label(source: str, reason: str) -> str:
-    return f"Refined {source} - {reason} - volume-based; music/effects may mask pauses"
+    return (
+        f"Refined {source} - {reason} - source audio handles up to "
+        f"{SOURCE_HEAD_PADDING:.2f}s before / {SOURCE_TAIL_PADDING:.2f}s after "
+        "- volume-based; music/effects may mask pauses"
+    )
+
+
+def pad_source_ranges(
+    ranges: Sequence[tuple[float, float]],
+    duration: float,
+    *,
+    check_cancel: Callable[[], None] = lambda: None,
+) -> list[tuple[float, float]]:
+    """Include real source audio, sharing short gaps without adding overlaps."""
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("Source audio handles require a finite, positive duration")
+    for start, end in ranges:
+        check_cancel()
+        if not math.isfinite(start) or not math.isfinite(end) or not 0 <= start < end <= duration:
+            raise ValueError("Source audio handles received an invalid time range")
+    ordered = sorted(range(len(ranges)), key=lambda i: ranges[i])
+    overlapping: set[int] = set()
+    furthest_end = -1.0
+    furthest_index = -1
+    for index in ordered:
+        check_cancel()
+        start, end = ranges[index]
+        if start < furthest_end:
+            overlapping.update((index, furthest_index))
+        if end > furthest_end:
+            furthest_end, furthest_index = end, index
+
+    result = list(ranges)
+    previous_end = 0.0
+    for position, index in enumerate(ordered):
+        check_cancel()
+        start, end = ranges[index]
+        if index not in overlapping:
+            lower = (previous_end + start) / 2 if position else 0.0
+            upper = (
+                (end + ranges[ordered[position + 1]][0]) / 2
+                if position + 1 < len(ordered) else duration
+            )
+            result[index] = (
+                max(lower, start - SOURCE_HEAD_PADDING),
+                min(upper, end + SOURCE_TAIL_PADDING),
+            )
+        previous_end = max(previous_end, end)
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,17 +285,17 @@ def refine_captions(
         check_cancel()
         reason = None
         if index in overlapping:
-            reason = "unchanged: overlapping caption windows"
+            reason = "unsplit: overlapping caption windows"
         elif not spoken or (len(spoken) == 1 and not _short_token(cue.text)):
-            reason = "unchanged: limited fragment timing"
+            reason = "unsplit: limited fragment timing"
         elif not evidence.spans:
-            reason = "unchanged: no reliable audio activity"
+            reason = "unsplit: no reliable audio activity"
         else:
             for _, fragment in spoken:
                 check_cancel()
                 assert fragment.start is not None
                 if evidence.at_onset(fragment.start) is None:
-                    reason = "unchanged: fragment timing not supported by audio"
+                    reason = "unsplit: fragment timing not supported by audio"
                     break
         if groups and reason is None and groups[-1][3] is None:
             previous, previous_spoken, _, _ = groups[-1]
@@ -308,9 +357,9 @@ def refine_captions(
                 and abs(right.start - gap_end) <= _ONSET_TOLERANCE
                 and cue.start < gap_start < gap_end < cue.end
             ):
-                right_edge = min(right.start, gap_end - _EDGE_PADDING)
+                right_edge = min(right.start, gap_end)
                 boundaries.append((
-                    fragment_index, min(gap_start + _EDGE_PADDING, right_edge), right_edge,
+                    fragment_index, min(gap_start, right_edge), right_edge,
                 ))
 
         # Only bound outer edges when all timed fragments are represented in the audio.
@@ -326,9 +375,9 @@ def refine_captions(
                 first_edge = evidence.starts[first_audio]
                 final_edge = evidence.ends[final_audio]
                 if first_edge <= first_start + _ONSET_TOLERANCE:
-                    start = min(first_start, max(cue.start, first_edge - _EDGE_PADDING))
+                    start = min(first_start, max(cue.start, first_edge))
                 if _short_token(spoken[-1][1].text) and final_edge >= last_start:
-                    end = min(cue.end, final_edge + _EDGE_PADDING)
+                    end = min(cue.end, final_edge)
 
         fragment_start = 0
         row_start = start
@@ -336,7 +385,7 @@ def refine_captions(
         description = (
             "pause split" if boundaries else
             "display rows joined" if joined else
-            "audio edges" if changed else "unchanged: no safe internal pause"
+            "audio edges" if changed else "unsplit: no safe internal pause"
         )
         for fragment_end, row_end, following_start in [
             *boundaries, (len(cue.fragments), end, end)
@@ -348,4 +397,10 @@ def refine_captions(
                 row_start, row_end, text, _label(cue.source, description), tuple(fragments)
             ))
             fragment_start, row_start = fragment_end, following_start
-    return result
+    padded = pad_source_ranges(
+        [(cue.start, cue.end) for cue in result], duration, check_cancel=check_cancel,
+    )
+    return [
+        SourceCaption(start, end, cue.text, cue.source, cue.fragments)
+        for cue, (start, end) in zip(result, padded, strict=True)
+    ]

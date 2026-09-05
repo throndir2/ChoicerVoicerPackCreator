@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from choicer_voicer_pack_creator.captions import parse_json3, refine_captions
+from choicer_voicer_pack_creator.captions import pad_source_ranges, parse_json3, refine_captions
 from choicer_voicer_pack_creator.models import CaptionFragment, SourceCaption
 
 
@@ -81,7 +81,7 @@ def test_invalid_optional_offsets_retain_text_with_unknown_timing(offset) -> Non
     assert cue.text == "Still here."
     assert cue.fragments == (CaptionFragment("Still ", 1), CaptionFragment("here."))
     refined = refine_captions([cue], [(1, 1.2), (1.7, 2)], 3)
-    assert [(row.start, row.end, row.text) for row in refined] == [(1, 2, "Still here.")]
+    assert [(row.start, row.end, row.text) for row in refined] == [(0.85, 2.25, "Still here.")]
     assert "limited fragment timing" in refined[0].source
 
 
@@ -113,7 +113,7 @@ def test_refinement_splits_only_recorded_boundaries_backed_by_actual_pause() -> 
     rows = refine_captions([cue], [(0.1, 1.1), (2, 3)], 5)
     assert [row.text for row in rows] == ["Go, go!", "& go."]
     assert [(row.start, row.end) for row in rows] == [
-        pytest.approx((0, 1.2)), pytest.approx((1.9, 3.1)),
+        pytest.approx((0, 1.35)), pytest.approx((1.85, 3.25)),
     ]
     assert [fragment for row in rows for fragment in row.fragments] == list(cue.fragments)
     assert all("pause split" in row.source and "music/effects" in row.source for row in rows)
@@ -165,7 +165,7 @@ def test_limited_or_inconsistent_timing_keeps_whole_original_row(fragments) -> N
     cue = _cue(fragments)
     rows = refine_captions([cue], [(0.1, 1), (2, 3)], 5)
     assert [(row.start, row.end, row.text) for row in rows] == [(0, 5, cue.text)]
-    assert "unchanged: limited fragment timing" in rows[0].source
+    assert "unsplit: limited fragment timing" in rows[0].source
 
 
 def test_legacy_captions_and_mismatched_fragment_text_are_not_rewritten() -> None:
@@ -186,7 +186,7 @@ def test_absent_silent_or_misaligned_audio_preserves_caption(spans) -> None:
     cue = _cue([("First ", 0.1), ("second.", 2)])
     rows = refine_captions([cue], spans, 5)
     assert [(row.start, row.end, row.text) for row in rows] == [(0, 5, cue.text)]
-    assert "unchanged:" in rows[0].source
+    assert "unsplit:" in rows[0].source
 
 
 def test_refinement_keeps_multiword_tail_and_all_later_detected_audio() -> None:
@@ -196,7 +196,7 @@ def test_refinement_keeps_multiword_tail_and_all_later_detected_audio() -> None:
     assert rows[-1].end == 5
     word = _cue([("First ", 0.1), ("last.", 2)])
     rows = refine_captions([word], [(0.1, 1), (2, 3), (4, 4.8)], 5)
-    assert rows[-1].end == pytest.approx(4.9)
+    assert rows[-1].end == 5
 
 
 def test_adjacent_display_rows_regroup_without_changing_originals() -> None:
@@ -309,7 +309,7 @@ def test_refinement_bounds_output_and_keeps_empty_success_distinct() -> None:
     assert refine_captions([], [], 5) == []
     cue = _cue([("First ", 0), ("last", 3)], 0, 9)
     rows = refine_captions([cue], [(0, 1), (3, 8)], 5)
-    assert [(row.start, row.end) for row in rows] == [(0, 1.1), (2.9, 5)]
+    assert [(row.start, row.end) for row in rows] == [(0, 1.25), (2.85, 5)]
     assert all(0 <= row.start < row.end <= 5 for row in rows)
     with pytest.raises(ValueError, match="caption time range"):
         refine_captions([_cue([("outside", 6)], 6, 7)], [], 5)
@@ -338,3 +338,57 @@ def test_refinement_checks_cancellation_in_long_loops(phase) -> None:
     with pytest.raises(Cancelled):
         refine_captions(cues, spans, 1000, check_cancel=check_cancel)
     assert calls == cancel_at
+
+
+@pytest.mark.parametrize(("ranges", "expected"), [
+    ([(1, 2)], [(0.85, 2.25)]),
+    ([(0.1, 4.9)], [(0, 5)]),
+    ([(1, 2), (2.1, 3)], [(0.85, 2.05), (2.05, 3.25)]),
+    ([(1, 2), (2, 3)], [(0.85, 2), (2, 3.25)]),
+    ([(3, 4), (1, 2)], [(2.85, 4.25), (0.85, 2.25)]),
+    ([(1, 3), (2, 4)], [(1, 3), (2, 4)]),
+    ([(1, 2), (1, 2), (3, 4)], [(1, 2), (1, 2), (2.85, 4.25)]),
+    ([(0, 3), (1, 2), (3.1, 4)], [(0, 3), (1, 2), (3.05, 4.25)]),
+    ([], []),
+])
+def test_source_handles_are_bounded_and_do_not_introduce_overlaps(ranges, expected):
+    original = list(ranges)
+    result = pad_source_ranges(ranges, 5)
+    assert result == pytest.approx(expected)
+    assert ranges == original
+    for (start, end), (padded_start, padded_end) in zip(ranges, result, strict=True):
+        assert 0 <= padded_start <= start < end <= padded_end <= 5
+
+
+@pytest.mark.parametrize("span", [
+    (float("nan"), 2), (1, float("inf")), (-1, 2), (1, 1), (2, 1), (1, 6),
+])
+def test_source_handles_reject_invalid_ranges(span):
+    with pytest.raises(ValueError, match="time range"):
+        pad_source_ranges([span], 5)
+
+
+def test_source_handles_check_cancellation():
+    def cancel():
+        raise RuntimeError("Canceled")
+
+    with pytest.raises(RuntimeError, match="Canceled"):
+        pad_source_ranges([(1, 2)], 5, check_cancel=cancel)
+
+
+@pytest.mark.parametrize("fragments", [(), (CaptionFragment("A whole phrase", 1),)])
+def test_creator_captions_get_real_source_handles_without_inventing_word_timings(fragments):
+    cue = SourceCaption(1, 2, "A whole phrase", "YouTube creator (en)", fragments)
+    rows = refine_captions([cue], [(0.91, 2.18)], 5)
+    assert (rows[0].start, rows[0].end) == (0.85, 2.25)
+    assert rows[0].text == cue.text
+    assert rows[0].fragments == cue.fragments
+    assert "limited fragment timing" in rows[0].source
+    assert "source audio handles" in rows[0].source
+    assert (cue.start, cue.end) == (1, 2)
+
+
+def test_refinement_adds_source_handles_once_at_audio_edges():
+    cue = _cue([("First ", 1), ("last.", 2.5)], start=1, end=3)
+    row = refine_captions([cue], [(0.95, 3.04)], 5)[0]
+    assert (row.start, row.end) == (0.85, 3.25)
