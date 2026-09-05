@@ -205,6 +205,73 @@ def test_editor_restores_pane_size_without_restoring_old_divider_width(
     restored.close()
 
 
+@pytest.mark.parametrize(
+    "state",
+    [
+        QMediaPlayer.PlaybackState.StoppedState,
+        QMediaPlayer.PlaybackState.PausedState,
+        QMediaPlayer.PlaybackState.PlayingState,
+    ],
+)
+def test_dragging_playhead_seeks_player_without_changing_project(qtbot, state) -> None:
+    class SeekPlayer:
+        def __init__(self) -> None:
+            self.position_ms = 3000
+
+        def playbackState(self):
+            return state
+
+        def source(self):
+            return QUrl.fromLocalFile("C:/source.mp4")
+
+        def setPosition(self, milliseconds):
+            self.position_ms = milliseconds
+            window._player_position_changed(milliseconds)
+
+        def stop(self):
+            pass
+
+    window = MainWindow(UnusedMedia())  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    segment = Segment(2, 4, "Line", ["Speaker"])
+    window._set_project(
+        PackProject(video_duration=10, segments=[segment]), None, mark_dirty=False
+    )
+    player = SeekPlayer()
+    window.player = player  # type: ignore[assignment]
+    timeline = window.timeline
+    timeline.set_marks(2, 4, segment.id)
+    timeline.set_playhead(3)
+    window.show()
+    qtbot.waitUntil(lambda: window._layout_restored)
+    window.editor_splitter.setSizes([700, 250])
+    seeks: list[float] = []
+    timeline.seek_requested.connect(seeks.append)
+    start = QPoint(round(timeline._time_to_x(3)), 65)
+    target = QPoint(round(timeline._time_to_x(7.5)), 65)
+    expected = int(timeline._x_to_time(target.x()) * 1000)
+
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, pos=start)
+    qtbot.mouseMove(timeline, target)
+    assert player.position_ms == expected
+    qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=target)
+
+    assert player.position_ms == expected
+    assert seeks[-1] == pytest.approx(expected / 1000, abs=0.001)
+    assert timeline.playhead == pytest.approx(expected / 1000, abs=0.001)
+    assert window.seek_slider.value() == int(expected / 10_000 * 100_000)
+    assert not window.dirty
+    assert window._range_edit_record is None
+    assert (segment.start, segment.end) == (2, 4)
+    assert (timeline.mark_in, timeline.mark_out) == (2, 4)
+    assert timeline.mark_segment_id == segment.id
+    assert player.playbackState() == state
+    if state == QMediaPlayer.PlaybackState.StoppedState:
+        assert window._stopped_seek_active
+        assert window._stopped_seek_target_ms == expected
+    window.close()
+
+
 def test_seek_from_stopped_state_decodes_then_pauses_on_target(qtbot) -> None:
     class FakeAudioOutput:
         def __init__(self) -> None:

@@ -313,7 +313,8 @@ hide pauses and two speakers without a pause can still share a row. It does not 
 misrecognized words, perform forced alignment, or separate overlapping voices.
 
 Choose the preferred source, then click **Use YouTube Transcript**, **Use Refined YouTube
-Transcript**, or **Use Whisper Transcript**.
+Transcript**, or **Use Whisper Transcript**. Click a row in that draft or its **Select**
+control to choose the source; merely finishing a background Whisper run does not select it.
 The checked rows from that source become editable project segments with that source's timings
 and no assigned speakers. Other sources are not mixed in. Playback also uses the chosen draft's
 own edited In/Out range. Choosing an available draft while another scan runs stops that scan.
@@ -321,8 +322,15 @@ Existing project segments are never
 silently replaced; adding another set requires confirmation.
 
 If captions are unavailable, the same automatic Whisper pass drafts suggestions from the audio.
-Declining Whisper setup or a failed/canceled Whisper scan leaves downloaded media and both
-YouTube drafts intact. If automatic refinement fails or is canceled, the original captions remain
+Declining Whisper setup or a failed/canceled/empty Whisper scan leaves downloaded media and all
+existing drafts intact. **Whisper model (next scan)** and **Spoken language (next scan)** affect
+only a new run; they do not select or change an existing transcript. The current local draft
+shows the model and detected language from its last successful nonempty scan, also after
+saving and reopening the project. Older drafts without model information say **model not recorded**.
+If a larger model fails due to memory limits, select **Select Whisper transcript** (or click
+one of its rows), then **Use Whisper Transcript** to use the retained draft without rerunning.
+If all rows are unchecked, check at least one before using the transcript.
+If automatic refinement fails, is canceled, or returns no rows, the original captions remain
 available and Whisper does not start automatically; either pass can be started manually.
 **Cancel Scan** keeps the analysis window open. **Keep Drafts & Close** stops a running scan and
 retains all available drafts, including edits, checked rows, source selection, and the pause setting, without adding
@@ -343,6 +351,8 @@ attempt access-restriction workarounds. An authorized local copy can still be op
 
 ### Direct waveform editing
 
+- Drag the white playback line or its top arrow to scrub without changing any ranges. The arrow
+  remains draggable when the line overlaps an In/Out handle or a segment block.
 - Drag across empty waveform space to define a new In/Out range.
 - Drag the cyan **IN** or orange **OUT** handle to trim the range precisely.
 - Drag inside the highlighted waveform range to move it without changing its duration.
