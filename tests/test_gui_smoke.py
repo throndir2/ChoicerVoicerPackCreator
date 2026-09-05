@@ -549,6 +549,95 @@ def test_selecting_table_segment_cues_playback_before_play(qtbot) -> None:
     window.close()
 
 
+@pytest.mark.parametrize("surface", ["table", "timeline"])
+@pytest.mark.parametrize(
+    "state",
+    [
+        QMediaPlayer.PlaybackState.StoppedState,
+        QMediaPlayer.PlaybackState.PausedState,
+        QMediaPlayer.PlaybackState.PlayingState,
+    ],
+)
+def test_segment_clicks_cue_start_even_when_already_selected(
+    qtbot, tmp_path: Path, surface: str, state
+) -> None:
+    class SeekPlayer:
+        def __init__(self) -> None:
+            self.position_ms = 500
+            self.state = state
+
+        def playbackState(self):
+            return self.state
+
+        def source(self):
+            return QUrl.fromLocalFile("C:/source.mp4")
+
+        def setPosition(self, milliseconds):
+            self.position_ms = milliseconds
+            window._player_position_changed(milliseconds)
+
+        def position(self):
+            return self.position_ms
+
+        def play(self):
+            self.state = QMediaPlayer.PlaybackState.PlayingState
+
+        def pause(self):
+            self.state = QMediaPlayer.PlaybackState.PausedState
+
+        def stop(self):
+            self.state = QMediaPlayer.PlaybackState.StoppedState
+
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(UnusedMedia(), settings=settings)  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    first = Segment(1, 2, "First", ["A"])
+    second = Segment(6.25, 7.5, "Second", ["B"])
+    window._set_project(
+        PackProject(video_duration=10, segments=[first, second]), None, mark_dirty=False
+    )
+    player = SeekPlayer()
+    window.player = player  # type: ignore[assignment]
+    window.show()
+    qtbot.waitUntil(lambda: window._layout_restored)
+    window.editor_splitter.setSizes([700, 470])
+    window.select_segment(first.id)
+    if surface == "table":
+        target = window.segment_table.viewport()
+        point = window.segment_table.visualItemRect(window.segment_table.item(1, 4)).center()
+    else:
+        target = window.timeline
+        point = QPoint(
+            round(window.timeline._time_to_x(7)),
+            round(window.timeline._segment_rect(second).center().y()),
+        )
+
+    for _ in range(2):
+        player.setPosition(9000)
+        window._preview_end = first.end
+        qtbot.mouseClick(target, Qt.MouseButton.LeftButton, pos=point)
+
+        assert window.selected_segment_id == second.id
+        assert player.position_ms == 6250
+        assert window.timeline.playhead == second.start
+        assert window.timeline.mark_segment_id == second.id
+        assert window.mark_in_spin.value() == second.start
+        assert window.mark_out_spin.value() == second.end
+        assert window._preview_end is None
+        assert not window.dirty
+        assert window._range_edit_record is None
+        assert (second.start, second.end) == (6.25, 7.5)
+        assert player.playbackState() == state
+        if state == QMediaPlayer.PlaybackState.StoppedState:
+            assert window._stopped_seek_target_ms == 6250
+    if surface == "table":
+        qtbot.mouseDClick(target, Qt.MouseButton.LeftButton, pos=point)
+        qtbot.mouseRelease(target, Qt.MouseButton.LeftButton, pos=point)
+        assert window._preview_end == second.end
+        assert player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+    window.close()
+
+
 def test_overlap_review_is_visible_but_does_not_block_export_readiness(
     qtbot, tmp_path: Path
 ) -> None:

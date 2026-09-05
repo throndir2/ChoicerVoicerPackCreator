@@ -510,6 +510,9 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.segment_table.itemSelectionChanged.connect(self._table_selection_changed)
+        self.segment_table.cellClicked.connect(
+            lambda _row, _column: self.select_segment(self.selected_segment_id)
+        )
         self.segment_table.cellDoubleClicked.connect(lambda _row, _column: self.preview_segment())
         segment_layout.addWidget(self.segment_table, 1)
         row_buttons = QHBoxLayout()
