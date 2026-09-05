@@ -2,6 +2,13 @@
 
 Contributions are welcome. This project is an unofficial community utility and is not affiliated with the creators of *The Choicer Voicer*.
 
+## Coding agents and concurrent sessions
+
+LLM/coding agents must follow [AGENTS.md](AGENTS.md). Each independent change uses a fresh
+isolated branch/worktree, stays current with `origin/main`, and is delivered through a
+submitted PR merged into `main` unless the user limits the scope or a blocker prevents
+completion. Never modify another active session's checkout or work directly on `main`.
+
 ## Development setup
 
 1. Install Python 3.11 or newer and FFmpeg with `ffmpeg` and `ffprobe` on `PATH`.
