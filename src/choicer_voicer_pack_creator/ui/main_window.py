@@ -14,7 +14,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QKeySequence
+from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtWidgets import (
     QApplication,
@@ -329,7 +329,11 @@ class MainWindow(QMainWindow):
 
         transport = QHBoxLayout()
         self.play_button = QPushButton("▶ Play")
+        self.play_button.setToolTip("Play / pause (Space)")
         self.play_button.clicked.connect(self.toggle_playback)
+        self.play_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
+        self.play_shortcut.setAutoRepeat(False)
+        self.play_shortcut.activated.connect(self.toggle_playback)
         transport.addWidget(self.play_button)
         self.stop_button = QPushButton("■")
         self.stop_button.setToolTip("Stop and return to the start")

@@ -9,7 +9,8 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Creates a new project from MP4, MKV, MOV, WebM, OGV, or AVI video.
 - Downloads a single YouTube video from its URL and offers YouTube and local Whisper transcripts
   side by side, each with its own text and timings.
-- Plays the source video inside the editor.
+- Plays the source video inside the editor. Press **Space** in the video preview, timeline,
+  or segment list to play/pause; spaces still work normally when editing text.
 - Overlays each segment's line during playback with its speaker(s) above it. Subtitles update
   as you edit, follow seeking and segment timings, and work with saved projects and imported packs.
   Overlapping lines are shown together; source video and exports are not changed.
