@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from choicer_voicer_pack_creator.config_format import render_clip_metadata, render_pack_info
+from choicer_voicer_pack_creator.diagnostics import (
+    DiagnosticProgress,
+    diagnostic_event,
+    diagnostic_exception,
+    diagnostic_operation,
+)
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.validation import PackValidator
@@ -62,6 +68,7 @@ class PackExporter:
         self.media = media
         self.validator = PackValidator(media)
 
+    @diagnostic_operation("pack_export")
     def export(
         self,
         project: PackProject,
@@ -69,6 +76,12 @@ class PackExporter:
         create_zip: bool = True,
         progress: ProgressCallback | None = None,
     ) -> ExportResult:
+        diagnostic_event(
+            "pack_export_requested", output_parent=output_parent, create_zip=create_zip,
+            source_video=project.video_path, segment_count=len(project.segments),
+            preserve_source_video=project.preserve_source_video,
+            has_backing_track=bool(project.backing_track_path), has_icon=bool(project.icon_path),
+        )
         source_video = Path(project.video_path).resolve()
         source_info = self.media.probe(source_video)
         if not source_info.has_audio:
@@ -77,6 +90,7 @@ class PackExporter:
         validated_project.video_duration = source_info.duration
         errors = validated_project.validate()
         if errors:
+            diagnostic_event("pack_export_project_invalid", error_count=len(errors))
             raise ValueError("Cannot export this project:\n\n" + "\n".join(f"• {item}" for item in errors))
 
         parent = output_parent.resolve()
@@ -98,6 +112,7 @@ class PackExporter:
                     protected_paths.append(Path(value).resolve())
         endangered = [path for path in protected_paths if is_same_or_within(path, target)]
         if endangered:
+            diagnostic_event("pack_export_assets_protected", path_count=len(endangered))
             preview = "\n".join(f"• {path}" for path in endangered[:8])
             raise ValueError(
                 "Refusing to replace an output folder that contains source or project assets. "
@@ -105,7 +120,12 @@ class PackExporter:
                 + preview
             )
 
-        def notify(message: str) -> None:
+        logged_progress = DiagnosticProgress("pack_export_progress")
+
+        def notify(
+            message: str, *, diagnostic_message: str | None = None, fraction: float | None = None,
+        ) -> None:
+            logged_progress.report(diagnostic_message or message, fraction)
             if progress:
                 progress(message)
 
@@ -113,6 +133,7 @@ class PackExporter:
             temporary_root = Path(temporary)
             stage = temporary_root / folder_name
             stage.mkdir()
+            diagnostic_event("pack_export_staged", path=stage, target=target, zip_path=target_zip)
             notify("Writing pack metadata…")
             (stage / "_pack_info.ini").write_bytes(
                 render_pack_info(project.title.strip(), "icon.png", project.authors, project.readme)
@@ -130,6 +151,7 @@ class PackExporter:
             ):
                 notify("Preserving existing Ogg video…")
                 shutil.copy2(source_video, output_video)
+                diagnostic_event("pack_export_video_preserved")
             else:
                 self.media.convert_video(
                     source_video,
@@ -154,6 +176,7 @@ class PackExporter:
                     and abs(backing_info.duration - output_video_info.duration) <= 0.25
                 ):
                     shutil.copy2(backing_source, stage / "_backing_track.mp3")
+                    diagnostic_event("pack_export_backing_preserved")
                 else:
                     self.media.convert_audio(
                         backing_source,
@@ -170,7 +193,11 @@ class PackExporter:
             segments = sorted(project.segments, key=lambda item: (item.start, item.end))
             total = len(segments)
             for index, segment in enumerate(segments, start=1):
-                notify(f"Building prompt {index}/{total}: {segment.primary_character}")
+                notify(
+                    f"Building prompt {index}/{total}: {segment.primary_character}",
+                    diagnostic_message=f"Building prompt {index}/{total}",
+                    fraction=(index - 1) / total,
+                )
                 base = f"{index:03d}_{slug(segment.primary_character)}"
                 audio_path = stage / f"{base}.mp3"
                 image_path = stage / f"{base}.png"
@@ -215,9 +242,11 @@ class PackExporter:
                         [name.strip() for name in segment.characters],
                     )
                 )
+            diagnostic_event("pack_export_prompts_built", segment_count=total)
 
             notify("Validating staged pack…")
-            validation = self.validator.validate_folder(stage, expected_clips=total)
+            with diagnostic_operation("pack_export_validation", path=stage, expected_clips=total):
+                validation = self.validator.validate_folder(stage, expected_clips=total)
             file_hashes = {
                 path.name: sha256(path) for path in sorted(stage.iterdir()) if path.is_file()
             }
@@ -231,6 +260,7 @@ class PackExporter:
                         if path.is_file():
                             archive.write(path, f"{folder_name}/{path.name}")
                 self.validator.validate_zip(staged_zip, folder_name, set(file_hashes))
+                diagnostic_event("pack_export_zip_validated", file_count=len(file_hashes))
 
             notify("Publishing and revalidating pack…")
             validation, publish_warnings = self._publish_verified(
@@ -241,6 +271,11 @@ class PackExporter:
                 folder_name,
                 file_hashes,
                 total,
+            )
+            logged_progress.report("Pack export ready", 1.0)
+            diagnostic_event(
+                "pack_export_ready", path=target, zip_path=target_zip,
+                file_count=len(file_hashes), segment_count=total, warning_count=len(publish_warnings),
             )
             return ExportResult(
                 pack_path=target,
@@ -310,6 +345,7 @@ class PackExporter:
         finally:
             extracted.unlink(missing_ok=True)
 
+    @diagnostic_operation("pack_publish")
     def _publish_verified(
         self,
         stage: Path,
@@ -320,6 +356,10 @@ class PackExporter:
         file_hashes: dict[str, str],
         expected_clips: int,
     ) -> tuple[dict[str, Any], list[str]]:
+        diagnostic_event(
+            "pack_publish_requested", stage=stage, target=target, zip_path=target_zip,
+            file_count=len(file_hashes), expected_clips=expected_clips,
+        )
         token = uuid.uuid4().hex
         backup = target.with_name(f".{target.name}.previous-{token}")
         zip_backup = target_zip.with_name(f".{target_zip.name}.previous-{token}") if target_zip else None
@@ -332,9 +372,11 @@ class PackExporter:
             if target.exists():
                 os.replace(target, backup)
                 pack_backed_up = True
+                diagnostic_event("pack_publish_backup_created", path=backup)
             if target_zip and target_zip.exists() and zip_backup:
                 os.replace(target_zip, zip_backup)
                 zip_backed_up = True
+                diagnostic_event("pack_publish_zip_backup_created", path=zip_backup)
             os.replace(stage, target)
             pack_published = True
             if staged_zip and target_zip:
@@ -354,32 +396,43 @@ class PackExporter:
                     raise RuntimeError("Published ZIP differs from validated staging")
                 self.validator.validate_zip(target_zip, folder_name, set(file_hashes))
         except Exception as publish_error:
+            diagnostic_exception("pack_publish_validation_failed", publish_error, target=target)
+            diagnostic_event(
+                "pack_rollback_started", pack_published=pack_published, zip_published=zip_published,
+                pack_backed_up=pack_backed_up, zip_backed_up=zip_backed_up,
+            )
             rollback_errors: list[str] = []
             if pack_published and target.exists():
                 try:
                     shutil.rmtree(target)
                 except OSError as error:
+                    diagnostic_exception("pack_rollback_remove_failed", error, path=target)
                     rollback_errors.append(f"could not remove failed pack: {error}")
             if pack_backed_up and backup.exists():
                 try:
                     os.replace(backup, target)
                 except OSError as error:
+                    diagnostic_exception("pack_rollback_restore_failed", error, path=backup)
                     rollback_errors.append(f"could not restore previous pack: {error}")
             if zip_published and target_zip and target_zip.exists():
                 try:
                     target_zip.unlink()
                 except OSError as error:
+                    diagnostic_exception("pack_rollback_zip_remove_failed", error, path=target_zip)
                     rollback_errors.append(f"could not remove failed ZIP: {error}")
             if target_zip and zip_backed_up and zip_backup and zip_backup.exists():
                 try:
                     os.replace(zip_backup, target_zip)
                 except OSError as error:
+                    diagnostic_exception("pack_rollback_zip_restore_failed", error, path=zip_backup)
                     rollback_errors.append(f"could not restore previous ZIP: {error}")
             if rollback_errors:
+                diagnostic_event("pack_rollback_incomplete", error_count=len(rollback_errors))
                 raise RuntimeError(
                     f"Publishing failed ({publish_error}); rollback was incomplete: "
                     + "; ".join(rollback_errors)
                 ) from publish_error
+            diagnostic_event("pack_rollback_completed", target=target)
             raise
 
         cleanup_warnings: list[str] = []
@@ -387,10 +440,16 @@ class PackExporter:
             if backup.exists():
                 shutil.rmtree(backup)
         except OSError as error:
+            diagnostic_exception("pack_backup_cleanup_failed", error, path=backup)
             cleanup_warnings.append(f"Validated export succeeded, but old pack cleanup failed: {error}")
         try:
             if zip_backup and zip_backup.exists():
                 zip_backup.unlink()
         except OSError as error:
+            diagnostic_exception("pack_zip_backup_cleanup_failed", error, path=zip_backup)
             cleanup_warnings.append(f"Validated export succeeded, but old ZIP cleanup failed: {error}")
+        diagnostic_event(
+            "pack_published", target=target, zip_path=target_zip,
+            file_count=len(file_hashes), warning_count=len(cleanup_warnings),
+        )
         return validation, cleanup_warnings

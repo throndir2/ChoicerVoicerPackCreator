@@ -219,21 +219,46 @@ The scan button says **Whisper Running** while busy and is not highlighted. **Ca
 available. Runtime startup and transcription have generous time limits so a stalled process reports
 an error rather than waiting indefinitely, without removing saved drafts.
 
-### Diagnosing a stalled Whisper run
+### Collecting logs for support
 
-Every analysis attempt writes a timestamped diagnostic log, including application/runtime
-versions, model download and checksum stages, selected settings and available memory,
-subprocess commands and process IDs, Whisper's technical stderr, elapsed-time heartbeats,
-exit codes, failures, and cancellation/termination. Entries are flushed as they are written,
-so canceling the scan or restarting the app does not erase the evidence.
+Logging is automatic; users do not need a console or a debug setting. **Help → Save Diagnostic
+Bundle** saves a ZIP of recent application, analysis, and native crash logs with version
+information. The same action is available in the YouTube import and analysis windows, including
+while a task is running. Reproduce the issue, save the bundle, and send that ZIP with the approximate
+time of the problem and a description of what the app displayed. If the app crashed, reopen it
+and save the bundle before repeatedly retrying. Nothing is uploaded automatically.
 
-Use **Open Logs** in the analysis window or **Help → Open Diagnostic Logs** after closing it.
-The current file is `analysis.log` in the analysis component directory's `logs` folder; its full
-path is also shown in the analysis window and error messages. Up to three rotated backups are
-kept, with a 2 MiB target per file. When reporting a stall, include `analysis.log` and any adjacent
-`analysis.log.1` through `.3` files. Logs stay local and are not included in exported packs.
-Normal transcript stdout and source audio are not recorded, but logs contain local file paths
-and tool error details; review them before sharing.
+**Help → Open Diagnostic Logs** or **Open Logs** in the analysis window opens the storage folder.
+On Windows it is normally
+`%LOCALAPPDATA%\ChoicerVoicerCommunity\Choicer Voicer Pack Creator\analysis\logs`.
+It is outside the portable application folder, so logs survive application upgrades. The exact
+analysis log path is also shown in the analysis window and error messages. If the app cannot
+start, collect the files directly from this folder.
+
+`application.log` contains UTC timestamps, application-session and worker-operation IDs,
+thread/process details, application/Python/Qt/downloader versions, startup and UI handoffs,
+YouTube download/merge/caption stages, Whisper download consent, media-tool execution, project saves/recovery, pack
+import/export, update activity, and exceptions with tracebacks. `analysis.log` retains focused
+per-analysis evidence: setup and checksum stages, CPU/memory/disk information,
+model loading, audio-processing progress, subprocess commands,
+Whisper's technical stderr, elapsed-time heartbeats, exit codes (including hexadecimal Windows
+codes), failures, and cancellation/termination. This distinguishes "download finished" from
+"Whisper launched", "processing audio", and "result reached the review window".
+
+Entries are flushed as they are written; canceling or restarting does not erase the logs.
+Application and analysis logs each retain three rotated backups (`.1` through `.3`), with a 2 MiB
+target per file. `crash.log` captures Python stacks on supported fatal native errors and retains
+three previous launches; an external forced termination or power loss cannot produce a crash stack.
+The last progress/heartbeat can still identify where that run stopped. Bundle snapshots include
+at most the last 2 MiB of each known log file and never copy arbitrary files from the log folder.
+Logging/storage failures are reported rather than silently ignored.
+
+Logs and bundles contain no media, model downloads, project files, or normal transcript stdout.
+They contain local file paths and technical errors, which can still reveal filenames or other
+personal information. URL queries/fragments, URL credentials, common credential fields, and the
+current user's home-directory prefix are redacted from structured logs and bundles. Native crash
+files on disk can contain unredacted code paths; the bundle redacts these before sharing.
+**Review the ZIP before sending it.** Logs stay local and are not added to exported game packs.
 
 ### Import a YouTube video
 

@@ -20,7 +20,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from choicer_voicer_pack_creator.diagnostics import (
+    DiagnosticProgress,
+    diagnostic_event,
+    diagnostic_exception,
+)
 from choicer_voicer_pack_creator.media import MediaTools
+from choicer_voicer_pack_creator.ui.analysis_dialog import save_diagnostic_logs
 from choicer_voicer_pack_creator.youtube import (
     YouTubeCancelled,
     YouTubeDownload,
@@ -40,7 +46,10 @@ class YouTubeWorker(QThread):
         self.media, self.url, self.folder, self.language = media, url, folder, language
 
     def run(self) -> None:
+        diagnostics = DiagnosticProgress("youtube_worker_progress")
+
         def report(message: str, fraction: float | None) -> None:
+            diagnostics.report(message, fraction)
             self.progress.emit(
                 message, -1 if fraction is None else max(
                     0, min(1000 if fraction >= 1 else 999, round(fraction * 1000))
@@ -48,21 +57,31 @@ class YouTubeWorker(QThread):
             )
 
         try:
+            diagnostic_event("youtube_worker_started", folder=self.folder, language=self.language)
             result = download_youtube(
                 self.media, self.url, self.folder, self.language,
                 progress=report, cancelled=self.isInterruptionRequested,
             )
             self.completed.emit(result)
+            diagnostic_event("youtube_worker_completed")
         except YouTubeCancelled:
+            diagnostic_event("youtube_worker_canceled")
             self.canceled.emit()
         except Exception as error:
+            diagnostic_exception("youtube_worker_failed", error)
             self.failed.emit(str(error))
 
 
 class YouTubeDialog(QDialog):
-    def __init__(self, media: MediaTools, folder: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, media: MediaTools, folder: str, parent: QWidget | None = None,
+        *, data_root: Path | None = None,
+    ) -> None:
         super().__init__(parent)
         self.media = media
+        self.data_root = data_root or Path(QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppLocalDataLocation,
+        )) / "analysis"
         self.worker: YouTubeWorker | None = None
         self.download_result: YouTubeDownload | None = None
         self._close_after_cancel = False
@@ -124,6 +143,10 @@ class YouTubeDialog(QDialog):
         )
         layout.addWidget(self.progress_bar)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        self.save_logs_button = QPushButton("Save Diagnostic Bundle...")
+        self.save_logs_button.setAutoDefault(False)
+        self.save_logs_button.clicked.connect(lambda: save_diagnostic_logs(self, self.data_root))
+        buttons.addButton(self.save_logs_button, QDialogButtonBox.ButtonRole.ActionRole)
         self.download_button = QPushButton("Download Video")
         self.download_button.setObjectName("primary")
         self.download_button.clicked.connect(self.start_download)
@@ -152,6 +175,7 @@ class YouTubeDialog(QDialog):
             if not folder.is_dir():
                 raise ValueError("The media destination must be an existing folder.")
         except (OSError, ValueError) as error:
+            diagnostic_exception("youtube_input_rejected", error)
             QMessageBox.warning(self, "Cannot download video", str(error))
             return
         self.folder_edit.setText(str(folder))
@@ -176,6 +200,7 @@ class YouTubeDialog(QDialog):
         worker.canceled.connect(self._canceled)
         worker.finished.connect(self._finished)
         worker.finished.connect(worker.deleteLater)
+        diagnostic_event("youtube_worker_start_requested")
         worker.start()
 
     @Slot(str, int)
@@ -207,11 +232,15 @@ class YouTubeDialog(QDialog):
 
     @Slot(str)
     def _failed(self, message: str) -> None:
+        diagnostic_event("youtube_failure_displayed", message=message)
         self.progress_label.setText("Download failed; existing media and project are unchanged.")
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Failed")
-        QMessageBox.critical(self, "YouTube download failed", message)
+        QMessageBox.critical(
+            self, "YouTube download failed",
+            f"{message}\n\nUse Save Diagnostic Bundle to collect logs for support.",
+        )
 
     @Slot()
     def _finished(self) -> None:
@@ -229,6 +258,7 @@ class YouTubeDialog(QDialog):
 
     def reject(self) -> None:
         if self.worker is not None:
+            diagnostic_event("youtube_cancel_requested")
             self._close_after_cancel = True
             self.worker.requestInterruption()
             self.progress_label.setText(

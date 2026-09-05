@@ -114,7 +114,7 @@ def test_download_failure_stops_indeterminate_progress_and_allows_retry(qtbot, t
     dialog.url_edit.setText("https://youtu.be/abcdefghijk")
     dialog.start_download()
     qtbot.waitUntil(lambda: dialog.worker is None)
-    assert errors == ["Merge failed"]
+    assert errors == ["Merge failed\n\nUse Save Diagnostic Bundle to collect logs for support."]
     assert dialog.download_result is None
     assert dialog.progress_bar.maximum() == 1000
     assert dialog.progress_bar.value() == 0
@@ -141,7 +141,7 @@ def test_main_window_loads_download_and_starts_caption_comparison(
     class ImportDialog:
         download_result = result
 
-        def __init__(self, *_args):
+        def __init__(self, *_args, **_kwargs):
             pass
 
         def exec(self):
