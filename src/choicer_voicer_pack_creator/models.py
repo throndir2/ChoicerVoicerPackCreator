@@ -106,6 +106,8 @@ class AnalysisReview:
     local_source: str = "Whisper"
     refined_rows: list[AnalysisDraftRow] = field(default_factory=list)
     pause_threshold: float = 0.4
+    local_model_name: str = ""
+    local_detected_language: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -115,6 +117,8 @@ class AnalysisReview:
             "local_source": self.local_source,
             "refined_rows": [row.to_dict() for row in self.refined_rows],
             "pause_threshold": self.pause_threshold,
+            "local_model_name": self.local_model_name,
+            "local_detected_language": self.local_detected_language,
         }
 
     @classmethod
@@ -131,6 +135,10 @@ class AnalysisReview:
             raise ValueError("Unknown analysis transcript selection")
         if local_source not in {"Whisper", "Audio activity"}:
             raise ValueError("Unknown local analysis source")
+        local_model_name = value.get("local_model_name", "")
+        local_detected_language = value.get("local_detected_language", "")
+        if not isinstance(local_model_name, str) or not isinstance(local_detected_language, str):
+            raise ValueError("Analysis draft model and language must be text")
         pause_threshold = value.get("pause_threshold", 0.4)
         if (
             isinstance(pause_threshold, bool)
@@ -141,7 +149,7 @@ class AnalysisReview:
             raise ValueError("Caption pause threshold must be between 0.2 and 1.0 seconds")
         return cls(
             rows["youtube_rows"], rows["local_rows"], selected_source, local_source,
-            rows["refined_rows"], float(pause_threshold),
+            rows["refined_rows"], float(pause_threshold), local_model_name, local_detected_language,
         )
 
 

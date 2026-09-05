@@ -59,6 +59,7 @@ def test_youtube_caption_provenance_survives_save_and_recovery(tmp_path: Path) -
             [AnalysisDraftRow("1", "2", "Whisper edit", "Whisper")],
             "refined", "Whisper",
             [AnalysisDraftRow("1.1", "1.9", "Refined edit", "Refined YouTube")], 0.6,
+            local_model_name="tiny", local_detected_language="en",
         ),
     )
     path = tmp_path / "captions.cvpack.json"
