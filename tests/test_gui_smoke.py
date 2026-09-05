@@ -4,7 +4,8 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QThread, QUrl, Slot
+import pytest
+from PySide6.QtCore import QPoint, QSettings, Qt, QThread, QUrl, Slot
 from PySide6.QtGui import QColor
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QMessageBox
@@ -16,6 +17,7 @@ from choicer_voicer_pack_creator.ui.main_window import (
     MainWindow,
     WaveformWorker,
 )
+from choicer_voicer_pack_creator.ui.theme import APP_STYLESHEET
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
 
 
@@ -92,7 +94,7 @@ def test_inspector_sections_resize_collapse_and_restore(qtbot, tmp_path: Path) -
     assert after_collapse[0] <= window.project_section.minimumHeight()
     assert after_collapse[1] > before_collapse[1]
     assert after_collapse[1] > after_collapse[0]
-    assert window.editor_splitter.handleWidth() == 9
+    assert window.editor_splitter.handleWidth() == 1
     assert window.inspector_splitter.handleWidth() == 9
     window._save_layout_state()
     window.close()
@@ -115,6 +117,88 @@ def test_inspector_sections_resize_collapse_and_restore(qtbot, tmp_path: Path) -
         <= 2
     )
     assert not restored.project_section.body.isHidden()
+    restored.close()
+
+
+def test_editor_divider_has_a_thin_gap_and_wider_grab_area(qtbot, tmp_path: Path) -> None:
+    settings = QSettings(str(tmp_path / "layout.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(UnusedMedia(), settings=settings)  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    window.setStyleSheet(APP_STYLESHEET)
+    window.show()
+    qtbot.waitUntil(lambda: window._layout_restored)
+
+    splitter = window.editor_splitter
+    left = splitter.widget(0)
+    inspector_left = window.inspector_splitter.mapTo(splitter, QPoint(0, 0)).x()
+    assert inspector_left - (left.x() + left.width()) == 1
+    assert splitter.handleWidth() == 1
+    assert splitter.handle(1).width() >= 5
+    window.close()
+
+
+@pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
+def test_editor_left_pane_shrinks_collapses_and_reopens(
+    qtbot, tmp_path: Path, stylesheet: str
+) -> None:
+    settings = QSettings(str(tmp_path / "layout.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(UnusedMedia(), settings=settings)  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    window.setStyleSheet(stylesheet)
+    window.show()
+    qtbot.waitUntil(lambda: window._layout_restored)
+
+    splitter = window.editor_splitter
+    original_window_size = window.size()
+    for width in (700, 160, 32, 1, 0):
+        splitter.moveSplitter(width, 1)
+        assert splitter.sizes()[0] == width
+        assert splitter.sizes()[1] >= 420
+        assert window.size() == original_window_size
+
+    handle = splitter.handle(1)
+    assert handle.isVisible()
+    assert handle.isEnabled()
+    grab_point = handle.rect().center()
+    target = splitter.mapToGlobal(QPoint(320, grab_point.y()))
+    qtbot.mousePress(handle, Qt.MouseButton.LeftButton, pos=grab_point)
+    qtbot.mouseMove(handle, handle.mapFromGlobal(target))
+    qtbot.mouseRelease(handle, Qt.MouseButton.LeftButton, pos=handle.mapFromGlobal(target))
+    qtbot.waitUntil(lambda: abs(splitter.sizes()[0] - 320) <= 2)
+    assert window.video_widget.isVisible()
+    assert window.video_widget.width() > 0
+    window.close()
+
+
+@pytest.mark.parametrize("left_width", [80, 0], ids=["narrow", "collapsed"])
+def test_editor_restores_pane_size_without_restoring_old_divider_width(
+    qtbot, tmp_path: Path, left_width: int
+) -> None:
+    settings_path = str(tmp_path / "layout.ini")
+    settings = QSettings(settings_path, QSettings.Format.IniFormat)
+    window = MainWindow(UnusedMedia(), settings=settings)  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    window.setStyleSheet(APP_STYLESHEET)
+    window.show()
+    qtbot.waitUntil(lambda: window._layout_restored)
+    window.editor_splitter.setHandleWidth(9)
+    window.editor_splitter.moveSplitter(left_width, 1)
+    window.close()
+
+    restored_settings = QSettings(settings_path, QSettings.Format.IniFormat)
+    restored = MainWindow(UnusedMedia(), settings=restored_settings)  # type: ignore[arg-type]
+    qtbot.addWidget(restored)
+    restored.setStyleSheet(APP_STYLESHEET)
+    restored.show()
+    qtbot.waitUntil(lambda: restored._layout_restored)
+    splitter = restored.editor_splitter
+    assert abs(splitter.sizes()[0] - left_width) <= 1
+    assert splitter.handleWidth() == 1
+    assert splitter.getRange(1)[0] == 0
+    assert splitter.getRange(1)[1] <= splitter.width() - 420
+    left = splitter.widget(0)
+    inspector_left = restored.inspector_splitter.mapTo(splitter, QPoint(0, 0)).x()
+    assert inspector_left - (left.x() + left.width()) == 1
     restored.close()
 
 

@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QSplitter,
@@ -283,13 +284,15 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         splitter = QSplitter(Qt.Orientation.Horizontal, root)
+        splitter.setObjectName("editorSplitter")
         splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(9)
+        splitter.setHandleWidth(1)
         self.editor_splitter = splitter
         root_layout.addWidget(splitter, 1)
 
         left = QFrame(splitter)
         left.setFrameShape(QFrame.Shape.StyledPanel)
+        left.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(7, 7, 7, 7)
         left_layout.setSpacing(7)
@@ -386,7 +389,7 @@ class MainWindow(QMainWindow):
         right = QWidget(splitter)
         right.setMinimumWidth(420)
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(6, 0, 0, 0)
+        right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
 
         self.inspector_splitter = QSplitter(Qt.Orientation.Vertical, right)
@@ -548,6 +551,7 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(left)
         splitter.addWidget(right)
+        splitter.setCollapsible(0, True)
         splitter.setStretchFactor(0, 7)
         splitter.setStretchFactor(1, 3)
         splitter.splitterMoved.connect(self._schedule_layout_save)
@@ -626,6 +630,8 @@ class MainWindow(QMainWindow):
             editor_state = self.settings.value("layout/editorSplitterV1")
             if editor_state is None or not self.editor_splitter.restoreState(editor_state):
                 self.editor_splitter.setSizes([1030, 470])
+            # Saved splitter states also restore the old handle width.
+            self.editor_splitter.setHandleWidth(1)
 
             inspector_state = self.settings.value("layout/inspectorSplitterV1")
             if inspector_state is None or not self.inspector_splitter.restoreState(

@@ -97,6 +97,12 @@ QSplitter::handle:horizontal {
 }
 QSplitter::handle:vertical:hover { border-top-color: #55cfe0; }
 QSplitter::handle:horizontal:hover { border-left-color: #55cfe0; }
+QSplitter#editorSplitter::handle {
+    margin: 0;
+    border: 0;
+    background: #2b3d52;
+}
+QSplitter#editorSplitter::handle:hover { background: #55cfe0; }
 QLabel#muted { color: #7f91a8; }
 QLabel#path { color: #8ea2ba; font-size: 9pt; }
 QProgressBar { background: #111b28; border: 1px solid #2a3c52; border-radius: 4px; text-align: center; }
