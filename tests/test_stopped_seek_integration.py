@@ -110,6 +110,9 @@ def test_stopped_seek_retains_requested_video_frame(
     ).text() == "Red segment"
     frames.clear()
 
+    # Pixel-rounded drags should land inside the cue, not just before its start.
+    target_seconds = second.start + (0.1 if use_playhead else 0.0)
+    target_ms = round(target_seconds * 1000)
     if use_playhead:
         window.player.stop()
         timeline = window.timeline
@@ -119,29 +122,29 @@ def test_stopped_seek_retains_requested_video_frame(
             pos=QPoint(round(timeline._time_to_x(timeline.playhead)), 4),
         )
         assert timeline._drag_kind == "playhead"
-        for timestamp in (1.5, 2.25, 3.0):
+        for timestamp in (1.5, 2.25, target_seconds):
             qtbot.mouseMove(timeline, QPoint(round(timeline._time_to_x(timestamp)), 4))
         qtbot.mouseRelease(
             timeline,
             Qt.MouseButton.LeftButton,
-            pos=QPoint(round(timeline._time_to_x(3.0)), 4),
+            pos=QPoint(round(timeline._time_to_x(target_seconds)), 4),
         )
-        assert timeline.playhead == pytest.approx(3.0, abs=0.01)
+        assert timeline.playhead == pytest.approx(target_seconds, abs=0.01)
     else:
         window.segment_table.selectRow(1)
 
     def paused_at_target() -> None:
-        assert window.player.position() == pytest.approx(3000, abs=150)
+        assert window.player.position() == pytest.approx(target_ms, abs=150)
         assert not window._stopped_seek_active
         assert window.player.playbackState() == QMediaPlayer.PlaybackState.PausedState
 
     qtbot.waitUntil(paused_at_target, timeout=6000)
     qtbot.waitUntil(lambda: bool(frames), timeout=2000)
-    timestamp, red, green, blue = min(frames, key=lambda item: abs(item[0] - 3000))
+    timestamp, red, green, blue = min(frames, key=lambda item: abs(item[0] - target_ms))
 
-    assert abs(timestamp - 3000) <= 100
+    assert abs(timestamp - target_ms) <= 100
     assert blue > red * 2 and blue > green * 2
-    assert abs(window.player.position() - 3000) <= 150
+    assert abs(window.player.position() - target_ms) <= 150
     assert not window.audio_output.isMuted()
     qtbot.waitUntil(
         lambda: any(
@@ -161,7 +164,7 @@ def test_stopped_seek_retains_requested_video_frame(
         lambda: window.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState,
         timeout=2000,
     )
-    assert window.player.position() >= 2850
+    assert window.player.position() >= target_ms - 150
     qtbot.waitUntil(
         lambda: window.player.position() >= 3500
         and not window.video_widget.subtitle_overlay.isVisible(),
