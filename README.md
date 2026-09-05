@@ -7,6 +7,8 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 ## What it does
 
 - Creates a new project from MP4, MKV, MOV, WebM, OGV, or AVI video.
+- Downloads a single YouTube video from its URL, loads available captions, and automatically
+  compares them with local Whisper without overwriting your edits.
 - Plays the source video inside the editor.
 - Keeps the decoded video frame visible when seeking while playback is stopped.
 - Cues playback to a segment's In point whenever that segment is selected.
@@ -84,8 +86,8 @@ finished executable. It does not require a system FFmpeg installation. Use
 The finished outputs are:
 
 ```text
-dist/v0.4.0/portable-<build-id>/Choicer Voicer Pack Creator/
-dist/v0.4.0/Choicer-Voicer-Pack-Creator-0.4.0-Windows-x64.zip
+dist/v0.5.0/portable-<build-id>/Choicer Voicer Pack Creator/
+dist/v0.5.0/Choicer-Voicer-Pack-Creator-0.5.0-Windows-x64.zip
 ```
 
 The script prints the exact generated application-folder path. Each rebuild uses a new path to avoid
@@ -163,6 +165,45 @@ or overlapping speakers, so every result remains review evidence rather than aut
 One language selection applies to an entire scan; use Auto-detect for primarily single-language
 sources, or rerun selected-language passes when a video deliberately mixes languages. Long videos
 also receive conservative free-disk and memory checks before analysis begins.
+
+### Import a YouTube video
+
+Choose **File → New from YouTube**, paste a video URL, and choose where to keep the downloaded
+media. Only download material you own or have permission to use. Each import creates a new
+`YouTube-<video-id>-<unique-id>` folder without replacing existing files. Save your `.cvpack.json`
+beside that folder to keep the project relocatable; downloaded media is not a temporary cache.
+The downloader retrieves the best available video/audio and may merge them into MKV.
+
+YouTube can provide timestamped creator captions or automatic speech-recognition captions.
+The importer prefers creator captions in the selected language and otherwise uses available
+automatic captions. **Original language (auto)** uses YouTube's language metadata where available;
+you can also select or type a language code. YouTube-generated translations are excluded, but
+creator-uploaded tracks can themselves be translations. Some videos have no accessible captions,
+and caption delivery can fail independently of the video download.
+
+Available captions immediately populate the editable analysis window. Whisper starts automatically
+on a background thread, asking permission first if its runtime/model must be downloaded. Edit,
+preview, or uncheck caption rows while it runs. The **Whisper transcript** and **Comparison**
+columns show overlapping local transcription and flag text/timing disagreements or missing
+matches. Original captions and your edits are never automatically replaced. Agreement is not
+proof of accuracy, and differently segmented speech may still need manual comparison; hover over
+the comparison to see Whisper's timestamps.
+
+If captions are unavailable, the same automatic Whisper pass drafts suggestions from the audio.
+Declining setup or a failed/canceled scan leaves downloaded media and available captions intact.
+**Cancel Scan** keeps the analysis window open; closing it or adding suggestions before the scan
+finishes stops the scan. Checked captions become ordinary editable segments when added, with
+speakers left unassigned. Original caption evidence and the source URL are saved in the project;
+**Tools → Analyze Video & Suggest Segments** can reopen that evidence and rerun comparison.
+Replacing or clearing the source video clears its original caption evidence.
+
+The portable build includes pinned yt-dlp, its JavaScript solver, and Deno, and uses its existing
+FFmpeg tools; no extra end-user installation is required. YouTube import contacts YouTube and its
+media servers, but local Whisper does not upload your audio or captions. Playlists, live/upcoming
+streams, and age-/sign-in-restricted videos are unsupported. Downloads may fail because of
+availability, rate limits, or upstream changes; the importer does not use browser cookies or
+attempt access-restriction workarounds. An authorized local copy can still be opened with
+**New from Video**. Downloader/solver updates ship with application updates.
 
 ### Direct waveform editing
 
@@ -305,8 +346,8 @@ with another compatible pair.
 .\Build-Portable.ps1
 ```
 
-The Windows application folder is written below `dist/v0.4.0/portable-<build-id>/`, with a
-shareable `Choicer-Voicer-Pack-Creator-0.4.0-Windows-x64.zip` beside it. The first build downloads
+The Windows application folder is written below `dist/v0.5.0/portable-<build-id>/`, with a
+shareable `Choicer-Voicer-Pack-Creator-0.5.0-Windows-x64.zip` beside it. The first build downloads
 about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. The stable sharing ZIP is not
 replaced until both the application folder and a clean ZIP extraction pass packaged smoke tests.
 Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or

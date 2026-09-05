@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import choicer_voicer_pack_creator.project_io as project_io
-from choicer_voicer_pack_creator.models import PackProject, Segment
+from choicer_voicer_pack_creator.models import PackProject, Segment, SourceCaption
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
 
 
@@ -38,6 +38,23 @@ def test_project_store_uses_relative_paths_when_possible(tmp_path: Path) -> None
     assert loaded.segments[0].audio_path == str(audio.resolve())
     assert loaded.segments[0].caption == "Hello"
     assert not path.with_name(path.name + ".partial").exists()
+
+
+def test_youtube_caption_provenance_survives_save_and_recovery(tmp_path: Path) -> None:
+    project = PackProject(
+        source_url="https://www.youtube.com/watch?v=abcdefghijk",
+        caption_language="en",
+        source_captions=[SourceCaption(1, 2, "Original caption", "YouTube creator (en)")],
+    )
+    path = tmp_path / "captions.cvpack.json"
+    ProjectStore.save(project, path)
+    loaded = ProjectStore.load(path)
+    assert loaded.source_url == project.source_url
+    assert loaded.caption_language == "en"
+    assert loaded.source_captions == project.source_captions
+    recovery = RecoveryStore(tmp_path / "recovery.json")
+    recovery.save(project, path)
+    assert recovery.load().project.source_captions == project.source_captions
 
 
 def test_save_retains_previous_version_and_save_as_preserves_original(tmp_path: Path) -> None:

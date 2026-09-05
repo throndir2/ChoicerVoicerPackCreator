@@ -9,6 +9,29 @@ from typing import Any, Literal
 AudioMode = Literal["video", "file"]
 
 
+@dataclass(frozen=True, slots=True)
+class SourceCaption:
+    start: float
+    end: float
+    text: str
+    source: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "start": self.start,
+            "end": self.end,
+            "text": self.text,
+            "source": self.source,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> SourceCaption:
+        start, end = float(value["start"]), float(value["end"])
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
+            raise ValueError("Source caption has an invalid time range")
+        return cls(start, end, str(value["text"]), str(value["source"]))
+
+
 @dataclass(slots=True)
 class Segment:
     """One playable dub prompt on the video timeline."""
@@ -96,6 +119,9 @@ class PackProject:
     source_pack_path: str = ""
     preserve_source_video: bool = False
     import_warnings: list[str] = field(default_factory=list)
+    source_url: str = ""
+    caption_language: str = ""
+    source_captions: list[SourceCaption] = field(default_factory=list)
 
     @property
     def speakers(self) -> list[str]:
@@ -196,6 +222,9 @@ class PackProject:
             "source_pack_path": self.source_pack_path,
             "preserve_source_video": self.preserve_source_video,
             "import_warnings": list(self.import_warnings),
+            "source_url": self.source_url,
+            "caption_language": self.caption_language,
+            "source_captions": [caption.to_dict() for caption in self.source_captions],
             "segments": [segment.to_dict() for segment in self.segments],
         }
 
@@ -211,6 +240,11 @@ class PackProject:
             raise ValueError("Project segments must be an array")
         if not all(isinstance(item, dict) for item in segments_value):
             raise ValueError("Every project segment must be a JSON object")
+        captions_value = value.get("source_captions", [])
+        if not isinstance(captions_value, list) or not all(
+            isinstance(item, dict) for item in captions_value
+        ):
+            raise ValueError("Project source captions must be an array of JSON objects")
         import_warnings = value.get("import_warnings", [])
         if not isinstance(import_warnings, list):
             import_warnings = [str(import_warnings)] if import_warnings else []
@@ -229,6 +263,9 @@ class PackProject:
             source_pack_path=str(value.get("source_pack_path", "")),
             preserve_source_video=bool(value.get("preserve_source_video", False)),
             import_warnings=[str(item) for item in import_warnings if str(item).strip()],
+            source_url=str(value.get("source_url", "")),
+            caption_language=str(value.get("caption_language", "")),
+            source_captions=[SourceCaption.from_dict(item) for item in captions_value],
             segments=[Segment.from_dict(item) for item in segments_value],
         )
         project.sort_segments()

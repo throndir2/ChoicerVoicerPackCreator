@@ -22,6 +22,7 @@ from choicer_voicer_pack_creator.media import MediaError, MediaTools
 from choicer_voicer_pack_creator.project_io import RecoveryStore
 from choicer_voicer_pack_creator.ui.main_window import MainWindow
 from choicer_voicer_pack_creator.ui.theme import APP_STYLESHEET
+from choicer_voicer_pack_creator.youtube import youtube_runtime_path
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -71,6 +72,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     smoke_report = os.environ.get("CHOICER_VOICER_SMOKE_REPORT")
     if smoke_report:
+        import yt_dlp_ejs.yt.solver as youtube_solver
+
+        youtube_runtime = youtube_runtime_path()
+        youtube_runtime_version = media.run(
+            [str(youtube_runtime), "--version"], "Checking YouTube JavaScript runtime"
+        ).stdout
+        solver_root = Path(youtube_solver.__file__).parent
         version = media.run([media.ffmpeg, "-version"], "Reading FFmpeg version").stdout
         analysis_manifest = default_manifest_path()
         whisper_license = analysis_manifest.parent / "WhisperCpp-MIT.txt"
@@ -114,6 +122,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "analysis_cpu_threads": hardware.cpu_threads,
                     "activity_scan_regions": len(activity_regions),
                     "activity_scan_threshold_db": activity_threshold,
+                    "youtube_runtime": str(youtube_runtime),
+                    "youtube_runtime_version": youtube_runtime_version.splitlines()[0],
+                    "youtube_ejs_present": all(
+                        (solver_root / name).is_file() for name in ("core.min.js", "lib.min.js")
+                    ),
                 },
                 indent=2,
             )

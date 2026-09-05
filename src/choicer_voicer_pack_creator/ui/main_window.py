@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -62,6 +63,7 @@ from choicer_voicer_pack_creator.timeline_audit import (
 from choicer_voicer_pack_creator.ui.analysis_dialog import AnalysisDialog
 from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
+from choicer_voicer_pack_creator.ui.youtube_dialog import YouTubeDialog
 
 
 class WaveformWorker(QThread):
@@ -202,6 +204,8 @@ class MainWindow(QMainWindow):
         self.action_new = QAction("New from Video…", self)
         self.action_new.setShortcut(QKeySequence.StandardKey.New)
         self.action_new.triggered.connect(self.new_from_video)
+        self.action_youtube = QAction("New from YouTube…", self)
+        self.action_youtube.triggered.connect(self.new_from_youtube)
         self.action_open = QAction("Open Project…", self)
         self.action_open.setShortcut(QKeySequence.StandardKey.Open)
         self.action_open.triggered.connect(self.open_project)
@@ -239,7 +243,9 @@ class MainWindow(QMainWindow):
         self.action_duplicate.triggered.connect(self.duplicate_segment)
 
         file_menu = self.menuBar().addMenu("&File")
-        file_menu.addActions([self.action_new, self.action_open, self.action_import])
+        file_menu.addActions(
+            [self.action_new, self.action_youtube, self.action_open, self.action_import]
+        )
         file_menu.addSeparator()
         file_menu.addActions([self.action_save, self.action_save_as, self.action_restore_previous])
         file_menu.addSeparator()
@@ -259,7 +265,9 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         toolbar = QToolBar("Main", self)
         toolbar.setMovable(False)
-        toolbar.addActions([self.action_new, self.action_open, self.action_import])
+        toolbar.addActions(
+            [self.action_new, self.action_youtube, self.action_open, self.action_import]
+        )
         toolbar.addSeparator()
         toolbar.addActions([self.action_save, self.action_export])
         self.addToolBar(toolbar)
@@ -900,7 +908,39 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Loaded {source.name}. Mark a range and add the first segment.")
         QTimer.singleShot(0, lambda: self.open_analysis_dialog(initial_scan=True))
 
-    def open_analysis_dialog(self, *, initial_scan: bool = False) -> None:
+    def new_from_youtube(self) -> None:
+        if not self._maybe_save():
+            return
+        dialog = YouTubeDialog(
+            self.media, str(self.settings.value("lastYouTubeDir", "")), self
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.download_result is None:
+            return
+        result = dialog.download_result
+        self.settings.setValue("lastYouTubeDir", str(result.video_path.parent.parent))
+        project = PackProject(
+            title=result.title,
+            authors=[getpass.getuser()],
+            video_path=str(result.video_path),
+            video_duration=result.duration,
+            source_url=result.url,
+            caption_language=result.language,
+            source_captions=list(result.captions),
+            import_warnings=list(result.warnings),
+        )
+        self._set_project(project, None, mark_dirty=True)
+        self.statusBar().showMessage(
+            f"Downloaded {result.title}; {len(result.captions)} caption(s) ready for review."
+        )
+        if result.warnings:
+            QMessageBox.warning(self, "YouTube import notes", "\n\n".join(result.warnings))
+        QTimer.singleShot(
+            0, lambda: self.open_analysis_dialog(initial_scan=True, auto_start=True)
+        )
+
+    def open_analysis_dialog(
+        self, *, initial_scan: bool = False, auto_start: bool = False
+    ) -> None:
         if not self.project.video_path or not Path(self.project.video_path).is_file():
             QMessageBox.information(
                 self,
@@ -916,6 +956,9 @@ class MainWindow(QMainWindow):
             len(self.project.segments),
             self,
             initial_scan=initial_scan,
+            source_captions=self.project.source_captions,
+            caption_language=self.project.caption_language,
+            auto_start=auto_start,
         )
         dialog.suggestions_accepted.connect(self._add_analysis_suggestions)
         dialog.preview_requested.connect(self._preview_analysis_range)
@@ -1921,6 +1964,10 @@ class MainWindow(QMainWindow):
         self._reset_transport_state()
         self.player.stop()
         self.prompt_player.stop()
+        if str(source) != self.project.video_path:
+            self.project.source_url = ""
+            self.project.caption_language = ""
+            self.project.source_captions = []
         self.project.video_path = str(source)
         self.project.video_duration = info.duration
         self.project.preserve_source_video = (
@@ -1974,6 +2021,9 @@ class MainWindow(QMainWindow):
         self._cancel_waveform_workers()
         self.player.setSource(QUrl())
         self.project.video_path = ""
+        self.project.source_url = ""
+        self.project.caption_language = ""
+        self.project.source_captions = []
         self.project.video_duration = 0.0
         self.project.preserve_source_video = False
         self.video_path_label.setText("No video loaded")
@@ -2169,6 +2219,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(busy)
         for action in (
             self.action_new,
+            self.action_youtube,
             self.action_open,
             self.action_import,
             self.action_save,

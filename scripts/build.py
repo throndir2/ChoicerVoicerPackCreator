@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import shutil
@@ -12,6 +13,7 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+import deno
 from ffmpeg_bundle import prepare_bundle
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,6 +119,12 @@ def build_candidate() -> int:
         "PySide6.QtMultimedia",
         "--hidden-import",
         "PySide6.QtMultimediaWidgets",
+        "--hidden-import",
+        "yt_dlp_ejs.yt.solver",
+        "--collect-data",
+        "yt_dlp_ejs",
+        "--add-binary",
+        f"{deno.find_deno_bin()}{os.pathsep}runtime/deno",
         "--add-data",
         f"{ROOT / 'assets'}{os.pathsep}assets",
         "--add-data",
@@ -141,6 +149,19 @@ def build_candidate() -> int:
     resource_dir = ROOT / "src" / "choicer_voicer_pack_creator" / "resources"
     shutil.copy2(resource_dir / "WhisperCpp-MIT.txt", app_dir / "licenses")
     shutil.copy2(resource_dir / "OpenAI-Whisper-MIT.txt", app_dir / "licenses")
+    for package in ("yt-dlp", "yt-dlp-ejs", "deno"):
+        distribution = importlib.metadata.distribution(package)
+        license_files = [
+            path for path in distribution.files or []
+            if ".dist-info/licenses/" in str(path).replace("\\", "/")
+        ]
+        if not license_files:
+            raise RuntimeError(f"Installed {package} wheel is missing its license notices")
+        for license_file in license_files:
+            relative = str(license_file).replace("\\", "/").split(".dist-info/licenses/", 1)[1]
+            target = app_dir / "licenses" / package / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(distribution.locate_file(license_file), target)
     python_license = Path(sys.base_prefix) / "LICENSE.txt"
     if not python_license.is_file():
         print(f"Python license was not found: {python_license}", file=sys.stderr)

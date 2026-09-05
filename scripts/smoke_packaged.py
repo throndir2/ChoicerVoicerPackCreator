@@ -94,6 +94,18 @@ def main() -> int:
         report.get("activity_scan_threshold_db"), (int, float)
     ):
         raise RuntimeError("Packaged deterministic activity scanning failed")
+    expected_deno = (
+        executable.parent / "_internal" / "runtime" / "deno" / "deno.exe"
+    ).resolve()
+    if Path(report["youtube_runtime"]).resolve() != expected_deno:
+        raise RuntimeError("YouTube import did not select its bundled JavaScript runtime")
+    if report.get("youtube_runtime_version") != "deno 2.9.6 (stable, release, x86_64-pc-windows-msvc)":
+        raise RuntimeError("Packaged YouTube JavaScript runtime did not start correctly")
+    if not report.get("youtube_ejs_present"):
+        raise RuntimeError("Packaged YouTube JavaScript solver files are missing")
+    for package in ("yt-dlp", "yt-dlp-ejs", "deno"):
+        if not (executable.parent / "licenses" / package / "LICENSE").is_file():
+            raise RuntimeError(f"Packaged {package} license notice is missing")
     print(json.dumps(report, indent=2))
     print("PACKAGED APPLICATION + BUNDLED FFMPEG SMOKE PASSED")
     return 0

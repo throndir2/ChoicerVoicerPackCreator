@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -30,7 +31,9 @@ from choicer_voicer_pack_creator.analysis import (
     analyze_video,
     detect_hardware,
 )
+from choicer_voicer_pack_creator.captions import compare_caption
 from choicer_voicer_pack_creator.media import MediaTools
+from choicer_voicer_pack_creator.models import SourceCaption
 
 
 class AnalysisWorker(QThread):
@@ -102,6 +105,9 @@ class AnalysisDialog(QDialog):
         parent: QWidget | None = None,
         *,
         initial_scan: bool = False,
+        source_captions: list[SourceCaption] | None = None,
+        caption_language: str = "",
+        auto_start: bool = False,
     ) -> None:
         super().__init__(parent)
         self.media = media
@@ -111,6 +117,9 @@ class AnalysisDialog(QDialog):
         self.existing_segments = existing_segments
         self.worker: AnalysisWorker | None = None
         self._close_after_cancel = False
+        self._accept_after_cancel = False
+        self.source_captions = list(source_captions or [])
+        self._comparison_status = "Not run"
         self.result: AnalysisResult | None = None
         self.hardware = detect_hardware()
 
@@ -122,7 +131,12 @@ class AnalysisDialog(QDialog):
 
         layout = QVBoxLayout(self)
         intro = QLabel(
-            "Create editable starting points from local audio. Activity scanning is deterministic. "
+            (
+                "YouTube captions are ready to edit while local Whisper runs in the background. "
+                "Comparison never replaces your text or timing. Agreement is not proof of accuracy. "
+                if self.source_captions else
+                "Create editable starting points from local audio. Activity scanning is deterministic. "
+            ) +
             "Whisper can suggest text and timestamps, but it can be wrong—especially for names, "
             "stylized speech, music, and overlapping speakers. Token scores are not accuracy "
             "guarantees, and no speaker is assigned automatically."
@@ -166,6 +180,13 @@ class AnalysisDialog(QDialog):
             ("Russian", "ru"),
         ):
             self.language_combo.addItem(label, code)
+        if caption_language:
+            spoken_language = caption_language.split("-")[0]
+            index = self.language_combo.findData(spoken_language)
+            if index < 0:
+                self.language_combo.addItem(spoken_language, spoken_language)
+                index = self.language_combo.count() - 1
+            self.language_combo.setCurrentIndex(index)
         options.addRow("Spoken language", self.language_combo)
 
         hardware_label = QLabel(self.hardware.description)
@@ -192,9 +213,10 @@ class AnalysisDialog(QDialog):
         progress_row.addWidget(self.progress_bar)
         layout.addLayout(progress_row)
 
-        self.table = QTableWidget(0, 6)
+        self.table = QTableWidget(0, 8 if self.source_captions else 6)
         self.table.setHorizontalHeaderLabels(
             ["Use", "In", "Out", "Suggested transcript", "Evidence", "Token score"]
+            + (["Whisper transcript", "Comparison"] if self.source_captions else [])
         )
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().hide()
@@ -206,14 +228,24 @@ class AnalysisDialog(QDialog):
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
         self.table.setColumnWidth(4, 165)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        if self.source_captions:
+            header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+            self.table.itemChanged.connect(self._caption_edited)
         self.table.cellDoubleClicked.connect(lambda row, _column: self.preview_row(row))
         layout.addWidget(self.table, 1)
 
         controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        self.scan_button = QPushButton("Scan Video")
+        self.scan_button = QPushButton(
+            "Compare with Whisper" if self.source_captions else "Scan Video"
+        )
         self.scan_button.setObjectName("primary")
         self.scan_button.clicked.connect(self.start_scan)
         controls.addButton(self.scan_button, QDialogButtonBox.ButtonRole.ActionRole)
+        self.cancel_button = QPushButton("Cancel Scan")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel_scan)
+        controls.addButton(self.cancel_button, QDialogButtonBox.ButtonRole.ActionRole)
         self.preview_button = QPushButton("Preview Row")
         self.preview_button.setEnabled(False)
         self.preview_button.clicked.connect(self.preview_current_row)
@@ -224,6 +256,16 @@ class AnalysisDialog(QDialog):
         controls.addButton(self.add_button, QDialogButtonBox.ButtonRole.AcceptRole)
         controls.rejected.connect(self.reject)
         layout.addWidget(controls)
+        if self.source_captions:
+            self._populate([
+                AnalysisSuggestion(cue.start, cue.end, cue.text, cue.source)
+                for cue in self.source_captions
+            ])
+            self.add_button.setEnabled(True)
+            self.preview_button.setEnabled(True)
+            self.progress_label.setText("YouTube captions ready; Whisper comparison pending")
+        if auto_start:
+            QTimer.singleShot(0, self.start_scan)
 
     def _whisper_toggled(self, checked: bool) -> None:
         self.model_combo.setEnabled(checked)
@@ -254,7 +296,7 @@ class AnalysisDialog(QDialog):
     def start_scan(self) -> None:
         if self.worker and self.worker.isRunning():
             return
-        if self.table.rowCount():
+        if self.table.rowCount() and not self.source_captions:
             answer = QMessageBox.question(
                 self,
                 "Replace current analysis results?",
@@ -265,6 +307,11 @@ class AnalysisDialog(QDialog):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         use_whisper = self.whisper_check.isChecked()
+        if self.source_captions and not use_whisper:
+            QMessageBox.information(
+                self, "Enable Whisper", "Enable local Whisper to compare these captions."
+            )
+            return
         model_key = str(self.model_combo.currentData())
         if use_whisper:
             try:
@@ -287,12 +334,21 @@ class AnalysisDialog(QDialog):
                     QMessageBox.StandardButton.Yes,
                 )
                 if answer != QMessageBox.StandardButton.Yes:
+                    self.progress_label.setText(
+                        "Whisper not started. You can still edit and add available captions."
+                    )
                     return
-        self.table.setRowCount(0)
+        if not self.source_captions:
+            self.table.setRowCount(0)
         self.result = None
+        self._comparison_status = "Pending"
+        self._refresh_comparisons()
         self.scan_button.setEnabled(False)
-        self.add_button.setEnabled(False)
-        self.preview_button.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.add_button.setEnabled(bool(self.source_captions))
+        if self.source_captions:
+            self.add_button.setText("Add Checked (stops scan)")
+        self.preview_button.setEnabled(bool(self.source_captions))
         self.whisper_check.setEnabled(False)
         self.model_combo.setEnabled(False)
         self.language_combo.setEnabled(False)
@@ -333,18 +389,21 @@ class AnalysisDialog(QDialog):
             self._failed("Analysis returned an unexpected result")
             return
         self.result = value
-        self._populate(value.suggestions)
+        if self.source_captions:
+            self._refresh_comparisons()
+        else:
+            self._populate(value.suggestions)
         language = f" · detected {value.detected_language}" if value.detected_language else ""
         self.progress_label.setText(
-            f"Review {len(value.suggestions)} suggestion(s) · "
+            f"Review {self.table.rowCount()} suggestion(s) · "
             f"{value.activity_regions} activity / {value.transcript_regions} transcript regions{language}"
         )
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(1000)
         self._set_idle()
-        self.add_button.setEnabled(bool(value.suggestions))
-        self.preview_button.setEnabled(bool(value.suggestions))
-        if value.suggestions:
+        self.add_button.setEnabled(bool(self.table.rowCount()))
+        self.preview_button.setEnabled(bool(self.table.rowCount()))
+        if self.table.rowCount():
             self.table.selectRow(0)
 
     def _populate(self, suggestions: list[AnalysisSuggestion]) -> None:
@@ -368,9 +427,44 @@ class AnalysisDialog(QDialog):
             )
             confidence.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
             self.table.setItem(row, 5, confidence)
+        self._refresh_comparisons()
+
+    def _caption_edited(self, item: QTableWidgetItem) -> None:
+        if item.column() in (1, 2, 3):
+            self._refresh_comparisons(item.row())
+
+    def _refresh_comparisons(self, changed_row: int | None = None) -> None:
+        if not self.source_captions:
+            return
+        rows = range(self.table.rowCount()) if changed_row is None else [changed_row]
+        for row in rows:
+            if any(self.table.item(row, column) is None for column in (1, 2, 3)):
+                continue
+            text, status, timing = "", self._comparison_status, ""
+            if self.result is not None:
+                try:
+                    start = float(self.table.item(row, 1).text())
+                    end = float(self.table.item(row, 2).text())
+                    if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+                        raise ValueError("Invalid range")
+                    comparison = compare_caption(
+                        start, end, self.table.item(row, 3).text(), self.result.suggestions
+                    )
+                    text, status, timing = comparison.text, comparison.status, comparison.timing
+                except ValueError:
+                    status = "Invalid range - review"
+            for column, value in ((6, text), (7, status)):
+                cell = QTableWidgetItem(value)
+                cell.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                cell.setToolTip(timing)
+                self.table.setItem(row, column, cell)
 
     def _set_idle(self) -> None:
         self.scan_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+        self.add_button.setEnabled(bool(self.table.rowCount()))
+        self.add_button.setText("Add Checked Suggestions")
+        self.preview_button.setEnabled(bool(self.table.rowCount()))
         self.whisper_check.setEnabled(True)
         self.sensitivity_combo.setEnabled(True)
         self._whisper_toggled(self.whisper_check.isChecked())
@@ -380,6 +474,8 @@ class AnalysisDialog(QDialog):
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
         self.progress_label.setText("Analysis failed")
+        self._comparison_status = "Whisper unavailable"
+        self._refresh_comparisons()
         self._set_idle()
         QMessageBox.critical(self, "Video analysis failed", message)
 
@@ -388,6 +484,8 @@ class AnalysisDialog(QDialog):
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
         self.progress_label.setText("Analysis canceled")
+        self._comparison_status = "Canceled"
+        self._refresh_comparisons()
         self._set_idle()
 
     @Slot()
@@ -396,7 +494,10 @@ class AnalysisDialog(QDialog):
             self.worker = None
         if self._close_after_cancel:
             self._close_after_cancel = False
-            super().reject()
+            if self._accept_after_cancel:
+                super().accept()
+            else:
+                super().reject()
 
     def checked_suggestions(self) -> list[AnalysisSuggestion]:
         selected: list[AnalysisSuggestion] = []
@@ -407,6 +508,8 @@ class AnalysisDialog(QDialog):
             try:
                 start = float(self.table.item(row, 1).text())
                 end = float(self.table.item(row, 2).text())
+                if not math.isfinite(start) or not math.isfinite(end):
+                    raise ValueError("Non-finite range")
             except (AttributeError, ValueError):
                 raise ValueError(f"Suggestion {row + 1} has invalid In/Out values") from None
             start = max(0.0, min(self.duration, start))
@@ -468,7 +571,19 @@ class AnalysisDialog(QDialog):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         self.suggestions_accepted.emit(suggestions)
-        self.accept()
+        if self.worker and self.worker.isRunning():
+            self._accept_after_cancel = True
+            self._close_after_cancel = True
+            self.table.setEnabled(False)
+            self.add_button.setEnabled(False)
+            self.cancel_scan()
+        else:
+            self.accept()
+
+    def cancel_scan(self) -> None:
+        if self.worker and self.worker.isRunning():
+            self.worker.requestInterruption()
+            self.progress_label.setText("Canceling analysis; current captions will be kept...")
 
     def reject(self) -> None:
         if self.worker and self.worker.isRunning():

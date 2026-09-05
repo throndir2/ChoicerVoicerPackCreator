@@ -26,7 +26,8 @@ FFmpeg is a trademark of Fabrice Bellard. Choicer Voicer Pack Creator is not aff
 The optional **Analyze Video** feature can download an unmodified CPU build of
 [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and a converted OpenAI Whisper model into
 the current user's local application-data directory. These files are not included in the base
-application ZIP and are used only when the user explicitly enables local transcription.
+application ZIP. YouTube import starts local transcription automatically, but downloading missing
+components still requires the user's permission.
 
 - whisper.cpp version: `1.9.3`, release/build `b4938`
 - whisper.cpp source revision: `371b5a7561823ab2bb32142d2751e35e7534727b`
@@ -43,6 +44,25 @@ beside downloaded analysis components. Full immutable URLs and file inventory ar
 
 Whisper output is probabilistic review assistance. It is not represented as an exact transcript,
 speaker detector, or authoritative source boundary.
+
+## YouTube import
+
+The application includes the pinned Python packages **yt-dlp 2026.8.19** (Unlicense),
+**yt-dlp-ejs 0.8.0** (Unlicense, MIT, ISC), and **Deno 2.9.6** (MIT).
+The portable build includes Deno's Windows x64 executable and the EJS JavaScript solver files;
+it does not download remote solver components at runtime.
+
+Upstream projects and corresponding source:
+
+- <https://github.com/yt-dlp/yt-dlp/tree/2026.08.19>
+- <https://github.com/yt-dlp/ejs/tree/0.8.0>
+- <https://github.com/denoland/deno/tree/v2.9.6>
+- <https://github.com/denoland/deno_pypi>
+
+Wheel license notices are copied to `licenses/yt-dlp`, `licenses/yt-dlp-ejs`, and `licenses/deno`.
+The bundled EJS `yt_dlp_ejs/yt/solver/lib.min.js` retains the MIT astring and ISC meriyah
+copyright and permission notices. yt-dlp is embedded from its Python wheel rather than its
+standalone executable or optional `default` dependency set.
 
 ## Qt for Python / PySide6
 
