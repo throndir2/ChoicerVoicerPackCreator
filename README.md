@@ -332,9 +332,11 @@ suggested boundary: this pass measures audio energy, not speaker identity, so mu
 hide pauses and two speakers without a pause can still share a row. It does not correct
 misrecognized words, perform forced alignment, or separate overlapping voices.
 
-Choose the preferred source, then click **Use Refined YouTube Transcript** or **Use Whisper
-Transcript**. Click a row in that draft or its **Select**
-control to choose the source; merely finishing a background Whisper run does not select it.
+Click **Use Refined YouTube Transcript** or **Use Whisper Transcript** directly below the
+draft you want. Both buttons remain visible; you do not need to select that source first.
+Each button is enabled when its draft is ready and at least one row is checked.
+Click a row in a draft or its **Select** control to choose it for playback and the Enter-key
+Use action; merely finishing a background Whisper run does not select it.
 The checked rows from that source become editable project segments with that source's timings
 and no assigned speakers. Other sources are not mixed in. Playback also uses the chosen draft's
 own edited In/Out range. Choosing an available draft while another scan runs stops that scan.
@@ -347,8 +349,8 @@ existing drafts intact. **Whisper model (next scan)** and **Spoken language (nex
 only a new run; they do not select or change an existing transcript. The current local draft
 shows the model and detected language from its last successful nonempty scan, also after
 saving and reopening the project. Older drafts without model information say **model not recorded**.
-If a larger model fails due to memory limits, select **Select Whisper transcript** (or click
-one of its rows), then **Use Whisper Transcript** to use the retained draft without rerunning.
+If a larger model fails due to memory limits, click **Use Whisper Transcript** below the
+retained draft to use it without rerunning.
 If all rows are unchecked, check at least one before using the transcript.
 If automatic refinement fails, is canceled, or returns no rows, no original rows are shown as a
 fallback and Whisper does not start automatically; either pass can be retried manually.

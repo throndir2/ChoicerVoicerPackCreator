@@ -257,6 +257,97 @@ def test_whisper_completion_does_not_replace_edits_or_checks(qtbot, tmp_path) ->
     assert dialog.checked_suggestions() == []
 
 
+@pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
+@pytest.mark.parametrize("source", ["refined", "local"])
+@pytest.mark.parametrize("action", ["click", "enter"])
+def test_each_transcript_has_a_direct_use_button(
+    qtbot, tmp_path, stylesheet, source, action,
+):
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        source_captions=[
+            SourceCaption(1, 2, "YouTube line", "YouTube"),
+            SourceCaption(3, 4, "Another YouTube line", "YouTube"),
+        ],
+    )
+    qtbot.addWidget(dialog)
+    dialog.setStyleSheet(stylesheet)
+    dialog.show()
+    assert dialog.refined_add_button.isVisible()
+    assert dialog.local_add_button.isVisible()
+    assert not dialog.refined_add_button.isEnabled()
+    assert not dialog.local_add_button.isEnabled()
+    complete_refinement(dialog)
+    assert dialog.refined_add_button.isEnabled()
+    assert not dialog.local_add_button.isEnabled()
+    dialog._completed(AnalysisResult(
+        [
+            AnalysisSuggestion(0.5, 2.5, "Whisper line", "Whisper", 0.8),
+            AnalysisSuggestion(3.5, 5, "Another Whisper line", "Whisper", 0.7),
+        ],
+        2, 2, -30, "tiny", "en", detect_hardware(),
+    ))
+    assert dialog.selected_source == "refined"
+    assert dialog.refined_add_button.text() == "Use Refined YouTube Transcript"
+    assert dialog.local_add_button.text() == "Use Whisper Transcript"
+    for panel, table, button in (
+        (dialog.refined_panel, dialog.refined_table, dialog.refined_add_button),
+        (dialog.local_panel, dialog.local_table, dialog.local_add_button),
+    ):
+        assert button.isVisible()
+        assert button.isEnabled()
+        assert button.objectName() == "primary"
+        assert not button.autoDefault()
+        assert panel.contentsRect().contains(button.geometry())
+        assert button.y() >= table.y() + table.height()
+
+    radio, table, button, other_radio, other_table, other_button = (
+        (
+            dialog.refined_radio, dialog.refined_table, dialog.refined_add_button,
+            dialog.local_radio, dialog.local_table, dialog.local_add_button,
+        ) if source == "refined" else (
+            dialog.local_radio, dialog.local_table, dialog.local_add_button,
+            dialog.refined_radio, dialog.refined_table, dialog.refined_add_button,
+        )
+    )
+    other_radio.setChecked(True)
+    other_rows = dialog._draft_rows(other_table)
+    for row in range(table.rowCount()):
+        table.item(row, 0).setCheckState(Qt.CheckState.Unchecked)
+    assert not button.isEnabled()
+    assert other_button.isEnabled()
+    table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    assert button.isEnabled()
+    assert dialog.selected_source != source
+
+    table.editItem(table.item(0, 3))
+    editor = table.findChild(QLineEdit)
+    assert editor is not None
+    editor.selectAll()
+    qtbot.keyClicks(editor, "Edited line")
+    accepted = []
+    saved = []
+    dialog.suggestions_accepted.connect(accepted.extend)
+    dialog.review_changed.connect(saved.append)
+    if action == "click":
+        qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    else:
+        radio.click()
+        assert button.isDefault()
+        assert not other_button.isDefault()
+        qtbot.keyClick(dialog, Qt.Key.Key_Return)
+
+    assert accepted == [
+        AnalysisSuggestion(1, 2, "Edited line", "Refined YouTube")
+        if source == "refined" else
+        AnalysisSuggestion(0.5, 2.5, "Edited line", "Whisper", 0.8)
+    ]
+    assert saved[-1].selected_source == source
+    assert dialog._draft_rows(other_table) == other_rows
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert dialog.worker is None
+
+
 @pytest.mark.parametrize("source", ["youtube", "refined"], ids=["legacy-selection", "refined"])
 def test_adding_captions_during_background_scan_waits_for_cancellation(
     qtbot, tmp_path, monkeypatch, source,
@@ -551,13 +642,17 @@ def test_source_choice_imports_its_own_segmentation_and_saves_it(
         [], 1, 0, -30, None, None, detect_hardware(),
         refined_captions=[SourceCaption(1.1, 2.9, "Refined line", "Refined YouTube")],
     ))
+    dialog.local_radio.setChecked(source == "refined")
+    expected = [
+        AnalysisSuggestion(1.1, 2.9, "Refined line", "Refined YouTube")
+        if source == "refined" else
+        AnalysisSuggestion(0.5, 3.5, "One longer Whisper line", "Whisper", 0.8)
+    ]
+    assert dialog.selected_source != source
     {
-        "refined": dialog.refined_radio,
-        "local": dialog.local_radio,
-    }[source].setChecked(True)
-    expected = dialog.checked_suggestions()
-    assert len(expected) == 1
-    dialog.accept_suggestions()
+        "refined": dialog.refined_add_button,
+        "local": dialog.local_add_button,
+    }[source].click()
     assert window.save_project()
     window.open_path(window.project_path)
     assert [(s.start, s.end, s.caption) for s in window.project.segments] == [
@@ -725,6 +820,7 @@ def test_canceling_rescan_retains_local_and_youtube_drafts(qtbot, tmp_path, monk
         [AnalysisDraftRow("1", "2", "YouTube draft", "YouTube")],
         [AnalysisDraftRow("0.5", "3", "Existing Whisper edit", "Whisper")],
         "local",
+        refined_rows=[AnalysisDraftRow("1.1", "1.9", "Refined edit", "Refined YouTube")],
     )
     dialog = AnalysisDialog(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
@@ -735,11 +831,15 @@ def test_canceling_rescan_retains_local_and_youtube_drafts(qtbot, tmp_path, monk
     assert dialog.review_state() == review
     assert not dialog.local_table.isEnabled()
     assert not dialog.add_button.isEnabled()
+    assert not dialog.local_add_button.isEnabled()
+    assert dialog.refined_add_button.isEnabled()
     dialog.cancel_scan()
     qtbot.waitUntil(lambda: dialog.worker is None)
     assert dialog.review_state() == review
     assert dialog.local_table.isEnabled()
     assert dialog.add_button.isEnabled()
+    assert dialog.local_add_button.isEnabled()
+    assert dialog.refined_add_button.isEnabled()
 
 
 @pytest.mark.parametrize("operation", ["replace", "clear"])
@@ -867,6 +967,8 @@ def test_refinement_runs_without_whisper_and_replaces_only_its_draft(
     dialog.start_refinement()
     assert not dialog.refined_table.isEnabled()
     assert dialog.local_table.isEnabled()
+    assert not dialog.refined_add_button.isEnabled()
+    assert dialog.local_add_button.isEnabled()
     assert not dialog.pause_spin.isEnabled()
     assert not dialog.refine_button.isEnabled()
     assert dialog.review_state() == review
@@ -929,7 +1031,10 @@ def test_refinement_interruption_keeps_all_drafts(qtbot, tmp_path, monkeypatch, 
     elif outcome == "close":
         dialog.reject()
     elif outcome == "use":
-        dialog.accept_suggestions()
+        dialog.refined_radio.setChecked(True)
+        dialog.local_add_button.click()
+        assert not dialog.refined_add_button.isEnabled()
+        assert not dialog.local_add_button.isEnabled()
     qtbot.waitUntil(lambda: dialog.worker is None)
     assert dialog.review_state() == review
     assert dialog.source_captions[0].text == "Original"
@@ -1009,6 +1114,10 @@ def test_compact_review_keeps_refined_rows_visible(qtbot, tmp_path):
     assert dialog.refined_panel.contentsRect().contains(dialog.refined_table.geometry())
     assert dialog.refine_button.isVisible()
     assert dialog.add_button.isVisible()
+    assert dialog.refined_add_button.isVisible()
+    assert dialog.local_add_button.isVisible()
+    assert dialog.refined_panel.contentsRect().contains(dialog.refined_add_button.geometry())
+    assert dialog.local_panel.contentsRect().contains(dialog.local_add_button.geometry())
 
 
 @pytest.mark.parametrize("source", ["local", "refined"])
