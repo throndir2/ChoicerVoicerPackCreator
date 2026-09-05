@@ -5,8 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QFileDialog, QLineEdit, QMessageBox
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtWidgets import QDialog, QFileDialog, QLineEdit, QMessageBox, QSplitter
 
 from choicer_voicer_pack_creator.analysis import (
     AnalysisCancelled,
@@ -25,10 +25,51 @@ from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
 from choicer_voicer_pack_creator.ui import analysis_dialog
 from choicer_voicer_pack_creator.ui.analysis_dialog import AnalysisDialog
 from choicer_voicer_pack_creator.ui.main_window import MainWindow
+from choicer_voicer_pack_creator.ui.theme import APP_STYLESHEET
 
 
 class UnusedMedia:
     pass
+
+
+@pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
+@pytest.mark.parametrize("tab_index", [0, 1], ids=["original", "refined"])
+def test_transcript_divider_has_a_thin_gap_and_remains_draggable(
+    qtbot, tmp_path: Path, stylesheet: str, tab_index: int,
+) -> None:
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        source_captions=[SourceCaption(1, 2, "Original", "YouTube creator (en)")],
+    )
+    qtbot.addWidget(dialog)
+    dialog.setStyleSheet(stylesheet)
+    dialog.youtube_tabs.setCurrentIndex(tab_index)
+    dialog.show()
+    splitter = dialog.youtube_tabs.parentWidget()
+    assert isinstance(splitter, QSplitter)
+    qtbot.waitUntil(lambda: splitter.isVisible())
+
+    for width in (1300, 1600):
+        dialog.resize(width, 900)
+        left = dialog.youtube_tabs.geometry()
+        right = dialog.local_panel.geometry()
+        assert right.x() - (left.x() + left.width()) == 1
+        assert splitter.handleWidth() == 1
+        assert splitter.handle(1).width() >= 5
+
+    before = splitter.sizes()
+    handle = splitter.handle(1)
+    grab_point = handle.rect().center()
+    target = handle.mapToGlobal(grab_point) + QPoint(80, 0)
+    qtbot.mousePress(handle, Qt.MouseButton.LeftButton, pos=grab_point)
+    qtbot.mouseMove(handle, handle.mapFromGlobal(target))
+    qtbot.mouseRelease(handle, Qt.MouseButton.LeftButton, pos=handle.mapFromGlobal(target))
+    qtbot.waitUntil(lambda: abs(splitter.sizes()[0] - before[0] - 80) <= 2)
+    assert splitter.sizes()[1] < before[1]
+    assert not splitter.childrenCollapsible()
+    assert dialog.local_panel.x() - (
+        dialog.youtube_tabs.x() + dialog.youtube_tabs.width()
+    ) == 1
 
 
 def test_analysis_dialog_returns_only_checked_edited_suggestions(qtbot, tmp_path: Path) -> None:
