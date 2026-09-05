@@ -4,6 +4,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 import wave
 import zipfile
 from array import array
@@ -14,6 +15,7 @@ import pytest
 import choicer_voicer_pack_creator.analysis as analysis_module
 from choicer_voicer_pack_creator.analysis import (
     ActivityRegion,
+    AnalysisCancelled,
     AnalysisError,
     AnalysisSuggestion,
     HardwareProfile,
@@ -23,6 +25,7 @@ from choicer_voicer_pack_creator.analysis import (
     default_manifest_path,
     scan_audio_activity,
 )
+from choicer_voicer_pack_creator.diagnostics import AnalysisDiagnostics, analysis_log_path
 from choicer_voicer_pack_creator.media import MediaTools
 
 
@@ -277,12 +280,21 @@ def test_whisper_setup_uses_verified_allowlist_and_cache(
     )
     manager = WhisperManager(tmp_path / "installed", manifest)
     progress: list[str] = []
-    cli = manager.ensure_runtime(
-        lambda message, _value: progress.append(message), lambda: False
-    )
-    model = manager.ensure_model(
-        "tiny", lambda message, _value: progress.append(message), lambda: False
-    )
+    with AnalysisDiagnostics(tmp_path / "installed"):
+        cli = manager.ensure_runtime(
+            lambda message, _value: progress.append(message), lambda: False
+        )
+        model = manager.ensure_model(
+            "tiny", lambda message, _value: progress.append(message), lambda: False
+        )
+    events = [
+        json.loads(line) for line in analysis_log_path(tmp_path / "installed")
+        .read_text(encoding="utf-8").splitlines()
+    ]
+    assert [item["component"] for item in events if item["event"] == "component_download_verified"] == [
+        "Whisper CPU runtime", "Test model",
+    ]
+    assert any(item["event"] == "runtime_setup" for item in events)
 
     assert cli.read_bytes() == b"payload-whisper-cli.exe"
     assert model.read_bytes() == b"model data"
@@ -452,6 +464,16 @@ def test_whisper_parser_uses_lexical_token_bounds(
     monkeypatch.setattr(manager, "ensure_model", lambda *_args: tmp_path / "model.bin")
 
     def write_transcript(command, *_args, **_kwargs):
+        assert "--print-progress" in command
+        assert "--no-prints" not in command
+        assert _kwargs["timeout"] >= 600
+        _kwargs["tick"](0)
+        _kwargs["output_line"]("main: processing 'source.wav' ...")
+        _kwargs["tick"](1)
+        _kwargs["output_line"]("whisper_print_progress_callback: progress =  50%")
+        _kwargs["tick"](2)
+        _kwargs["output_line"]("whisper_print_progress_callback: progress =  40%")
+        _kwargs["tick"](3)
         output_base = Path(command[command.index("--output-file") + 1])
         output_base.with_suffix(".json").write_text(
             json.dumps(
@@ -476,13 +498,14 @@ def test_whisper_parser_uses_lexical_token_bounds(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(analysis_module, "_run_cancellable", write_transcript)
+    progress = []
     suggestions, language = manager.transcribe(
         wav_path,
         tmp_path / "output",
         "base",
         "auto",
         HardwareProfile(4, 8 * 1024**3, 6 * 1024**3, "base", "test"),
-        lambda *_args: None,
+        lambda message, fraction: progress.append((message, fraction)),
         lambda: False,
     )
 
@@ -490,3 +513,62 @@ def test_whisper_parser_uses_lexical_token_bounds(
     assert suggestions == [
         AnalysisSuggestion(0.42, 3.12, "Hello there.", "Whisper", 0.867)
     ]
+    assert any("Loading" in message and "elapsed" in message for message, _ in progress)
+    assert any("first audio block" in message for message, _ in progress)
+    measured = [fraction for message, fraction in progress if "% of audio" in message]
+    assert measured == [0.5, 0.5]
+    assert progress[-1][1] == 1
+
+
+def test_analysis_subprocess_streams_output_and_cancels_without_hanging(monkeypatch):
+    real_popen = subprocess.Popen
+    processes = []
+    lines = []
+    ticks = []
+
+    def start(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(analysis_module.subprocess, "Popen", start)
+    with pytest.raises(AnalysisCancelled):
+        analysis_module._run_cancellable(
+            [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(30)"],
+            "Test transcription", lambda: bool(lines),
+            output_line=lines.append, tick=ticks.append, timeout=5,
+        )
+    assert lines == ["ready\n"]
+    assert ticks
+    assert len(processes) == 1
+    assert processes[0].poll() is not None
+
+
+def test_analysis_subprocess_timeout_terminates_silent_worker(monkeypatch):
+    real_popen = subprocess.Popen
+    processes = []
+
+    def start(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(analysis_module.subprocess, "Popen", start)
+    with pytest.raises(AnalysisError, match="time limit"):
+        analysis_module._run_cancellable(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            "Test transcription", lambda: False, timeout=0.3,
+        )
+    assert processes[0].poll() is not None
+
+
+def test_analysis_subprocess_drains_both_pipes_and_preserves_failure_diagnostics():
+    with pytest.raises(AnalysisError, match="diagnostic"):
+        analysis_module._run_cancellable(
+            [
+                sys.executable, "-c",
+                "import sys; print('x' * 131072); "
+                "print('diagnostic', file=sys.stderr); sys.exit(3)",
+            ],
+            "Test transcription", lambda: False, timeout=5,
+        )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from choicer_voicer_pack_creator.analysis import (
     AnalysisSuggestion,
     detect_hardware,
 )
+from choicer_voicer_pack_creator.diagnostics import analysis_log_path
 from choicer_voicer_pack_creator.models import (
     AnalysisDraftRow,
     AnalysisReview,
@@ -200,12 +202,19 @@ def test_adding_captions_during_background_scan_waits_for_cancellation(
     accepted = []
     dialog.suggestions_accepted.connect(accepted.extend)
     qtbot.waitUntil(lambda: dialog.worker is not None and dialog.worker.isRunning())
+    assert dialog.scan_button.text() == "Whisper Running..."
+    assert dialog.scan_button.objectName() != "primary"
+    assert dialog.add_button.objectName() == "primary"
+    assert dialog.add_button.text() == "Use YouTube Transcript"
     assert dialog.table.isEnabled()
     dialog.table.item(0, 3).setText("Edited while Whisper runs")
     dialog.accept_suggestions()
     qtbot.waitUntil(lambda: dialog.worker is None)
     assert accepted[0].caption == "Edited while Whisper runs"
     assert QDialog.result(dialog) == QDialog.DialogCode.Accepted
+    log = analysis_log_path(tmp_path / "analysis")
+    assert log.is_file()
+    assert json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["event"] == "analysis_canceled"
 
 
 def test_declining_initial_whisper_download_keeps_captions(qtbot, tmp_path, monkeypatch):
@@ -369,6 +378,8 @@ def test_no_youtube_captions_still_offers_whisper_source(qtbot, tmp_path):
     ], 1, 1, -30, "base", "en", detect_hardware()))
     assert dialog.add_button.isEnabled()
     assert dialog.checked_suggestions()[0].caption == "Whisper only"
+    assert dialog.scan_button.text() == "Rerun Whisper..."
+    assert dialog.add_button.text() == "Use Whisper Transcript"
 
 
 def test_failed_rescan_keeps_previously_edited_local_draft(qtbot, tmp_path, monkeypatch):
@@ -459,3 +470,49 @@ def test_source_video_change_clears_stale_drafts(qtbot, tmp_path, monkeypatch, o
     assert window.project.source_url == ""
     window.dirty = False
     window.close()
+
+
+def test_new_local_video_starts_whisper_automatically(qtbot, tmp_path, monkeypatch):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    media = UnusedMedia()
+    monkeypatch.setattr(media, "probe", lambda _path: SimpleNamespace(duration=10), raising=False)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(video), ""))
+    window = MainWindow(media, analysis_data_root=tmp_path / "analysis")
+    qtbot.addWidget(window)
+    scans = []
+    monkeypatch.setattr(window, "open_analysis_dialog", lambda **kwargs: scans.append(kwargs))
+    window.new_from_video()
+    qtbot.waitUntil(lambda: bool(scans))
+    assert scans == [{"initial_scan": True, "auto_start": True}]
+    window.dirty = False
+    window.close()
+
+
+def test_source_labels_and_play_action_identify_the_selected_transcript(qtbot, tmp_path):
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        source_captions=[SourceCaption(1, 2, "YouTube line", "YouTube creator (en)")],
+    )
+    qtbot.addWidget(dialog)
+    assert dialog.youtube_panel.title() == "YouTube Captions"
+    assert dialog.local_panel.title() == "Whisper Transcript"
+    assert not dialog.preview_button.isEnabled()
+    dialog.youtube_table.selectRow(0)
+    assert dialog.preview_button.isEnabled()
+    assert dialog.preview_button.text() == "Play Selected YouTube Line"
+    previews = []
+    dialog.preview_requested.connect(lambda start, end: previews.append((start, end)))
+    dialog.preview_button.click()
+    assert previews == [(1, 2)]
+    dialog._completed(AnalysisResult(
+        [AnalysisSuggestion(0.5, 3, "Whisper line", "Whisper")],
+        1, 1, -30, "base", "en", detect_hardware(),
+    ))
+    dialog.local_radio.setChecked(True)
+    assert dialog.preview_button.text() == "Play Selected Whisper Line"
+    assert dialog.add_button.text() == "Use Whisper Transcript"
+    assert dialog.add_button.isDefault()
+    assert not dialog.scan_button.autoDefault()
+    dialog.preview_button.click()
+    assert previews[-1] == (0.5, 3)

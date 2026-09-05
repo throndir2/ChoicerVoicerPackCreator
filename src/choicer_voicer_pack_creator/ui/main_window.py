@@ -60,7 +60,7 @@ from choicer_voicer_pack_creator.timeline_audit import (
     TimelineOverlap,
     audit_timeline_overlaps,
 )
-from choicer_voicer_pack_creator.ui.analysis_dialog import AnalysisDialog
+from choicer_voicer_pack_creator.ui.analysis_dialog import AnalysisDialog, open_diagnostic_logs
 from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
 from choicer_voicer_pack_creator.ui.youtube_dialog import YouTubeDialog
@@ -259,6 +259,10 @@ class MainWindow(QMainWindow):
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self.action_analyze)
         help_menu = self.menuBar().addMenu("&Help")
+        self.action_logs = help_menu.addAction("Open Diagnostic Logs...")
+        self.action_logs.triggered.connect(
+            lambda: open_diagnostic_logs(self, self.analysis_data_root)
+        )
         about = help_menu.addAction("About")
         about.triggered.connect(self.show_about)
 
@@ -906,7 +910,9 @@ class MainWindow(QMainWindow):
         )
         self._set_project(project, None, mark_dirty=True)
         self.statusBar().showMessage(f"Loaded {source.name}. Mark a range and add the first segment.")
-        QTimer.singleShot(0, lambda: self.open_analysis_dialog(initial_scan=True))
+        QTimer.singleShot(
+            0, lambda: self.open_analysis_dialog(initial_scan=True, auto_start=True)
+        )
 
     def new_from_youtube(self) -> None:
         if not self._maybe_save():
