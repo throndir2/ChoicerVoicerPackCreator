@@ -191,6 +191,14 @@ If `py` is unavailable, invoke your installed Python executable directly.
 10. Save the editable project.
 11. Choose **Export Pack + ZIP** and select an output directory.
 
+Export opens a progress dialog with the current operation, total and current-step elapsed
+time, and a scrollable activity history. It reports video conversion, each prompt's audio
+and image preparation, staged and published media validation, ZIP creation, and publication.
+The activity bar stays indeterminate because these operations do not have a reliable overall
+percentage. Keep the dialog open while export runs; **Close** becomes available only after
+the worker finishes. The dialog then keeps the output locations, cleanup notes, or failure
+details visible until dismissed.
+
 ### Analyze and transcribe a video
 
 The initial analysis window opens after **New from Video** and can be reopened with **Tools →

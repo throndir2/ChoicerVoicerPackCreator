@@ -9,7 +9,9 @@ from choicer_voicer_pack_creator.exporter import PackExporter, sha256
 
 
 class FailingValidator:
-    def validate_folder(self, _folder: Path, expected_clips: int | None = None) -> dict:
+    def validate_folder(
+        self, _folder: Path, expected_clips: int | None = None, *, progress=None,
+    ) -> dict:
         raise RuntimeError("injected post-publish validation failure")
 
 
@@ -24,6 +26,7 @@ def test_publish_restores_previous_pack_when_final_validation_fails(tmp_path: Pa
 
     exporter = PackExporter.__new__(PackExporter)
     exporter.validator = FailingValidator()  # type: ignore[assignment]
+    messages = []
     with pytest.raises(RuntimeError, match="injected post-publish"):
         exporter._publish_verified(
             stage,
@@ -33,8 +36,10 @@ def test_publish_restores_previous_pack_when_final_validation_fails(tmp_path: Pa
             "Pack",
             {"new.txt": sha256(new_file)},
             1,
+            progress=messages.append,
         )
 
+    assert "restoring previous output" in messages[-1]
     assert (target / "old.txt").read_text(encoding="utf-8") == "old"
     assert not (target / "new.txt").exists()
     assert not list(tmp_path.glob(".Pack.previous-*"))
