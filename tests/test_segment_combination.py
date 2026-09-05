@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import QSettings, Qt
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QLabel, QMessageBox
 
 from choicer_voicer_pack_creator.models import PackProject, Segment
@@ -159,6 +160,28 @@ def test_loading_project_clears_multiselection(window, qtbot) -> None:
     assert not window.action_combine.isEnabled()
     assert not window.combine_button.isEnabled()
     assert window.selected_segment() is None
+
+
+def test_playback_keeps_multiselection_until_a_single_segment_is_selected(
+    window, qtbot, monkeypatch
+) -> None:
+    first, middle, last = window.project.segments
+    click_row(qtbot, window, 0)
+    click_row(qtbot, window, 2, Qt.KeyboardModifier.ControlModifier)
+    monkeypatch.setattr(
+        window.player, "playbackState", lambda: QMediaPlayer.PlaybackState.PlayingState
+    )
+    monkeypatch.setattr(window.player, "position", lambda: 3500)
+    window.player.playbackStateChanged.emit(QMediaPlayer.PlaybackState.PlayingState)
+    window.player.positionChanged.emit(3500)
+    assert set(window._selected_table_ids()) == {first.id, last.id}
+    assert window.action_combine.isEnabled()
+    assert window.selected_segment() is None
+    window.select_segment(first.id)
+    window.player.positionChanged.emit(3500)
+    assert window.selected_segment() is middle
+    assert not window.action_combine.isEnabled()
+    assert not window.dirty
 
 
 @pytest.mark.parametrize("approve", [False, True], ids=["cancel", "keep-first"])
