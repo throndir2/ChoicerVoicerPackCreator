@@ -255,8 +255,8 @@ class AnalysisDialog(QDialog):
         intro = QLabel(
             (
                 "Choose Refined YouTube or Whisper. YouTube rows appear only after processing. "
-                "Each draft keeps its own "
-                "text and timings; only checked rows from the selected source are added. "
+                "Each draft keeps its own text and timings. "
+                "Click the Use button below either draft to add only its checked rows. "
                 "Closing saves all drafts without adding segments. "
                 if self.source_choice else
                 "Create editable starting points from local audio. Activity scanning is deterministic. "
@@ -379,8 +379,8 @@ class AnalysisDialog(QDialog):
         self.source_group = QButtonGroup(self)
         for radio in (self.refined_radio, self.local_radio):
             radio.setToolTip(
-                "Select this draft's text and timings for the highlighted Use action. "
-                "This does not run analysis."
+                "Select this draft for playback and the Enter-key Use action. "
+                "Each draft also has its own Use button below its rows. This does not run analysis."
             )
             self.source_group.addButton(radio)
         selected = review.selected_source if review else (
@@ -476,12 +476,21 @@ class AnalysisDialog(QDialog):
         self.preview_button.setEnabled(False)
         self.preview_button.clicked.connect(self.preview_current_row)
         controls.addButton(self.preview_button, QDialogButtonBox.ButtonRole.ActionRole)
-        self.add_button = QPushButton("Add Checked Suggestions")
-        self.add_button.setObjectName("primary")
-        self.add_button.setDefault(True)
-        self.add_button.setEnabled(False)
-        self.add_button.clicked.connect(self.accept_suggestions)
-        controls.addButton(self.add_button, QDialogButtonBox.ButtonRole.AcceptRole)
+        self.refined_add_button = QPushButton("Use Refined YouTube Transcript", self.refined_panel)
+        self.local_add_button = QPushButton("Use Whisper Transcript", self.local_panel)
+        for button, radio, panel in (
+            (self.refined_add_button, self.refined_radio, self.refined_panel),
+            (self.local_add_button, self.local_radio, self.local_panel),
+        ):
+            button.setObjectName("primary")
+            button.setAutoDefault(False)
+            button.setEnabled(False)
+            button.clicked.connect(lambda _checked=False, radio=radio: radio.setChecked(True))
+            button.clicked.connect(self.accept_suggestions)
+            if self.source_choice:
+                panel.layout().addWidget(button)
+        if not self.source_choice:
+            controls.addButton(self.local_add_button, QDialogButtonBox.ButtonRole.AcceptRole)
         controls.rejected.connect(self.reject)
         layout.addWidget(controls)
         if review:
@@ -522,6 +531,12 @@ class AnalysisDialog(QDialog):
         elif auto_start:
             diagnostic_event("analysis_auto_start_scheduled")
             QTimer.singleShot(0, self.start_scan)
+
+    @property
+    def add_button(self) -> QPushButton:
+        return (
+            self.refined_add_button if self.selected_source == "refined" else self.local_add_button
+        )
 
     @property
     def table(self) -> QTableWidget:
@@ -622,29 +637,35 @@ class AnalysisDialog(QDialog):
         else:
             self.local_draft_label.setText("No current local draft is available.")
         usable = bool(self.table.rowCount()) and self.table.isEnabled()
-        checked = any(
-            self.table.item(row, 0).checkState() == Qt.CheckState.Checked
-            for row in range(self.table.rowCount())
-        )
-        self.add_button.setEnabled(usable and checked and not self._close_after_cancel)
+        for button, table in (
+            (self.refined_add_button, self.refined_table),
+            (self.local_add_button, self.local_table),
+        ):
+            checked = any(
+                table.item(row, 0).checkState() == Qt.CheckState.Checked
+                for row in range(table.rowCount())
+            )
+            button.setEnabled(table.isEnabled() and checked and not self._close_after_cancel)
+            button.setDefault(button is self.add_button)
+            button.setToolTip(
+                "Add only this draft's checked rows using its own text and timings, "
+                "without rerunning analysis or importing the other draft."
+            )
         self.preview_button.setEnabled(
             usable and self.table.currentRow() >= 0 and not self._close_after_cancel
         )
         source = {
             "refined": "Refined YouTube", "local": self.local_source,
         }[self.selected_source]
+        self.local_add_button.setText(
+            "Use Whisper Transcript" if self.local_source == "Whisper" else "Use Detected Ranges"
+        )
         if source in {"Refined YouTube", "Whisper"}:
-            self.add_button.setText(f"Use {source} Transcript")
             self.preview_button.setText(f"Play Selected {source} Line")
         else:
-            self.add_button.setText("Use Detected Ranges")
             self.preview_button.setText("Play Selected Range")
         self.preview_button.setToolTip(
             "Play the selected line's In/Out range in the source video. Select a line first."
-        )
-        self.add_button.setToolTip(
-            "Import checked rows from the selected draft without running analysis. "
-            "Click a row or its Select control to choose a transcript; check at least one row."
         )
 
     def _update_scan_button(self) -> None:
@@ -670,7 +691,7 @@ class AnalysisDialog(QDialog):
         )
         self.pause_spin.setEnabled(self.worker is None and not self._close_after_cancel)
         self.scan_button.setToolTip(
-            "Generate a new local draft. To import an existing result, use the highlighted transcript button."
+            "Generate a new local draft. To import an existing result, use its highlighted Use button."
         )
 
     def _whisper_toggled(self, checked: bool) -> None:
@@ -938,14 +959,9 @@ class AnalysisDialog(QDialog):
         source = "Refined YouTube" if refine else self.local_source
         if table.rowCount():
             action = f"Use {source} Transcript" if source != "Audio activity" else "Use Detected Ranges"
-            selection = f"Select {source} transcript" if source != "Audio activity" else "Select detected ranges"
             return (
                 f"The current {source} draft and edits are unchanged. "
-                + (
-                    f"Choose '{selection}' or click one of its rows, then click "
-                    if self.source_choice else "Click "
-                )
-                + f"'{action}' to use checked rows without rerunning."
+                f"Click '{action}' to use its checked rows without rerunning."
             )
         return (
             f"No {source} draft is available. Choose another available transcript, "
