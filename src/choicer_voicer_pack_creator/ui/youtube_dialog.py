@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal, Slot
+from PySide6.QtCore import QStandardPaths, QThread, Signal, Slot
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QComboBox,
@@ -42,7 +42,9 @@ class YouTubeWorker(QThread):
     def run(self) -> None:
         def report(message: str, fraction: float | None) -> None:
             self.progress.emit(
-                message, -1 if fraction is None else max(0, min(1000, round(fraction * 1000)))
+                message, -1 if fraction is None else max(
+                    0, min(1000 if fraction >= 1 else 999, round(fraction * 1000))
+                )
             )
 
         try:
@@ -80,7 +82,12 @@ class YouTubeDialog(QDialog):
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("https://www.youtube.com/watch?v=...")
         form.addRow("Video URL", self.url_edit)
-        self.folder_edit = QLineEdit(folder)
+        self.default_folder = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DownloadLocation
+        )
+        self.folder_edit = QLineEdit(folder.strip() or self.default_folder)
+        self.folder_edit.setPlaceholderText(self.default_folder or "Choose a download folder")
+        self.folder_edit.setToolTip("Leave blank to use your Windows Downloads folder.")
         self.browse_button = QPushButton("Browse...")
         self.browse_button.clicked.connect(self._browse)
         row = QHBoxLayout()
@@ -110,6 +117,11 @@ class YouTubeDialog(QDialog):
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
+        self.progress_bar.setToolTip(
+            "Percentages combine the selected video and audio transfers, not the whole import. "
+            "Revised size estimates or retries can pause the percentage without moving it "
+            "backward. Merging and checking have no measurable percentage; 100% means ready."
+        )
         layout.addWidget(self.progress_bar)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         self.download_button = QPushButton("Download Video")
@@ -131,14 +143,18 @@ class YouTubeDialog(QDialog):
             return
         try:
             url = normalize_youtube_url(self.url_edit.text())
-            if not self.folder_edit.text().strip():
+            folder_text = self.folder_edit.text().strip() or self.default_folder
+            if not folder_text:
                 raise ValueError("Choose a folder for the downloaded video.")
-            folder = Path(self.folder_edit.text().strip()).resolve()
+            folder = Path(folder_text).resolve()
+            if self.default_folder and folder == Path(self.default_folder).resolve():
+                folder.mkdir(parents=True, exist_ok=True)
             if not folder.is_dir():
                 raise ValueError("The media destination must be an existing folder.")
-        except ValueError as error:
+        except (OSError, ValueError) as error:
             QMessageBox.warning(self, "Cannot download video", str(error))
             return
+        self.folder_edit.setText(str(folder))
         language = self.language_combo.currentData()
         if self.language_combo.currentText() != self.language_combo.itemText(
             self.language_combo.currentIndex()
@@ -147,6 +163,8 @@ class YouTubeDialog(QDialog):
         worker = YouTubeWorker(self.media, url, folder, str(language or "auto"))
         self.worker = worker
         self.download_result = None
+        self._close_after_cancel = False
+        self._progress("Fetching YouTube video details...", -1)
         for widget in (
             self.url_edit, self.folder_edit, self.browse_button,
             self.language_combo, self.download_button,
@@ -155,15 +173,20 @@ class YouTubeDialog(QDialog):
         worker.progress.connect(self._progress)
         worker.completed.connect(self._completed)
         worker.failed.connect(self._failed)
-        worker.canceled.connect(lambda: self.progress_label.setText("Download canceled"))
+        worker.canceled.connect(self._canceled)
         worker.finished.connect(self._finished)
         worker.finished.connect(worker.deleteLater)
         worker.start()
 
     @Slot(str, int)
     def _progress(self, message: str, value: int) -> None:
-        self.progress_label.setText(message)
+        if self._close_after_cancel:
+            return
+        self.progress_label.setText(
+            f"{message} Progress is not measurable in this stage." if value < 0 else message
+        )
         self.progress_bar.setRange(0, 0 if value < 0 else 1000)
+        self.progress_bar.setFormat("Ready" if value == 1000 else "Transfers: %p%")
         if value >= 0:
             self.progress_bar.setValue(value)
 
@@ -173,12 +196,21 @@ class YouTubeDialog(QDialog):
             self._failed("The downloader returned an invalid result.")
             return
         self.download_result = result
+        self._progress("YouTube video ready", 1000)
+
+    @Slot()
+    def _canceled(self) -> None:
+        self.progress_label.setText("Download canceled")
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Canceled")
 
     @Slot(str)
     def _failed(self, message: str) -> None:
         self.progress_label.setText("Download failed; existing media and project are unchanged.")
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Failed")
         QMessageBox.critical(self, "YouTube download failed", message)
 
     @Slot()

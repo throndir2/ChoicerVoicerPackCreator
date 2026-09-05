@@ -8,6 +8,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -15,6 +16,7 @@ import deno
 from yt_dlp import YoutubeDL
 from yt_dlp.extractor.youtube import YoutubeIE
 from yt_dlp.networking.exceptions import RequestError
+from yt_dlp.postprocessor.common import PostProcessor
 from yt_dlp.utils import DownloadCancelled, DownloadError
 
 from choicer_voicer_pack_creator.analysis import CancelCallback, ProgressCallback
@@ -155,6 +157,136 @@ class _DownloadLogger:
         self.warning(message)
 
 
+def _positive_size(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and math.isfinite(value) and value > 0:
+        return float(value)
+    return None
+
+
+@dataclass(slots=True)
+class _Transfer:
+    format_id: str | None
+    kind: str
+    total: float | None
+    estimated: bool
+    downloaded: float = 0
+    finished: bool = False
+
+
+class _DownloadProgress:
+    def __init__(self, progress: ProgressCallback, cancelled: CancelCallback) -> None:
+        self.progress = progress
+        self.cancelled = cancelled
+        self.transfers: list[_Transfer] = []
+        self.fraction = 0.0
+        self.held_estimate = False
+        self._lock = Lock()
+
+    def prepare(self, info: dict[str, Any]) -> None:
+        _check_cancel(self.cancelled)
+        # before_dl receives the actual selection, including a single combined-format fallback.
+        for selected in info.get("requested_formats") or [info]:
+            size = _positive_size(selected.get("filesize"))
+            kind = (
+                "audio" if selected.get("vcodec") == "none"
+                else "video" if selected.get("acodec") == "none"
+                else "video and audio"
+            )
+            self.transfers.append(_Transfer(
+                selected.get("format_id"), kind,
+                size or _positive_size(selected.get("filesize_approx")), size is None,
+            ))
+        self.progress("Preparing selected YouTube downloads...", None)
+
+    def _report_transfer(self, message: str) -> None:
+        if not self.transfers or any(transfer.total is None for transfer in self.transfers):
+            self.progress(f"{message} — total size unknown", None)
+            return
+        total = sum(transfer.total for transfer in self.transfers)
+        downloaded = sum(
+            transfer.total if transfer.finished else min(transfer.downloaded, transfer.total)
+            for transfer in self.transfers
+        )
+        fraction = downloaded / total
+        # Hooks contain cumulative bytes, not deltas. Re-estimates and retries can lower the
+        # measured ratio; retain the high-water estimate instead of counting bytes twice.
+        self.held_estimate |= fraction < self.fraction
+        self.fraction = min(0.999, max(self.fraction, fraction))
+        estimated = self.held_estimate or any(transfer.estimated for transfer in self.transfers)
+        label = "estimated combined transfer progress" if estimated else "combined transfer progress"
+        self.progress(f"{message} — {label}", self.fraction)
+
+    def download_hook(self, status: dict[str, Any]) -> None:
+        # Native DASH can report video and audio from different threads.
+        with self._lock:
+            self._download_hook(status)
+
+    def _download_hook(self, status: dict[str, Any]) -> None:
+        _check_cancel(self.cancelled)
+        if status.get("status") not in {"downloading", "finished"}:
+            return
+        info = status.get("info_dict") or {}
+        matches = [
+            (index, transfer) for index, transfer in enumerate(self.transfers, 1)
+            if transfer.format_id == info.get("format_id")
+        ]
+        if len(matches) != 1:
+            # External downloaders may report a whole merged selection rather than a stream.
+            # Do not guess how those bytes should be allocated across the selected formats.
+            self.progress("Downloading YouTube video and audio — transfer size unavailable", None)
+            return
+        index, transfer = matches[0]
+        size = _positive_size(status.get("total_bytes"))
+        estimate = _positive_size(status.get("total_bytes_estimate"))
+        if size is not None:
+            transfer.total, transfer.estimated = size, False
+        elif estimate is not None and (transfer.estimated or transfer.total is None):
+            transfer.total, transfer.estimated = estimate, True
+        downloaded = status.get("downloaded_bytes")
+        if downloaded == 0 or _positive_size(downloaded) is not None:
+            transfer.downloaded = float(downloaded)
+        if status["status"] == "finished":
+            transfer.finished = True
+            if _positive_size(downloaded) is not None:
+                transfer.total, transfer.estimated = transfer.downloaded, False
+            if all(item.finished for item in self.transfers):
+                self.progress("YouTube transfers finished; preparing downloaded media...", None)
+                return
+            message = f"YouTube {transfer.kind} transfer finished"
+        else:
+            transfer.finished = False
+            message = f"Downloading YouTube {transfer.kind}"
+        message += f" ({index} of {len(self.transfers)} transfers)"
+        self._report_transfer(message)
+
+    def postprocessor_hook(self, status: dict[str, Any]) -> None:
+        _check_cancel(self.cancelled)
+        if (
+            status.get("status") not in {"started", "processing", "finished"}
+            or status.get("postprocessor") == _DownloadProgressPP.pp_key()
+        ):
+            return
+        if status.get("postprocessor") == "Merger":
+            message = (
+                "Merge finished; preparing downloaded media..."
+                if status["status"] == "finished"
+                else "Merging downloaded video and audio..."
+            )
+        else:
+            message = "Preparing downloaded media..."
+        self.progress(message, None)
+
+
+class _DownloadProgressPP(PostProcessor):
+    def __init__(self, tracker: _DownloadProgress) -> None:
+        super().__init__()
+        self.tracker = tracker
+
+    def run(self, info: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+        self.tracker.prepare(info)
+        return [], info
+
+
 def download_youtube(
     media: MediaTools,
     url: str,
@@ -172,15 +304,7 @@ def download_youtube(
         raise YouTubeError("Choose an existing destination folder.")
     _check_cancel(cancelled)
     notes: list[str] = []
-
-    def hook(status: dict[str, Any]) -> None:
-        _check_cancel(cancelled)
-        total = status.get("total_bytes") or status.get("total_bytes_estimate")
-        downloaded = status.get("downloaded_bytes", 0)
-        if status.get("status") == "downloading":
-            progress("Downloading YouTube media...", downloaded / total if total else None)
-        else:
-            progress("Preparing downloaded media...", None)
+    tracker = _DownloadProgress(progress, cancelled)
 
     with tempfile.TemporaryDirectory(prefix=".cvpc-youtube-", dir=destination) as temporary:
         stage = Path(temporary)
@@ -194,8 +318,8 @@ def download_youtube(
             "quiet": True,
             "no_warnings": False,
             "logger": _DownloadLogger(notes, cancelled),
-            "progress_hooks": [hook],
-            "postprocessor_hooks": [hook],
+            "progress_hooks": [tracker.download_hook],
+            "postprocessor_hooks": [tracker.postprocessor_hook],
             "socket_timeout": 15,
             "retries": 2,
             "extractor_retries": 2,
@@ -213,10 +337,11 @@ def download_youtube(
             "writesubtitles": False,
             "writeautomaticsub": False,
         }
-        progress("Reading YouTube video details...", None)
+        progress("Fetching YouTube video details...", None)
         try:
             with YoutubeDL(options, auto_init=False) as downloader:
                 downloader.add_info_extractor(_PublicYoutubeIE())
+                downloader.add_post_processor(_DownloadProgressPP(tracker), when="before_dl")
                 info = downloader.extract_info(url, download=False, process=False)
                 _check_cancel(cancelled)
                 if not info or info.get("_type", "video") != "video" or "entries" in info:
@@ -263,6 +388,7 @@ def download_youtube(
             raise YouTubeError("The download did not produce exactly one complete video file.")
         video = files[0]
         progress("Checking downloaded video...", None)
+        _check_cancel(cancelled)
         media_info = media.probe(video)
         if not math.isfinite(media_info.duration) or media_info.duration <= 0 or not media_info.has_audio:
             raise YouTubeError("The downloaded video needs a finite duration and an audio stream.")
@@ -277,6 +403,7 @@ def download_youtube(
                     notes.append("The caption track had no usable timed text; Whisper will draft it.")
             except (KeyError, TypeError, ValueError) as error:
                 notes.append(f"Caption data was invalid; Whisper will draft captions instead: {error}")
+        progress("Publishing downloaded video...", None)
         _check_cancel(cancelled)
         folder = destination / f"YouTube-{parse_qs(urlsplit(url).query)['v'][0]}-{uuid.uuid4().hex[:8]}"
         # Publish only our unique staging directory, never an existing user's media folder.

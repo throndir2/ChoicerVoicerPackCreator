@@ -5,10 +5,13 @@ import hashlib
 import json
 import math
 import os
+import queue
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -19,7 +22,7 @@ from array import array
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 try:
     with warnings.catch_warnings():
@@ -28,11 +31,13 @@ try:
 except ImportError:  # Removed from Python 3.13; retain the pure-Python fallback.
     _audio_rms = None
 
+from choicer_voicer_pack_creator.diagnostics import diagnostic_event
 from choicer_voicer_pack_creator.media import MediaTools
 
 ProgressCallback = Callable[[str, float | None], None]
 CancelCallback = Callable[[], bool]
 BUFFER_SIZE = 1024 * 1024
+DIAGNOSTIC_HEARTBEAT_SECONDS = 5.0
 ALLOWED_DOWNLOAD_HOSTS = {
     "github.com",
     "release-assets.githubusercontent.com",
@@ -152,6 +157,7 @@ def detect_hardware() -> HardwareProfile:
 
 def _check_cancel(cancelled: CancelCallback) -> None:
     if cancelled():
+        diagnostic_event("cancellation_observed")
         raise AnalysisCancelled("Video analysis was canceled")
 
 
@@ -161,11 +167,20 @@ def _run_cancellable(
     cancelled: CancelCallback,
     *,
     cwd: Path | None = None,
+    output_line: Callable[[str], None] | None = None,
+    tick: Callable[[float], None] | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    _check_cancel(cancelled)
+    diagnostic_event(
+        "process_starting", description=description, command=command,
+        cwd=str(cwd) if cwd else None, timeout_seconds=timeout,
+    )
     startupinfo = MediaTools._startup_info()
     process = subprocess.Popen(
         command,
         cwd=cwd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -173,20 +188,92 @@ def _run_cancellable(
         errors="replace",
         startupinfo=startupinfo,
     )
-    while True:
+    # Windows pipes need reader threads to report live output without blocking either stream.
+    messages: queue.Queue[tuple[str, str | OSError | None]] = queue.Queue()
+    captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
+
+    def read_stream(name: str, stream: IO[str]) -> None:
         try:
-            stdout, stderr = process.communicate(timeout=0.2)
-            break
-        except subprocess.TimeoutExpired:
-            if not cancelled():
+            for line in stream:
+                messages.put((name, line))
+        except OSError as error:
+            messages.put((name, error))
+        finally:
+            messages.put((name, None))
+
+    readers = [
+        threading.Thread(target=read_stream, args=(name, stream))
+        for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))
+        if stream is not None
+    ]
+    started = time.monotonic()
+    last_output = started
+    last_heartbeat = started
+    for reader in readers:
+        reader.start()
+    try:
+        diagnostic_event("process_started", description=description, pid=process.pid)
+        closed = 0
+        while closed < len(readers) or process.poll() is None:
+            _check_cancel(cancelled)
+            elapsed = time.monotonic() - started
+            if time.monotonic() - last_heartbeat >= DIAGNOSTIC_HEARTBEAT_SECONDS:
+                diagnostic_event(
+                    "process_heartbeat", description=description, pid=process.pid,
+                    process_elapsed_seconds=round(elapsed, 1),
+                    seconds_since_output=round(time.monotonic() - last_output, 1),
+                )
+                last_heartbeat = time.monotonic()
+            if timeout is not None and elapsed >= timeout:
+                diagnostic_event("process_timeout", description=description, pid=process.pid)
+                raise AnalysisError(
+                    f"{description} exceeded its {timeout / 60:.1f}-minute time limit. "
+                    "Try the Tiny model or a shorter video; existing drafts are unchanged."
+                )
+            if tick is not None:
+                tick(elapsed)
+            try:
+                name, message = messages.get(timeout=0.2)
+            except queue.Empty:
                 continue
+            if message is None:
+                closed += 1
+            elif isinstance(message, OSError):
+                raise AnalysisError(f"Could not read {description} output: {message}") from message
+            else:
+                last_output = time.monotonic()
+                captured[name].append(message)
+                if name == "stderr":
+                    diagnostic_event(
+                        "process_stderr", description=description, pid=process.pid,
+                        line=message.rstrip()[:2048],
+                    )
+                if output_line is not None:
+                    output_line(message)
+        process.wait()
+    finally:
+        termination = None
+        if process.poll() is None:
+            termination = "terminate"
             process.terminate()
             try:
-                process.communicate(timeout=2)
+                process.wait(timeout=2)
             except subprocess.TimeoutExpired:
+                termination = "kill"
                 process.kill()
-                process.communicate()
-            raise AnalysisCancelled("Video analysis was canceled") from None
+                process.wait()
+        for reader in readers:
+            reader.join()
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+        diagnostic_event(
+            "process_exited", description=description, pid=process.pid,
+            return_code=process.returncode, termination=termination,
+            process_elapsed_seconds=round(time.monotonic() - started, 3),
+            stdout_lines=len(captured["stdout"]), stderr_lines=len(captured["stderr"]),
+        )
+    stdout, stderr = "".join(captured["stdout"]), "".join(captured["stderr"])
     completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
@@ -369,9 +456,15 @@ class WhisperManager:
         progress: ProgressCallback,
         cancelled: CancelCallback,
     ) -> Path:
+        diagnostic_event(
+            "component_requested", component=label, destination=str(destination),
+            expected_bytes=expected_bytes, expected_sha256=expected_hash,
+        )
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.is_file():
+            progress(f"Verifying cached {label}...", None)
             if destination.stat().st_size == expected_bytes and sha256(destination) == expected_hash:
+                diagnostic_event("component_cache_verified", component=label)
                 progress(f"Using verified cached {label}.", 1.0)
                 return destination
             destination.unlink()
@@ -381,6 +474,7 @@ class WhisperManager:
             url,
             headers={"User-Agent": "ChoicerVoicerPackCreator-analysis/0.4"},
         )
+        diagnostic_event("component_download_started", component=label, url=url)
         try:
             transfer_deadline = time.monotonic() + max(
                 60.0, min(3600.0, 60.0 + expected_bytes / (128 * 1024))
@@ -430,6 +524,8 @@ class WhisperManager:
                     )
                 output.flush()
                 os.fsync(output.fileno())
+            progress(f"Verifying downloaded {label}...", None)
+            _check_cancel(cancelled)
             actual_hash = sha256(partial)
             if partial.stat().st_size != expected_bytes or actual_hash != expected_hash:
                 raise AnalysisError(
@@ -437,6 +533,9 @@ class WhisperManager:
                     f"{expected_hash}, received {partial.stat().st_size} bytes / {actual_hash}."
                 )
             os.replace(partial, destination)
+            diagnostic_event(
+                "component_download_verified", component=label, bytes=downloaded, sha256=actual_hash,
+            )
             return destination
         finally:
             partial.unlink(missing_ok=True)
@@ -444,6 +543,10 @@ class WhisperManager:
     def ensure_runtime(
         self, progress: ProgressCallback, cancelled: CancelCallback
     ) -> Path:
+        diagnostic_event(
+            "runtime_setup", build=self.runtime["build"], version=self.runtime["version"],
+            directory=str(self.runtime_dir),
+        )
         if sys.platform != "win32" or not sys.maxsize > 2**32:
             raise AnalysisError("Local Whisper setup currently requires 64-bit Windows")
         runtime_files = self.runtime.get("runtime_files")
@@ -504,6 +607,7 @@ class WhisperManager:
         temporary = self.runtime_dir.with_name(self.runtime_dir.name + ".partial")
         shutil.rmtree(temporary, ignore_errors=True)
         try:
+            progress("Installing and verifying the Whisper CPU runtime...", None)
             temporary.mkdir(parents=True)
             root = str(self.runtime["archive_root"]).strip("/")
             with zipfile.ZipFile(archive) as package:
@@ -542,6 +646,7 @@ class WhisperManager:
                 [str(temporary / "whisper-cli.exe"), "--version"],
                 "Starting the Whisper CPU runtime",
                 cancelled,
+                timeout=30,
             )
             if str(self.runtime["version"]) not in result.stdout + result.stderr:
                 raise AnalysisError("The Whisper runtime version does not match its manifest")
@@ -583,11 +688,13 @@ class WhisperManager:
     ) -> tuple[list[AnalysisSuggestion], str | None]:
         cli = self.ensure_runtime(progress, cancelled)
         model = self.ensure_model(model_key, progress, cancelled)
+        diagnostic_event("whisper_components_ready", runtime=str(cli), model=str(model))
+        with wave.open(str(wav_path), "rb") as audio_source:
+            audio_duration = audio_source.getnframes() / max(1, audio_source.getframerate())
         output_directory.mkdir(parents=True, exist_ok=True)
         output_base = output_directory / "whisper-transcript"
-        progress(
-            f"Transcribing locally with {self.models[model_key]['name']} on CPU…", None
-        )
+        model_name = self.models[model_key]["name"]
+        progress(f"Loading {model_name} on CPU; transcription starts after model loading...", None)
         command = [
             str(cli),
             "--model",
@@ -602,12 +709,45 @@ class WhisperManager:
             "--output-file",
             str(output_base),
             "--no-gpu",
-            "--no-prints",
+            "--print-progress",
             "--split-on-word",
             "--max-len",
             "120",
         ]
-        _run_cancellable(command, "Local Whisper transcription", cancelled)
+        percent: int | None = None
+        processing_audio = False
+        last_report: tuple[int, int | None, bool] | None = None
+
+        def on_output(line: str) -> None:
+            nonlocal percent, processing_audio
+            match = re.search(r"whisper_print_progress_callback:\s*progress\s*=\s*(\d+)%", line)
+            if match:
+                percent = max(percent or 0, min(99, int(match.group(1))))
+                processing_audio = True
+            elif "main: processing " in line:
+                processing_audio = True
+
+        def report_status(elapsed: float) -> None:
+            nonlocal last_report
+            state = (int(elapsed), percent, processing_audio)
+            if state == last_report:
+                return
+            last_report = state
+            elapsed_text = f"{int(elapsed) // 60}:{int(elapsed) % 60:02d} elapsed"
+            if percent is not None:
+                message = f"Whisper transcription: {percent}% of audio processed ({elapsed_text})."
+            elif processing_audio:
+                message = f"Whisper is processing the first audio block ({elapsed_text}); you can cancel."
+            else:
+                message = f"Loading {model_name} on CPU ({elapsed_text}); you can cancel."
+            progress(message, percent / 100 if percent is not None else None)
+
+        _run_cancellable(
+            command, "Local Whisper transcription", cancelled,
+            output_line=on_output, tick=report_status,
+            timeout=max(600, audio_duration * 30),
+        )
+        progress("Reading Whisper transcript and timestamps...", 0.99)
         output_path = output_base.with_suffix(".json")
         if not output_path.is_file():
             raise AnalysisError("Whisper did not produce its expected JSON transcript")
@@ -616,8 +756,6 @@ class WhisperManager:
             raise AnalysisError("Whisper produced an unsupported JSON transcript")
         result = value.get("result", {})
         detected_language = str(result.get("language", "")).strip() or None
-        with wave.open(str(wav_path), "rb") as audio_source:
-            audio_duration = audio_source.getnframes() / max(1, audio_source.getframerate())
         suggestions: list[AnalysisSuggestion] = []
         for item in value["transcription"]:
             if not isinstance(item, dict):
@@ -729,6 +867,12 @@ def analyze_video(
     manifest_path: Path | None = None,
 ) -> AnalysisResult:
     hardware = detect_hardware()
+    diagnostic_event(
+        "analysis_configuration", source_video=str(video), duration_seconds=duration,
+        sensitivity=sensitivity, use_whisper=use_whisper, model=model_key, language=language,
+        cpu_threads=hardware.cpu_threads, memory_bytes=hardware.memory_bytes,
+        available_memory_bytes=hardware.available_memory_bytes,
+    )
     estimated_audio_bytes = max(1, math.ceil(duration * 16_000 * 2))
     temporary_root = Path(tempfile.gettempdir()).resolve()
     temporary_free = shutil.disk_usage(temporary_root).free
@@ -789,6 +933,10 @@ def analyze_video(
             )
             model_name = str(manager.models[model_key]["name"])
         suggestions = combine_suggestions(activity, transcripts)
+        diagnostic_event(
+            "analysis_results", activity_regions=len(activity), transcript_regions=len(transcripts),
+            suggestions=len(suggestions), detected_language=detected_language,
+        )
         return AnalysisResult(
             suggestions=suggestions,
             activity_regions=len(activity),
