@@ -10,6 +10,9 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Downloads a single YouTube video from its URL and offers YouTube and local Whisper transcripts
   side by side, each with its own text and timings.
 - Plays the source video inside the editor.
+- Overlays each segment's line during playback with its speaker(s) above it. Subtitles update
+  as you edit, follow seeking and segment timings, and work with saved projects and imported packs.
+  Overlapping lines are shown together; source video and exports are not changed.
 - Keeps the decoded video frame visible when seeking while playback is stopped.
 - Cues playback to a segment's In point whenever that segment is selected.
 - Extracts and displays a zoomable waveform.
