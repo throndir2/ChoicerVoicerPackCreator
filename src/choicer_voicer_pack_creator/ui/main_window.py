@@ -53,7 +53,7 @@ from choicer_voicer_pack_creator.exporter import (
     safe_name,
 )
 from choicer_voicer_pack_creator.media import MediaTools
-from choicer_voicer_pack_creator.models import PackProject, Segment
+from choicer_voicer_pack_creator.models import AnalysisReview, PackProject, Segment
 from choicer_voicer_pack_creator.pack_io import PackImporter
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
 from choicer_voicer_pack_creator.timeline_audit import (
@@ -959,10 +959,22 @@ class MainWindow(QMainWindow):
             source_captions=self.project.source_captions,
             caption_language=self.project.caption_language,
             auto_start=auto_start,
+            youtube_import=bool(self.project.source_url),
+            review=self.project.analysis_review,
         )
         dialog.suggestions_accepted.connect(self._add_analysis_suggestions)
         dialog.preview_requested.connect(self._preview_analysis_range)
+        dialog.review_changed.connect(self._save_analysis_review)
         dialog.exec()
+
+    @Slot(object)
+    def _save_analysis_review(self, value: object) -> None:
+        if not isinstance(value, AnalysisReview):
+            QMessageBox.critical(self, "Could not keep analysis draft", "Analysis review data was invalid.")
+            return
+        if value != self.project.analysis_review:
+            self.project.analysis_review = value
+            self._set_dirty(True)
 
     @Slot(float, float)
     def _preview_analysis_range(self, start: float, end: float) -> None:
@@ -1968,6 +1980,7 @@ class MainWindow(QMainWindow):
             self.project.source_url = ""
             self.project.caption_language = ""
             self.project.source_captions = []
+            self.project.analysis_review = None
         self.project.video_path = str(source)
         self.project.video_duration = info.duration
         self.project.preserve_source_video = (
@@ -2024,6 +2037,7 @@ class MainWindow(QMainWindow):
         self.project.source_url = ""
         self.project.caption_language = ""
         self.project.source_captions = []
+        self.project.analysis_review = None
         self.project.video_duration = 0.0
         self.project.preserve_source_video = False
         self.video_path_label.setText("No video loaded")

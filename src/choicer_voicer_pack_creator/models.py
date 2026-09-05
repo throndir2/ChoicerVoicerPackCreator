@@ -32,6 +32,71 @@ class SourceCaption:
         return cls(start, end, str(value["text"]), str(value["source"]))
 
 
+@dataclass(frozen=True, slots=True)
+class AnalysisDraftRow:
+    # Keep time edits as text so even an unfinished/invalid edit survives closing the review.
+    start: str
+    end: str
+    caption: str
+    source: str
+    confidence: float | None = None
+    checked: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "start": self.start,
+            "end": self.end,
+            "caption": self.caption,
+            "source": self.source,
+            "confidence": self.confidence,
+            "checked": self.checked,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> AnalysisDraftRow:
+        confidence = value.get("confidence")
+        if confidence is not None:
+            confidence = float(confidence)
+            if not math.isfinite(confidence) or not 0 <= confidence <= 1:
+                raise ValueError("Analysis draft confidence must be between zero and one")
+        return cls(
+            str(value["start"]), str(value["end"]), str(value["caption"]),
+            str(value["source"]), confidence, bool(value.get("checked", True)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisReview:
+    youtube_rows: list[AnalysisDraftRow] = field(default_factory=list)
+    local_rows: list[AnalysisDraftRow] = field(default_factory=list)
+    selected_source: str = "local"
+    local_source: str = "Whisper"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "youtube_rows": [row.to_dict() for row in self.youtube_rows],
+            "local_rows": [row.to_dict() for row in self.local_rows],
+            "selected_source": self.selected_source,
+            "local_source": self.local_source,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> AnalysisReview:
+        rows: dict[str, list[AnalysisDraftRow]] = {}
+        for key in ("youtube_rows", "local_rows"):
+            items = value.get(key, [])
+            if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+                raise ValueError("Analysis draft rows must be an array of JSON objects")
+            rows[key] = [AnalysisDraftRow.from_dict(item) for item in items]
+        selected_source = str(value.get("selected_source", "local"))
+        local_source = str(value.get("local_source", "Whisper"))
+        if selected_source not in {"youtube", "local"}:
+            raise ValueError("Unknown analysis transcript selection")
+        if local_source not in {"Whisper", "Audio activity"}:
+            raise ValueError("Unknown local analysis source")
+        return cls(rows["youtube_rows"], rows["local_rows"], selected_source, local_source)
+
+
 @dataclass(slots=True)
 class Segment:
     """One playable dub prompt on the video timeline."""
@@ -122,6 +187,7 @@ class PackProject:
     source_url: str = ""
     caption_language: str = ""
     source_captions: list[SourceCaption] = field(default_factory=list)
+    analysis_review: AnalysisReview | None = None
 
     @property
     def speakers(self) -> list[str]:
@@ -225,6 +291,7 @@ class PackProject:
             "source_url": self.source_url,
             "caption_language": self.caption_language,
             "source_captions": [caption.to_dict() for caption in self.source_captions],
+            "analysis_review": self.analysis_review.to_dict() if self.analysis_review else None,
             "segments": [segment.to_dict() for segment in self.segments],
         }
 
@@ -245,6 +312,9 @@ class PackProject:
             isinstance(item, dict) for item in captions_value
         ):
             raise ValueError("Project source captions must be an array of JSON objects")
+        review_value = value.get("analysis_review")
+        if review_value is not None and not isinstance(review_value, dict):
+            raise ValueError("Project analysis review must be a JSON object")
         import_warnings = value.get("import_warnings", [])
         if not isinstance(import_warnings, list):
             import_warnings = [str(import_warnings)] if import_warnings else []
@@ -266,6 +336,7 @@ class PackProject:
             source_url=str(value.get("source_url", "")),
             caption_language=str(value.get("caption_language", "")),
             source_captions=[SourceCaption.from_dict(item) for item in captions_value],
+            analysis_review=AnalysisReview.from_dict(review_value) if review_value is not None else None,
             segments=[Segment.from_dict(item) for item in segments_value],
         )
         project.sort_segments()

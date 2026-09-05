@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import html
 import math
-from dataclasses import dataclass
 from typing import Any
 
-from choicer_voicer_pack_creator.analysis import AnalysisSuggestion
 from choicer_voicer_pack_creator.models import SourceCaption
 
 
@@ -56,41 +54,3 @@ def parse_json3(
             for cue, following in zip(cues, [*cues[1:], None], strict=True)
         ]
     return [cue for cue in cues if cue.end - cue.start >= 0.05]
-
-
-@dataclass(frozen=True, slots=True)
-class CaptionComparison:
-    text: str
-    status: str
-    timing: str
-
-
-def compare_caption(
-    start: float, end: float, text: str, transcripts: list[AnalysisSuggestion]
-) -> CaptionComparison:
-    matches = sorted(
-        (
-            item for item in transcripts
-            if item.caption.strip() and min(end, item.end) > max(start, item.start)
-        ),
-        key=lambda item: (item.start, item.end),
-    )
-    if not matches:
-        return CaptionComparison("", "No Whisper match - review", "")
-    draft = " ".join(item.caption.strip() for item in matches)
-    def normalize(value: str) -> str:
-        return "".join(character for character in value.casefold() if character.isalnum())
-
-    same_text = bool(normalize(text)) and normalize(text) == normalize(draft)
-    aligned = abs(start - matches[0].start) <= 0.5 and abs(end - matches[-1].end) <= 0.5
-    status = (
-        "Text agrees"
-        if same_text and aligned
-        else "Timing differs - review"
-        if same_text
-        else "Text differs - review"
-    )
-    timing = "; ".join(
-        f"{item.start:.3f}-{item.end:.3f}: {item.caption}" for item in matches
-    )
-    return CaptionComparison(draft, status, timing)

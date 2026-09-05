@@ -70,7 +70,8 @@ class YouTubeDialog(QDialog):
         intro = QLabel(
             "Download one public YouTube video that you own or have permission to use. "
             "Available creator or automatic captions load first; local Whisper then runs "
-            "automatically for comparison (first-time model downloads ask permission). "
+            "automatically as a separate transcript (first-time model downloads ask permission). "
+            "Review both and choose either YouTube's text and timings or Whisper's. "
             "No sign-in, cookies, or access-restriction bypass is used."
         )
         intro.setWordWrap(True)

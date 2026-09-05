@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from choicer_voicer_pack_creator.models import PackProject, Segment
+import pytest
+
+from choicer_voicer_pack_creator.models import (
+    AnalysisDraftRow,
+    AnalysisReview,
+    PackProject,
+    Segment,
+)
 
 
 def test_project_sorts_segments_and_preserves_speaker_order(tmp_path: Path) -> None:
@@ -72,3 +79,29 @@ def test_imported_recording_requires_reviewed_source_range(tmp_path: Path) -> No
         ],
     )
     assert any("original source cut is unknown" in error for error in project.validate())
+
+
+def test_old_project_without_review_still_loads() -> None:
+    project = PackProject.from_dict({"schema_version": 1, "segments": []})
+    assert project.analysis_review is None
+
+
+def test_analysis_review_round_trip_preserves_unfinished_edits() -> None:
+    review = AnalysisReview(
+        [AnalysisDraftRow("in progress", "2", "Edited YouTube", "YouTube", checked=False)],
+        [AnalysisDraftRow("0.5", "3", "Edited Whisper", "Whisper", 0.876)],
+        "local",
+    )
+    project = PackProject(analysis_review=review)
+    assert PackProject.from_dict(project.to_dict()).analysis_review == review
+
+
+@pytest.mark.parametrize("review", [
+    [], {"youtube_rows": [None]}, {"local_rows": {}},
+    {"selected_source": "unknown"}, {"local_source": "unknown"},
+    {"local_rows": [{"start": "1", "end": "2", "caption": "", "source": "Whisper",
+                     "confidence": float("nan")}]},
+])
+def test_invalid_review_state_is_reported(review) -> None:
+    with pytest.raises(ValueError):
+        PackProject.from_dict({"analysis_review": review})

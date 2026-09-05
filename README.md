@@ -7,8 +7,8 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 ## What it does
 
 - Creates a new project from MP4, MKV, MOV, WebM, OGV, or AVI video.
-- Downloads a single YouTube video from its URL, loads available captions, and automatically
-  compares them with local Whisper without overwriting your edits.
+- Downloads a single YouTube video from its URL and offers YouTube and local Whisper transcripts
+  side by side, each with its own text and timings.
 - Plays the source video inside the editor.
 - Keeps the decoded video frame visible when seeking while playback is stopped.
 - Cues playback to a segment's In point whenever that segment is selected.
@@ -86,8 +86,8 @@ finished executable. It does not require a system FFmpeg installation. Use
 The finished outputs are:
 
 ```text
-dist/v0.5.0/portable-<build-id>/Choicer Voicer Pack Creator/
-dist/v0.5.0/Choicer-Voicer-Pack-Creator-0.5.0-Windows-x64.zip
+dist/v0.5.1/portable-<build-id>/Choicer Voicer Pack Creator/
+dist/v0.5.1/Choicer-Voicer-Pack-Creator-0.5.1-Windows-x64.zip
 ```
 
 The script prints the exact generated application-folder path. Each rebuild uses a new path to avoid
@@ -181,21 +181,28 @@ you can also select or type a language code. YouTube-generated translations are 
 creator-uploaded tracks can themselves be translations. Some videos have no accessible captions,
 and caption delivery can fail independently of the video download.
 
-Available captions immediately populate the editable analysis window. Whisper starts automatically
-on a background thread, asking permission first if its runtime/model must be downloaded. Edit,
-preview, or uncheck caption rows while it runs. The **Whisper transcript** and **Comparison**
-columns show overlapping local transcription and flag text/timing disagreements or missing
-matches. Original captions and your edits are never automatically replaced. Agreement is not
-proof of accuracy, and differently segmented speech may still need manual comparison; hover over
-the comparison to see Whisper's timestamps.
+Available captions immediately populate the **YouTube text + timings** panel. Whisper starts
+automatically on a background thread, asking permission first if its runtime/model must be
+downloaded. Its result appears alongside YouTube in the **Whisper text + timings** panel. Each
+transcript keeps its own row count, text, and In/Out boundaries: a longer Whisper passage is not
+forced onto shorter YouTube captions or flagged as a conflict. You can edit, preview, and uncheck
+rows in either draft independently.
+
+Choose the preferred source, then click **Use YouTube Transcript** or **Use Whisper Transcript**.
+The checked rows from that source become editable project segments with that source's timings
+and no assigned speakers. The other source is not mixed in. Choosing YouTube before Whisper
+finishes stops the scan; otherwise, wait to review both. Existing project segments are never
+silently replaced; adding another set requires confirmation.
 
 If captions are unavailable, the same automatic Whisper pass drafts suggestions from the audio.
 Declining setup or a failed/canceled scan leaves downloaded media and available captions intact.
-**Cancel Scan** keeps the analysis window open; closing it or adding suggestions before the scan
-finishes stops the scan. Checked captions become ordinary editable segments when added, with
-speakers left unassigned. Original caption evidence and the source URL are saved in the project;
-**Tools → Analyze Video & Suggest Segments** can reopen that evidence and rerun comparison.
-Replacing or clearing the source video clears its original caption evidence.
+**Cancel Scan** keeps the analysis window open. **Keep Drafts & Close** stops a running scan and
+retains both available drafts, including edits, checked rows, and source selection, without adding
+segments. Draft changes are included in recovery snapshots and **Save Project**, just like other
+project edits. **Tools → Analyze Video & Suggest Segments** restores the saved drafts without
+rerunning Whisper. A successful rescan replaces only the local draft after confirmation; a failed
+or canceled rescan keeps its previous result. Original YouTube caption evidence and the source URL
+are also retained. Replacing or clearing the source video clears its caption evidence and drafts.
 
 The portable build includes pinned yt-dlp, its JavaScript solver, and Deno, and uses its existing
 FFmpeg tools; no extra end-user installation is required. YouTube import contacts YouTube and its
@@ -346,8 +353,8 @@ with another compatible pair.
 .\Build-Portable.ps1
 ```
 
-The Windows application folder is written below `dist/v0.5.0/portable-<build-id>/`, with a
-shareable `Choicer-Voicer-Pack-Creator-0.5.0-Windows-x64.zip` beside it. The first build downloads
+The Windows application folder is written below `dist/v0.5.1/portable-<build-id>/`, with a
+shareable `Choicer-Voicer-Pack-Creator-0.5.1-Windows-x64.zip` beside it. The first build downloads
 about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. The stable sharing ZIP is not
 replaced until both the application folder and a clean ZIP extraction pass packaged smoke tests.
 Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or
