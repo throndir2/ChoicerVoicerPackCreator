@@ -95,6 +95,7 @@ class FakeMedia:
 @pytest.fixture
 def downloader(monkeypatch, inline_youtube_worker):
     class FakeDownloader:
+        sanitize_info = staticmethod(YoutubeDL.sanitize_info)
         options = None
         fail_video = False
         fail_captions = False

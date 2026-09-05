@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from choicer_voicer_pack_creator import media as media_module
@@ -209,6 +210,8 @@ def fake_youtube(tmp_path: Path, monkeypatch, inline_youtube_worker):
     state = SimpleNamespace(caption_failure=False, download_failure=False)
 
     class Downloader:
+        sanitize_info = staticmethod(YoutubeDL.sanitize_info)
+
         def __init__(self, options, **_kwargs):
             self.options = options
             self.cookiejar = CookieJar()

@@ -2,18 +2,74 @@ from __future__ import annotations
 
 import io
 import json
+import pickle
 import threading
 import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 import pytest
+from yt_dlp import YoutubeDL
+from yt_dlp.utils import LazyList
 
 from choicer_voicer_pack_creator import youtube
 from choicer_voicer_pack_creator.diagnostics import ApplicationDiagnostics, application_log_path
 from choicer_voicer_pack_creator.media import MediaTools
 
 URL = "https://www.youtube.com/watch?v=abcdefghijk"
+
+
+def _post_live_metadata_worker(emit, request):
+    formats = [{
+        "is_from_start": True, "_itag": "137", "_client": "web",
+        "url": "https://example.invalid/segments", "target_duration": 5,
+    }]
+    fragments = [{"url": f"https://example.invalid/segments/sq/{index}"} for index in range(2)]
+    extractor = youtube._PublicYoutubeIE()
+    with patch.object(
+        extractor, "_live_adaptive_fragments", return_value=(fragment for fragment in fragments),
+    ):
+        extractor._prepare_live_from_start_formats(
+            formats, "abcdefghijk", time.time() - 10, URL, URL, {}, is_live=False,
+        )
+    assert isinstance(formats[0]["fragments"], LazyList)
+    with pytest.raises(TypeError, match="generator"):
+        pickle.dumps(formats)
+    info = {"id": "abcdefghijk", "title": "Ended stream", "live_status": "post_live", "formats": formats}
+    with patch.object(YoutubeDL, "extract_info", return_value=info):
+        return youtube._youtube_worker(emit, request, "metadata", None)
+
+
+def test_actual_post_live_lazy_fragments_cross_the_worker_boundary(tmp_path):
+    request = youtube._YouTubeRequest(tmp_path, URL, "ffmpeg.exe", youtube.youtube_runtime_path())
+    result = youtube.run_process_worker(
+        _post_live_metadata_worker, (request,), on_event=lambda *_args: False,
+        cancelled=lambda: False, timeout=10,
+    )
+    assert result.value["live_status"] == "post_live"
+    assert result.value["formats"][0]["fragments"] == [
+        {"url": f"https://example.invalid/segments/sq/{index}"} for index in range(2)
+    ]
+    assert result.value["formats"][0]["protocol"] == "http_dash_segments"
+
+
+@pytest.mark.parametrize("unsupported", [
+    {"is_live": True}, {"live_status": "is_upcoming"}, {"_type": "playlist"},
+    {"availability": "private"},
+])
+def test_unsupported_metadata_is_rejected_before_evaluating_lazy_values(tmp_path, unsupported):
+    def unexpected():
+        pytest.fail("Unsupported lazy metadata must not be consumed")
+        yield
+
+    info = {**unsupported, "formats": LazyList(unexpected())}
+    request = youtube._YouTubeRequest(tmp_path, URL, "ffmpeg.exe", youtube.youtube_runtime_path())
+    with (
+        patch.object(YoutubeDL, "extract_info", return_value=info),
+        pytest.raises(youtube.YouTubeError),
+    ):
+        youtube._youtube_worker(lambda *_args: None, request, "metadata", None)
 
 
 @pytest.fixture

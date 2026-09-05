@@ -460,6 +460,20 @@ def _is_network_error(error: BaseException) -> bool:
     return False
 
 
+def _validate_youtube_metadata(info: Any) -> None:
+    if (
+        not isinstance(info, dict) or not info
+        or info.get("_type", "video") != "video" or "entries" in info
+    ):
+        raise YouTubeError("The URL did not resolve to a single video.")
+    if info.get("is_live") or info.get("live_status") in {"is_live", "is_upcoming"}:
+        raise YouTubeError("Live and upcoming streams cannot be imported.")
+    if (info.get("age_limit") or 0) >= 18 or info.get("availability") in {
+        "private", "premium_only", "subscriber_only", "needs_auth",
+    }:
+        raise YouTubeError("This video requires access that the importer does not request.")
+
+
 def _youtube_worker(
     emit: Callable[[str, dict[str, Any]], None],
     request: _YouTubeRequest,
@@ -522,6 +536,10 @@ def _youtube_worker(
                 downloader.add_post_processor(_DownloadProgressPP(tracker), when="before_dl")
                 if action == "metadata":
                     value = downloader.extract_info(request.url, download=False, process=False)
+                    _validate_youtube_metadata(value)
+                    # Ended livestreams can contain generator-backed LazyList fragments.
+                    # Materialize them while their extractor and deadline are still alive.
+                    value = downloader.sanitize_info(value)
                 elif action == "captions":
                     with downloader.urlopen(payload) as response:
                         raw = response.read(16 * 1024**2 + 1)
@@ -705,14 +723,7 @@ def download_youtube(
         with diagnostic_operation("youtube_metadata"):
             info = _run_youtube_stage(request, "metadata", None, notes, progress, cancelled)
         _check_cancel(cancelled)
-        if not info or info.get("_type", "video") != "video" or "entries" in info:
-            raise YouTubeError("The URL did not resolve to a single video.")
-        if info.get("is_live") or info.get("live_status") in {"is_live", "is_upcoming"}:
-            raise YouTubeError("Live and upcoming streams cannot be imported.")
-        if (info.get("age_limit") or 0) >= 18 or info.get("availability") in {
-            "private", "premium_only", "subscriber_only", "needs_auth",
-        }:
-            raise YouTubeError("This video requires access that the importer does not request.")
+        _validate_youtube_metadata(info)
         diagnostic_event(
             "youtube_metadata_received",
             format_count=len(info.get("formats") or []),
