@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from pathlib import Path
+
+from choicer_voicer_pack_creator.updates import (
+    EXECUTABLE,
+    MANIFEST,
+    sha256,
+    verify_installation,
+    write_portable_manifest,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 with (ROOT / "pyproject.toml").open("rb") as project_file:
@@ -29,6 +39,84 @@ def default_executable() -> Path:
     return executable
 
 
+def smoke_update(executable: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="cvpc-update-smoke-") as temporary:
+        root = Path(temporary)
+        target = root / "Installed app"
+        directory = root / ".cvpc-update-smoke"
+        staged = directory / "application"
+        shutil.copytree(executable.parent, target)
+        shutil.copytree(executable.parent, staged)
+        # Model a previous package without requiring a historical release download.
+        obsolete = target / "_internal" / "obsolete-smoke.txt"
+        obsolete.write_text("previous app file", encoding="utf-8")
+        write_portable_manifest(target, "0.0.0")
+        extra = target / "projects" / "keep.cvpack.json"
+        extra.parent.mkdir()
+        extra.write_text("user-owned project", encoding="utf-8")
+        report = root / "report.json"
+        (directory / "plan.json").write_text(
+            json.dumps({
+                "target": str(target), "version": APP_VERSION, "previous_version": "0.0.0",
+                "previous_manifest_hash": sha256(target / MANIFEST),
+            }),
+            encoding="utf-8",
+        )
+        environment = os.environ.copy()
+        environment["CHOICER_VOICER_SMOKE_REPORT"] = str(report)
+        environment["QT_QPA_PLATFORM"] = "offscreen"
+        # This parent holds the old EXE open without FILE_SHARE_DELETE, like the editor.
+        # The staged packaged helper must wait for it to exit before replacing files.
+        parent_code = """
+import ctypes, sys
+from ctypes import wintypes
+from pathlib import Path
+from choicer_voicer_pack_creator.updates import PreparedUpdate, launch_update
+directory, target, version = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                              wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+kernel.CreateFileW.restype = wintypes.HANDLE
+handle = kernel.CreateFileW(str(target / "Choicer Voicer Pack Creator.exe"),
+                           0x80000000, 1, None, 3, 0, None)
+if handle == wintypes.HANDLE(-1).value:
+    raise ctypes.WinError(ctypes.get_last_error())
+launch_update(PreparedUpdate(directory, target, version), Path("--smoke-test"))
+"""
+        subprocess.run(
+            [sys.executable, "-c", parent_code, str(directory), str(target), APP_VERSION],
+            check=True, env=environment, timeout=45,
+        )
+        deadline = time.monotonic() + 90
+        while not report.exists() and time.monotonic() < deadline:
+            time.sleep(0.25)
+        result_path = directory / "result.json"
+        if not result_path.is_file():
+            raise RuntimeError(f"The packaged update helper did not finish: {directory}")
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        if not result.get("success"):
+            raise RuntimeError(f"Packaged update failed: {result.get('message')}")
+        if not report.is_file():
+            raise RuntimeError("The updated application did not restart and write its smoke report")
+        restarted = json.loads(report.read_text(encoding="utf-8"))
+        if Path(restarted["ffmpeg"]).resolve() != (target / "bin" / "ffmpeg.exe").resolve():
+            raise RuntimeError("The updater restarted the wrong application folder")
+        verify_installation(target, APP_VERSION)
+        if obsolete.exists() or extra.read_text(encoding="utf-8") != "user-owned project":
+            raise RuntimeError("The updater did not preserve user files/remove obsolete managed files")
+        # Wait until both packaged processes release their mapped EXE/DLLs before cleanup.
+        for path in (staged / EXECUTABLE, target / EXECUTABLE):
+            for attempt in range(100):
+                try:
+                    path.unlink()
+                    break
+                except PermissionError:
+                    if attempt == 99:
+                        raise
+                    time.sleep(0.1)
+        print("PACKAGED IN-PLACE UPDATE + RESTART SMOKE PASSED")
+
+
 def main() -> int:
     executable = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else default_executable()
     if not executable.is_file():
@@ -38,6 +126,7 @@ def main() -> int:
     expected_ffprobe = (expected_bin / "ffprobe.exe").resolve()
     if not expected_ffmpeg.is_file() or not expected_ffprobe.is_file():
         raise RuntimeError("Packaged FFmpeg runtime is missing")
+    verify_installation(executable.parent, APP_VERSION)
 
     with tempfile.TemporaryDirectory(prefix="cvpc-smoke-") as temporary:
         report_path = Path(temporary) / "report.json"
@@ -108,6 +197,8 @@ def main() -> int:
             raise RuntimeError(f"Packaged {package} license notice is missing")
     print(json.dumps(report, indent=2))
     print("PACKAGED APPLICATION + BUNDLED FFMPEG SMOKE PASSED")
+    if "--update-smoke" in sys.argv:
+        smoke_update(executable)
     return 0
 
 

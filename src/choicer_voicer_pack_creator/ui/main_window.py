@@ -64,6 +64,7 @@ from choicer_voicer_pack_creator.timeline_audit import (
 from choicer_voicer_pack_creator.ui.analysis_dialog import AnalysisDialog, open_diagnostic_logs
 from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
+from choicer_voicer_pack_creator.ui.update_controller import UpdateController
 from choicer_voicer_pack_creator.ui.youtube_dialog import YouTubeDialog
 
 
@@ -260,6 +261,7 @@ class MainWindow(QMainWindow):
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self.action_analyze)
         help_menu = self.menuBar().addMenu("&Help")
+        self.updater = UpdateController(self, help_menu)
         self.action_logs = help_menu.addAction("Open Diagnostic Logs...")
         self.action_logs.triggered.connect(
             lambda: open_diagnostic_logs(self, self.analysis_data_root)
@@ -2352,6 +2354,9 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if not self.updater.can_close():
+            event.ignore()
+            return
         if self._export_worker and self._export_worker.isRunning():
             QMessageBox.information(self, "Export running", "Wait for the current export to finish.")
             event.ignore()
@@ -2373,6 +2378,9 @@ class MainWindow(QMainWindow):
                 )
                 event.ignore()
                 return
+        if not self.updater.install_on_close():
+            event.ignore()
+            return
         if self._discard_recovery_on_transition:
             self._clear_recovery_snapshot()
         event.accept()

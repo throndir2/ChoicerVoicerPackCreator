@@ -212,8 +212,8 @@ try {
 
     Invoke-CheckedCommand `
         -FilePath $buildPython `
-        -ArgumentList @("scripts\smoke_packaged.py", $applicationExecutable) `
-        -Description "Smoke-testing the unpromoted application and bundled FFmpeg"
+        -ArgumentList @("scripts\smoke_packaged.py", $applicationExecutable, "--update-smoke") `
+        -Description "Smoke-testing the application, bundled FFmpeg, and in-place updater"
 
     $extractedSmokeRoot = Join-Path `
         ([IO.Path]::GetTempPath()) `

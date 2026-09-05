@@ -31,6 +31,8 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Saves a relocatable editable `.cvpack.json` project (media beside the project is stored by relative path).
 - Atomically exports a game-ready folder and sharing ZIP.
 - Validates metadata, references, inventory, PNG signatures, timestamps, codecs, complete media decoding, and ZIP CRC before publishing.
+- Checks public GitHub releases and offers verified, in-place Windows updates without replacing
+  projects, media, or unrelated files.
 
 ## Pack format
 
@@ -112,6 +114,44 @@ FFmpeg components.
 Community builds are not currently code-signed, so Windows SmartScreen may show an unrecognized-app
 warning. Verify the ZIP's SHA-256 printed by the build script and use only a package from a trusted
 source.
+
+### Application updates
+
+Portable Windows builds check the public
+[GitHub releases](https://github.com/throndir2/ChoicerVoicerPackCreator/releases) in the background
+on startup. **Prereleases are included by default**, since the current releases use that channel.
+The **Help** menu provides **Check for Updates**, **Check for Updates on Startup**, and
+**Include Prereleases**. An offline or rate-limited automatic check reports its failure in the
+status bar without interrupting your work. Checks contact GitHub, not your media or project files.
+
+When a newer compatible release is found, you can decline it or download its Windows x64 ZIP.
+Downloads are cancelable and checked against the release's SHA-256 checksum and GitHub asset
+digest when available. After the download is verified, a separate confirmation offers a restart.
+The normal Save / Discard / Cancel prompt still protects unsaved edits; active exports and
+import/analysis dialogs must finish first. The app restarts in the same folder and reopens the
+saved project.
+
+Each new portable package includes `portable-files.json`, an inventory of shipped files. The
+updater replaces only those files and removes obsolete inventoried files. Extra files, projects,
+media, Windows preferences, recovery data, and downloaded Whisper components are not removed.
+Missing or modified application files (including custom FFmpeg binaries), path conflicts,
+links/junctions, locked files, and permission problems prevent an unsafe replacement. The app
+offers the GitHub release page when preparation fails. For a manual update, extract the new
+release into a separate folder. The updater never requests administrator access or
+mirrors/deletes your application folder.
+
+Updates are staged beside the application and installed by a separate process after the editor
+exits. Previous application files are retained as rollback backups until installation succeeds.
+A failed replacement attempts to restore them and reports any incomplete rollback, retaining the
+staging/backup folder for recovery. If an update is interrupted by a power loss or the updater is
+forcibly terminated, keep that `.cvpc-update-*` folder and restore from its `backup` directory or
+extract a fresh release into a separate folder. Do not delete backups until the app works again.
+
+**Existing packages without an updater/inventory need one manual upgrade** to a release containing
+this feature. Extract that release into a new folder rather than merging it over an old package.
+Source checkouts can check releases manually but are never modified by the updater. Release
+checksums verify integrity, not publisher identity; continue to use only the official repository,
+as these builds are not code-signed.
 
 ## Run from source
 
