@@ -9,12 +9,15 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Creates a new project from MP4, MKV, MOV, WebM, OGV, or AVI video.
 - Downloads a single YouTube video from its URL and offers YouTube and local Whisper transcripts
   side by side, each with its own text and timings.
-- Plays the source video inside the editor.
+- Plays the source video inside the editor. Press **Space** in the video preview, timeline,
+  or segment list to play/pause; spaces still work normally when editing text.
 - Overlays each segment's line during playback with its speaker(s) above it. Subtitles update
   as you edit, follow seeking and segment timings, and work with saved projects and imported packs.
   Overlapping lines are shown together; source video and exports are not changed.
 - Keeps the decoded video frame visible when seeking while playback is stopped.
-- Cues playback to a segment's In point when you select it manually.
+- Cues playback to a segment's In point when you select or click it in the list or timeline,
+  including another click on the selected segment. Scrub the playhead or click the waveform
+  to seek to an exact point instead.
 - Automatically selects and scrolls to each active segment during video playback, keeping the
   Selected Segment editor in sync without interrupting playback. Gaps keep the current selection;
   overlapping lines follow the most recently started segment. Paused editing and single-segment
@@ -22,6 +25,8 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Extracts and displays a zoomable waveform.
 - Marks precise In/Out points in seconds.
 - Adds, previews, splits, duplicates, deletes, and re-times segments.
+  Press **Backspace** (or **Ctrl+Delete**) to delete the selected segment after confirmation;
+  Backspace still works normally when editing text or numbers.
 - Resizes or collapses Pack Details, Segments, and Selected Segment so the segment list can use
 	most of the sidebar when needed.
 - Freely shrinks or fully collapses the video/timeline pane; drag the thin divider back to reopen it.
