@@ -165,8 +165,9 @@ If `py` is unavailable, invoke your installed Python executable directly.
 ## Create a pack
 
 1. Choose **File → New from Video**.
-2. Optionally use the initial analysis window to scan for possible lines and draft local Whisper
-	captions, then check only the suggestions you want to add.
+2. The initial analysis window starts local Whisper automatically. Approve its first-time
+   component download if needed, or decline/cancel to edit manually. Check only the suggestions
+   you want to add.
 3. Assign a speaker and verify every suggested caption and boundary against the source video.
 4. Scrub the video or click the waveform to find any remaining line.
 5. Set **In** at the beginning of the spoken line and **Out** after its final phoneme.
@@ -180,7 +181,8 @@ If `py` is unavailable, invoke your installed Python executable directly.
 ### Analyze and transcribe a video
 
 The initial analysis window opens after **New from Video** and can be reopened with **Tools →
-Analyze Video & Suggest Segments** (`Ctrl+Shift+R`). It always offers a dependency-free activity
+Analyze Video & Suggest Segments** (`Ctrl+Shift+R`). New local-video and YouTube imports both start
+Whisper automatically, while reopening existing drafts does not rerun it. The window also offers a dependency-free activity
 scan with Balanced, Sensitive, and Conservative modes. This scan measures deterministic audio
 energy and suggests possible regions; music, effects, and silence changes can still be false
 positives.
@@ -197,8 +199,10 @@ Every download uses an immutable upstream revision and is checked for exact size
 use. Components are cached in the current user's local application-data directory, while temporary
 analysis audio and transcript JSON are deleted after each scan.
 
-Results list editable In/Out values and draft captions. Double-click a row or use **Preview Row** to
-audition it, uncheck unwanted rows, correct text, then add the checked suggestions. Existing segments
+Results list editable In/Out values and draft captions. Double-click a line or use **Play Selected
+Whisper Line** (or **Play Selected Range** for an activity-only scan) to audition it. Uncheck unwanted
+lines, correct text, then use the highlighted **Use Whisper Transcript** action. **Rerun Whisper**
+is a separate, secondary action. Existing segments
 are never replaced. Suggested segments intentionally have no speaker; assign speakers manually.
 Whisper is probabilistic and can mishear names, stylized vocalizations, non-English speech, music,
 or overlapping speakers, so every result remains review evidence rather than authoritative data.
@@ -206,13 +210,43 @@ One language selection applies to an entire scan; use Auto-detect for primarily 
 sources, or rerun selected-language passes when a video deliberately mixes languages. Long videos
 also receive conservative free-disk and memory checks before analysis begins.
 
+Model download is setup, not transcription completion. The window identifies download,
+checksum verification, model loading, and audio processing as separate steps. During transcription
+it shows Whisper's reported percentage of audio processed and elapsed time; model loading and
+the first audio block show an elapsed-time status until Whisper reports measurable progress.
+The scan button says **Whisper Running** while busy and is not highlighted. **Cancel Scan** remains
+available. Runtime startup and transcription have generous time limits so a stalled process reports
+an error rather than waiting indefinitely, without removing saved drafts.
+
+### Diagnosing a stalled Whisper run
+
+Every analysis attempt writes a timestamped diagnostic log, including application/runtime
+versions, model download and checksum stages, selected settings and available memory,
+subprocess commands and process IDs, Whisper's technical stderr, elapsed-time heartbeats,
+exit codes, failures, and cancellation/termination. Entries are flushed as they are written,
+so canceling the scan or restarting the app does not erase the evidence.
+
+Use **Open Logs** in the analysis window or **Help → Open Diagnostic Logs** after closing it.
+The current file is `analysis.log` in the analysis component directory's `logs` folder; its full
+path is also shown in the analysis window and error messages. Up to three rotated backups are
+kept, with a 2 MiB target per file. When reporting a stall, include `analysis.log` and any adjacent
+`analysis.log.1` through `.3` files. Logs stay local and are not included in exported packs.
+Normal transcript stdout and source audio are not recorded, but logs contain local file paths
+and tool error details; review them before sharing.
+
 ### Import a YouTube video
 
-Choose **File → New from YouTube**, paste a video URL, and choose where to keep the downloaded
-media. Only download material you own or have permission to use. Each import creates a new
+Choose **File → New from YouTube** and paste a video URL. The destination defaults to your
+Windows **Downloads** folder unless a previous location was selected; clearing the field also
+uses Downloads. You can choose a different folder. Only download material you own or have
+permission to use. Each import creates a new
 `YouTube-<video-id>-<unique-id>` folder without replacing existing files. Save your `.cvpack.json`
 beside that folder to keep the project relocatable; downloaded media is not a temporary cache.
 The downloader retrieves the best available video/audio and may merge them into MKV.
+Download percentages combine the selected video and audio transfers. Estimates are labeled and
+may pause when sizes change or a transfer retries, but do not move backward. Unknown-size
+transfers, merging, checking, and publication show indeterminate progress. **Ready** means the
+checked video has been successfully published to its media folder.
 
 YouTube can provide timestamped creator captions or automatic speech-recognition captions.
 The importer prefers creator captions in the selected language and otherwise uses available
@@ -221,12 +255,14 @@ you can also select or type a language code. YouTube-generated translations are 
 creator-uploaded tracks can themselves be translations. Some videos have no accessible captions,
 and caption delivery can fail independently of the video download.
 
-Available captions immediately populate the **YouTube text + timings** panel. Whisper starts
+Available captions immediately populate the **YouTube Captions** panel. Whisper starts
 automatically on a background thread, asking permission first if its runtime/model must be
-downloaded. Its result appears alongside YouTube in the **Whisper text + timings** panel. Each
+downloaded. Its result appears alongside YouTube in the **Whisper Transcript** panel. Each
 transcript keeps its own row count, text, and In/Out boundaries: a longer Whisper passage is not
 forced onto shorter YouTube captions or flagged as a conflict. You can edit, preview, and uncheck
 rows in either draft independently.
+The playback button names the chosen source: **Play Selected YouTube Line** or **Play Selected
+Whisper Line**.
 
 Choose the preferred source, then click **Use YouTube Transcript** or **Use Whisper Transcript**.
 The checked rows from that source become editable project segments with that source's timings

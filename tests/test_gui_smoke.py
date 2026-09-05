@@ -31,6 +31,9 @@ def test_main_window_starts_with_empty_editor(qtbot) -> None:
     assert window.project.title == "Untitled Dub Pack"
     assert window.segment_table.rowCount() == 0
     assert "Choicer Voicer Pack Creator" in window.windowTitle()
+    help_actions = window.menuBar().actions()[-1].menu().actions()
+    assert window.updater.check_action in help_actions
+    assert window.action_logs in help_actions
     window.dirty = False
     window.close()
 

@@ -3,8 +3,8 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QSignalBlocker, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtCore import QModelIndex, QSignalBlocker, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemDelegate,
     QButtonGroup,
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -37,8 +38,22 @@ from choicer_voicer_pack_creator.analysis import (
     analyze_video,
     detect_hardware,
 )
+from choicer_voicer_pack_creator.diagnostics import AnalysisDiagnostics, analysis_log_path
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import AnalysisDraftRow, AnalysisReview, SourceCaption
+
+
+def open_diagnostic_logs(parent: QWidget, data_root: Path) -> None:
+    folder = analysis_log_path(data_root).parent
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        QMessageBox.warning(parent, "Could not open diagnostic logs", str(error))
+        return
+    if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+        QMessageBox.warning(
+            parent, "Could not open diagnostic logs", f"Open this folder manually:\n{folder}"
+        )
 
 
 class DraftDelegate(QStyledItemDelegate):
@@ -92,27 +107,28 @@ class AnalysisWorker(QThread):
         self.language = language
 
     def run(self) -> None:
-        def report(message: str, fraction: float | None) -> None:
-            value = -1 if fraction is None else max(0, min(1000, round(fraction * 1000)))
-            self.progress.emit(message, value)
-
         try:
-            result = analyze_video(
-                self.media,
-                self.video,
-                self.duration,
-                self.data_root,
-                sensitivity=self.sensitivity,
-                use_whisper=self.use_whisper,
-                model_key=self.model_key,
-                language=self.language,
-                progress=report,
-                cancelled=self.isInterruptionRequested,
-            )
-            if self.isInterruptionRequested():
-                self.canceled.emit()
-            else:
-                self.completed.emit(result)
+            with AnalysisDiagnostics(self.data_root) as diagnostics:
+                def report(message: str, fraction: float | None) -> None:
+                    diagnostics.progress(message, fraction)
+                    value = -1 if fraction is None else max(0, min(1000, round(fraction * 1000)))
+                    self.progress.emit(message, value)
+
+                result = analyze_video(
+                    self.media,
+                    self.video,
+                    self.duration,
+                    self.data_root,
+                    sensitivity=self.sensitivity,
+                    use_whisper=self.use_whisper,
+                    model_key=self.model_key,
+                    language=self.language,
+                    progress=report,
+                    cancelled=self.isInterruptionRequested,
+                )
+                if self.isInterruptionRequested():
+                    raise AnalysisCancelled("Video analysis was canceled")
+            self.completed.emit(result)
         except AnalysisCancelled:
             self.canceled.emit()
         except Exception as error:
@@ -145,6 +161,7 @@ class AnalysisDialog(QDialog):
         self.video = video.resolve()
         self.duration = duration
         self.data_root = data_root.resolve()
+        self.log_path = analysis_log_path(self.data_root)
         self.existing_segments = existing_segments
         self.worker: AnalysisWorker | None = None
         self._close_after_cancel = False
@@ -184,7 +201,8 @@ class AnalysisDialog(QDialog):
         self.sensitivity_combo.addItem("Balanced", "balanced")
         self.sensitivity_combo.addItem("Sensitive — more possible lines/effects", "sensitive")
         self.sensitivity_combo.addItem("Conservative — fewer, louder regions", "conservative")
-        options.addRow("Activity scan", self.sensitivity_combo)
+        if not self.source_choice:
+            options.addRow("Activity scan", self.sensitivity_combo)
 
         self.whisper_check = QCheckBox("Run local Whisper transcription")
         self.whisper_check.setChecked(self.source_choice or self.local_source == "Whisper")
@@ -239,13 +257,28 @@ class AnalysisDialog(QDialog):
         layout.addWidget(self.setup_label)
         self._whisper_toggled(self.whisper_check.isChecked())
 
+        log_row = QHBoxLayout()
+        log_label = QLabel(f"Diagnostic log: {self.log_path}")
+        log_label.setWordWrap(True)
+        log_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        log_label.setObjectName("muted")
+        log_row.addWidget(log_label, 1)
+        self.logs_button = QPushButton("Open Logs")
+        self.logs_button.setAutoDefault(False)
+        self.logs_button.clicked.connect(lambda: open_diagnostic_logs(self, self.data_root))
+        log_row.addWidget(self.logs_button)
+        layout.addLayout(log_row)
+
         progress_row = QHBoxLayout()
         self.progress_label = QLabel("Ready to scan")
+        self.progress_label.setWordWrap(True)
         self.progress_label.setObjectName("muted")
         progress_row.addWidget(self.progress_label, 1)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setFormat("Current step: %p%")
         self.progress_bar.setValue(0)
+        self.progress_bar.setMinimumWidth(200)
         self.progress_bar.setMaximumWidth(320)
         progress_row.addWidget(self.progress_bar)
         layout.addLayout(progress_row)
@@ -266,15 +299,18 @@ class AnalysisDialog(QDialog):
         (self.youtube_radio if selected == "youtube" else self.local_radio).setChecked(True)
         self.youtube_status = QLabel()
         self.local_status = QLabel("Whisper has not run yet.")
+        self.youtube_panel = QGroupBox("YouTube Captions", self)
+        self.local_panel = QGroupBox(
+            "Whisper Transcript" if self.local_source == "Whisper" else "Detected Audio Ranges",
+            self,
+        )
         if self.source_choice:
             splitter = QSplitter(Qt.Orientation.Horizontal)
-            for radio, status, table in (
-                (self.youtube_radio, self.youtube_status, self.youtube_table),
-                (self.local_radio, self.local_status, self.local_table),
+            for panel, radio, status, table in (
+                (self.youtube_panel, self.youtube_radio, self.youtube_status, self.youtube_table),
+                (self.local_panel, self.local_radio, self.local_status, self.local_table),
             ):
-                panel = QWidget()
                 panel_layout = QVBoxLayout(panel)
-                panel_layout.setContentsMargins(0, 0, 0, 0)
                 panel_layout.addWidget(radio)
                 status.setWordWrap(True)
                 panel_layout.addWidget(status)
@@ -284,25 +320,31 @@ class AnalysisDialog(QDialog):
             layout.addWidget(splitter, 1)
         else:
             self.youtube_table.hide()
-            layout.addWidget(self.local_table, 1)
+            self.youtube_panel.hide()
+            local_layout = QVBoxLayout(self.local_panel)
+            local_layout.addWidget(self.local_status)
+            local_layout.addWidget(self.local_table)
+            layout.addWidget(self.local_panel, 1)
 
         controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         controls.button(QDialogButtonBox.StandardButton.Close).setText("Keep Drafts && Close")
         self.scan_button = QPushButton(
             "Run Whisper" if self.source_choice else "Scan Video"
         )
-        self.scan_button.setObjectName("primary")
+        self.scan_button.setAutoDefault(False)
         self.scan_button.clicked.connect(self.start_scan)
         controls.addButton(self.scan_button, QDialogButtonBox.ButtonRole.ActionRole)
         self.cancel_button = QPushButton("Cancel Scan")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_scan)
         controls.addButton(self.cancel_button, QDialogButtonBox.ButtonRole.ActionRole)
-        self.preview_button = QPushButton("Preview Row")
+        self.preview_button = QPushButton("Play Selected Line")
         self.preview_button.setEnabled(False)
         self.preview_button.clicked.connect(self.preview_current_row)
         controls.addButton(self.preview_button, QDialogButtonBox.ButtonRole.ActionRole)
         self.add_button = QPushButton("Add Checked Suggestions")
+        self.add_button.setObjectName("primary")
+        self.add_button.setDefault(True)
         self.add_button.setEnabled(False)
         self.add_button.clicked.connect(self.accept_suggestions)
         controls.addButton(self.add_button, QDialogButtonBox.ButtonRole.AcceptRole)
@@ -325,7 +367,9 @@ class AnalysisDialog(QDialog):
         self.source_group.buttonToggled.connect(self._source_changed)
         for table in (self.youtube_table, self.local_table):
             table.itemChanged.connect(self._draft_edited)
+            table.itemSelectionChanged.connect(self._update_selection_controls)
         self._update_selection_controls()
+        self._update_scan_button()
         if review:
             self.progress_label.setText("Saved drafts restored; choose a source or rerun local analysis.")
         elif self.source_choice:
@@ -389,16 +433,41 @@ class AnalysisDialog(QDialog):
     def _update_selection_controls(self) -> None:
         usable = bool(self.table.rowCount()) and self.table.isEnabled()
         self.add_button.setEnabled(usable and not self._close_after_cancel)
-        self.preview_button.setEnabled(usable and not self._close_after_cancel)
-        if self.source_choice:
-            source = "YouTube" if self.youtube_radio.isChecked() else "Whisper"
+        self.preview_button.setEnabled(
+            usable and self.table.currentRow() >= 0 and not self._close_after_cancel
+        )
+        source = "YouTube" if self.source_choice and self.youtube_radio.isChecked() else self.local_source
+        if source in {"YouTube", "Whisper"}:
             self.add_button.setText(f"Use {source} Transcript")
+            self.preview_button.setText(f"Play Selected {source} Line")
         else:
-            self.add_button.setText("Add Checked Suggestions")
+            self.add_button.setText("Use Detected Ranges")
+            self.preview_button.setText("Play Selected Range")
+        self.preview_button.setToolTip(
+            "Play the selected line's In/Out range in the source video. Select a line first."
+        )
+
+    def _update_scan_button(self) -> None:
+        whisper = self.source_choice or self.whisper_check.isChecked()
+        if self.worker is not None:
+            self.scan_button.setText("Whisper Running..." if self.worker.use_whisper else "Scanning Audio...")
+            self.scan_button.setEnabled(False)
+        else:
+            rerun = self.analysis_result is not None or bool(self.local_table.rowCount())
+            self.scan_button.setText(
+                ("Rerun Whisper..." if rerun else "Run Whisper")
+                if whisper else ("Rescan Audio..." if rerun else "Scan Audio")
+            )
+            self.scan_button.setEnabled(not self._close_after_cancel)
+        self.scan_button.setToolTip(
+            "Generate a new local draft. To import an existing result, use the highlighted transcript button."
+        )
 
     def _whisper_toggled(self, checked: bool) -> None:
         self.model_combo.setEnabled(checked)
         self.language_combo.setEnabled(checked)
+        if hasattr(self, "scan_button"):
+            self._update_scan_button()
         if not checked:
             self.setup_label.setText(
                 "No model download. Suggestions will contain activity ranges with blank captions."
@@ -489,6 +558,7 @@ class AnalysisDialog(QDialog):
             str(self.language_combo.currentData()),
         )
         self.worker = worker
+        self._update_scan_button()
         worker.progress.connect(self._progress)
         worker.completed.connect(self._completed)
         worker.failed.connect(self._failed)
@@ -500,6 +570,8 @@ class AnalysisDialog(QDialog):
     @Slot(str, int)
     def _progress(self, message: str, value: int) -> None:
         self.progress_label.setText(message)
+        if self.worker is not None:
+            self.local_status.setText(message)
         if value < 0:
             self.progress_bar.setRange(0, 0)
         else:
@@ -513,6 +585,9 @@ class AnalysisDialog(QDialog):
             return
         self.analysis_result = value
         self.local_source = "Whisper" if value.model_name else "Audio activity"
+        self.local_panel.setTitle(
+            "Whisper Transcript" if value.model_name else "Detected Audio Ranges"
+        )
         suggestions = [
             item for item in value.suggestions if item.source == "Whisper"
         ] if self.source_choice else value.suggestions
@@ -566,7 +641,7 @@ class AnalysisDialog(QDialog):
                 table.setItem(row, 5, confidence)
 
     def _set_idle(self) -> None:
-        self.scan_button.setEnabled(self.worker is None and not self._close_after_cancel)
+        self._update_scan_button()
         self.cancel_button.setEnabled(False)
         self.local_table.setEnabled(True)
         self._update_selection_controls()
@@ -581,13 +656,15 @@ class AnalysisDialog(QDialog):
         self.progress_label.setText("Analysis failed")
         self.local_status.setText("Local analysis failed; any saved draft is unchanged.")
         self._set_idle()
-        QMessageBox.critical(self, "Video analysis failed", message)
+        QMessageBox.critical(
+            self, "Video analysis failed", f"{message}\n\nDiagnostic log: {self.log_path}"
+        )
 
     @Slot()
     def _canceled(self) -> None:
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
-        self.progress_label.setText("Analysis canceled")
+        self.progress_label.setText("Analysis canceled; diagnostic log retained.")
         self.local_status.setText("Local analysis canceled; any saved draft is unchanged.")
         self._set_idle()
 
@@ -631,6 +708,7 @@ class AnalysisDialog(QDialog):
         return selected
 
     def preview_current_row(self) -> None:
+        self._commit_draft_editors()
         row = self.table.currentRow()
         if row >= 0:
             self.preview_row(row)
@@ -708,6 +786,8 @@ class AnalysisDialog(QDialog):
     def cancel_scan(self) -> None:
         if self.worker and self.worker.isRunning():
             self.worker.requestInterruption()
+            self.scan_button.setText("Canceling...")
+            self.cancel_button.setEnabled(False)
             self.progress_label.setText("Canceling analysis; current captions will be kept...")
 
     def reject(self) -> None:

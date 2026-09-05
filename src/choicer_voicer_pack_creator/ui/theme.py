@@ -60,8 +60,8 @@ QPushButton {
 QPushButton:hover { background: #1c3047; border-color: #49cddd; }
 QPushButton:pressed { background: #102030; }
 QPushButton:disabled { color: #617086; background: #111720; border-color: #202a38; }
-QPushButton#primary { background: #087a8d; border-color: #33d1df; color: white; }
-QPushButton#primary:hover { background: #0994aa; }
+QPushButton#primary:enabled { background: #087a8d; border-color: #33d1df; color: white; }
+QPushButton#primary:enabled:hover { background: #0994aa; }
 QPushButton#danger { color: #ff9999; border-color: #733b47; }
 QPushButton#danger:hover { background: #512832; }
 QTableWidget {
