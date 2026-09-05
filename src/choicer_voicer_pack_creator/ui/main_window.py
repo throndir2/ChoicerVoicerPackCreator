@@ -254,7 +254,10 @@ class MainWindow(QMainWindow):
         self.action_split.setShortcut(QKeySequence("Ctrl+Shift+S"))
         self.action_split.triggered.connect(self.split_segment)
         self.action_delete = QAction("Delete Segment", self)
-        self.action_delete.setShortcut(QKeySequence("Ctrl+Delete"))
+        self.action_delete.setShortcuts(
+            [QKeySequence(Qt.Key.Key_Backspace), QKeySequence("Ctrl+Delete")]
+        )
+        self.action_delete.setAutoRepeat(False)
         self.action_delete.triggered.connect(self.delete_segment)
         self.action_duplicate = QAction("Duplicate Segment", self)
         self.action_duplicate.setShortcut(QKeySequence("Ctrl+D"))

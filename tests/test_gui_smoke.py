@@ -226,6 +226,154 @@ def playback_window(qtbot, tmp_path: Path, monkeypatch):
     return window, calls
 
 
+@pytest.mark.parametrize("widget_name", ["timeline", "segment_table", "video_widget"])
+@pytest.mark.parametrize(
+    ("key", "modifier"),
+    [
+        (Qt.Key.Key_Backspace, Qt.KeyboardModifier.NoModifier),
+        (Qt.Key.Key_Delete, Qt.KeyboardModifier.ControlModifier),
+    ],
+)
+@pytest.mark.parametrize("confirmed", [False, True], ids=["cancel", "confirm"])
+def test_delete_shortcuts_use_existing_segment_confirmation(
+    qtbot, playback_window, monkeypatch, widget_name: str, key, modifier, confirmed: bool
+) -> None:
+    window, _calls = playback_window
+    selected = window.selected_segment()
+    other = Segment(3, 4, "Keep this line", ["Another speaker"])
+    window.project.add_segment(other)
+    window._refresh_table()
+    questions: list[str] = []
+
+    def confirm(_parent, _title, message):
+        questions.append(message)
+        return QMessageBox.StandardButton.Yes if confirmed else QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, "question", confirm)
+    widget = getattr(window, widget_name)
+    widget.setFocus()
+    qtbot.waitUntil(widget.hasFocus)
+
+    qtbot.keyClick(widget, key, modifier)
+
+    assert len(questions) == 1
+    assert selected.caption in questions[0]
+    assert window.project.segments == ([other] if confirmed else [selected, other])
+    assert window.segment_table.rowCount() == (1 if confirmed else 2)
+    assert window.timeline.segments == window.project.segments
+    assert window.selected_segment() == (None if confirmed else selected)
+    assert window.dirty == confirmed
+
+
+@pytest.mark.parametrize(
+    "widget_name",
+    [
+        "title_edit", "authors_edit", "readme_edit", "speakers_edit", "caption_edit",
+        "mark_in_spin", "mark_out_spin", "head_pad_spin", "tail_pad_spin",
+        "height_spin", "fps_spin",
+    ],
+)
+def test_backspace_remains_available_in_editors(
+    qtbot, playback_window, monkeypatch, widget_name: str
+) -> None:
+    window, _calls = playback_window
+    selected = window.selected_segment()
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *_args: pytest.fail("Editing must not delete a segment")
+    )
+    editor = getattr(window, widget_name)
+    editor.setFocus()
+    qtbot.waitUntil(editor.hasFocus)
+    editor.selectAll()
+
+    qtbot.keyClick(editor, Qt.Key.Key_Backspace)
+    qtbot.keyClick(editor, Qt.Key.Key_Backspace)
+
+    text = editor.toPlainText() if hasattr(editor, "toPlainText") else editor.text()
+    assert text.strip() == ("s" if widget_name in {"mark_in_spin", "mark_out_spin"} else "")
+    assert window.project.segments == [selected]
+
+
+@pytest.mark.parametrize("blocked", ["no-selection", "busy"])
+def test_backspace_does_not_delete_without_an_available_action(
+    qtbot, playback_window, monkeypatch, blocked: str
+) -> None:
+    window, _calls = playback_window
+    segments = list(window.project.segments)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *_args: pytest.fail("Deletion should be unavailable")
+    )
+    if blocked == "no-selection":
+        window.selected_segment_id = ""
+        window._refresh_table()
+        window._sync_selected_editor()
+    else:
+        window._set_busy(True, "Exporting")
+    window.setFocus()
+    qtbot.waitUntil(window.hasFocus)
+
+    qtbot.keyClick(window, Qt.Key.Key_Backspace)
+
+    assert window.project.segments == segments
+    assert not window.dirty
+
+
+def test_holding_backspace_does_not_repeat_confirmation(
+    qtbot, playback_window, monkeypatch
+) -> None:
+    window, _calls = playback_window
+    questions: list[str] = []
+
+    def decline(_parent, _title, message):
+        questions.append(message)
+        return QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, "question", decline)
+    window.timeline.setFocus()
+    qtbot.waitUntil(window.timeline.hasFocus)
+
+    qtbot.keyPress(window.timeline, Qt.Key.Key_Backspace)
+    for _ in range(3):
+        QApplication.sendEvent(
+            window.timeline,
+            QKeyEvent(
+                QEvent.Type.KeyPress, Qt.Key.Key_Backspace, Qt.KeyboardModifier.NoModifier,
+                "\b", True,
+            ),
+        )
+    qtbot.keyRelease(window.timeline, Qt.Key.Key_Backspace)
+
+    assert len(questions) == 1
+    assert len(window.project.segments) == 1
+    assert not window.dirty
+
+
+@pytest.mark.parametrize("modal", [False, True], ids=["modeless", "modal"])
+def test_backspace_in_a_dialog_does_not_delete_a_segment(
+    qtbot, playback_window, monkeypatch, modal: bool
+) -> None:
+    window, _calls = playback_window
+    selected = window.selected_segment()
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *_args: pytest.fail("Dialogs must not delete a segment")
+    )
+    dialog = QDialog(window)
+    qtbot.addWidget(dialog)
+    dialog.setModal(modal)
+    button = QPushButton("Dialog action", dialog)
+    dialog.show()
+    dialog.activateWindow()
+    button.setFocus()
+    qtbot.waitUntil(dialog.isActiveWindow)
+    qtbot.waitUntil(button.hasFocus)
+
+    qtbot.keyClick(button, Qt.Key.Key_Backspace)
+
+    assert window.project.segments == [selected]
+    assert not window.dirty
+    dialog.close()
+
+
 @pytest.mark.parametrize(
     "widget_name",
     [

@@ -21,6 +21,8 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Extracts and displays a zoomable waveform.
 - Marks precise In/Out points in seconds.
 - Adds, previews, splits, duplicates, deletes, and re-times segments.
+  Press **Backspace** (or **Ctrl+Delete**) to delete the selected segment after confirmation;
+  Backspace still works normally when editing text or numbers.
 - Resizes or collapses Pack Details, Segments, and Selected Segment so the segment list can use
 	most of the sidebar when needed.
 - Freely shrinks or fully collapses the video/timeline pane; drag the thin divider back to reopen it.
