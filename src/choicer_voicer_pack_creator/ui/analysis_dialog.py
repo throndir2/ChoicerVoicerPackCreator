@@ -223,6 +223,7 @@ class AnalysisDialog(QDialog):
         self.existing_segments = existing_segments
         self.worker: AnalysisWorker | None = None
         self._scan_canceled = False
+        self._whisper_after_refinement = False
         self._close_after_cancel = False
         self._accept_after_cancel = False
         self._accepted_suggestions: list[AnalysisSuggestion] = []
@@ -378,7 +379,7 @@ class AnalysisDialog(QDialog):
         }[selected].setChecked(True)
         self.youtube_status = QLabel()
         self.refined_status = QLabel(
-            "Refine the original imported words using local audio pauses; no model download. "
+            "New YouTube imports are refined automatically using local audio pauses; no model download. "
             "Music can hide pauses, and speaker changes are not detected."
         )
         self.local_status = QLabel("Whisper has not run yet.")
@@ -508,7 +509,13 @@ class AnalysisDialog(QDialog):
             self.progress_label.setText("Choose YouTube now or wait for the separate Whisper transcript.")
         if auto_start:
             diagnostic_event("analysis_auto_start_scheduled")
-            QTimer.singleShot(0, self.start_scan)
+            if self.source_captions and review is None:
+                self.progress_label.setText(
+                    "Refining YouTube captions automatically before the separate Whisper transcript."
+                )
+                QTimer.singleShot(0, self._start_automatic_refinement)
+            else:
+                QTimer.singleShot(0, self.start_scan)
 
     @property
     def table(self) -> QTableWidget:
@@ -719,6 +726,16 @@ class AnalysisDialog(QDialog):
                     return
         self._start_worker(use_whisper=use_whisper)
 
+    def _start_automatic_refinement(self) -> None:
+        if self.worker is not None or self._close_after_cancel or self._scan_canceled:
+            diagnostic_event(
+                "automatic_refinement_skipped", already_running=self.worker is not None,
+                closing=self._close_after_cancel, canceled=self._scan_canceled,
+            )
+            return
+        self._whisper_after_refinement = True
+        self.start_refinement()
+
     def start_refinement(self) -> None:
         if self.worker is not None or self._close_after_cancel:
             return
@@ -911,6 +928,7 @@ class AnalysisDialog(QDialog):
 
     @Slot(str)
     def _failed(self, message: str) -> None:
+        self._whisper_after_refinement = False
         diagnostic_event("analysis_failure_displayed", message=message)
         if self._scan_canceled or self._close_after_cancel:
             self._canceled()
@@ -929,6 +947,7 @@ class AnalysisDialog(QDialog):
 
     @Slot()
     def _canceled(self) -> None:
+        self._whisper_after_refinement = False
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
         self.progress_label.setText("Analysis canceled; diagnostic log retained.")
@@ -946,6 +965,9 @@ class AnalysisDialog(QDialog):
         self._set_idle()
         if self._close_after_cancel:
             self._finish_review()
+        elif self._whisper_after_refinement:
+            self._whisper_after_refinement = False
+            self.start_scan()
 
     def checked_suggestions(self) -> list[AnalysisSuggestion]:
         selected: list[AnalysisSuggestion] = []
@@ -1056,6 +1078,7 @@ class AnalysisDialog(QDialog):
             super().reject()
 
     def cancel_scan(self) -> None:
+        self._whisper_after_refinement = False
         diagnostic_event("analysis_cancel_requested", running=self.worker is not None)
         if self.worker is not None:
             self._scan_canceled = True
