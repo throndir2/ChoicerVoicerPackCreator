@@ -1432,6 +1432,25 @@ class MainWindow(QMainWindow):
         if self._preview_end is not None and position >= self._preview_end:
             self.player.pause()
             self._preview_end = None
+        self._follow_playback_segment(position)
+
+    def _follow_playback_segment(self, position: float) -> None:
+        if (
+            self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState
+            or self._stopped_seek_active
+            or self._preview_end is not None
+            or self._range_edit_record is not None
+            or self._syncing
+        ):
+            return
+        # Follow the latest start, keeping simultaneous-speaker selections stable.
+        segment = max(
+            (item for item in self.project.segments if item.start <= position < item.end),
+            key=lambda item: (item.start, item.id == self.selected_segment_id),
+            default=None,
+        )
+        if segment is not None and segment.id != self.selected_segment_id:
+            self._show_selected_segment(segment)
 
     def _player_duration_changed(self, milliseconds: int) -> None:
         if milliseconds <= 0:
@@ -1451,6 +1470,8 @@ class MainWindow(QMainWindow):
             and not self._stopped_seek_active
             else "▶ Play"
         )
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self._follow_playback_segment(self.current_position())
 
     def _player_error(self, _error: QMediaPlayer.Error, message: str) -> None:
         diagnostic_event("video_player_error", error_code=_error.name, message=message)
@@ -1608,9 +1629,14 @@ class MainWindow(QMainWindow):
         if not segment:
             return
         self.prompt_player.stop()
-        self.selected_segment_id = segment_id
-        self.timeline.set_selected(segment_id)
-        self._select_table_row(segment_id)
+        self._show_selected_segment(segment)
+        self._preview_end = None
+        self.seek(segment.start)
+
+    def _show_selected_segment(self, segment: Segment) -> None:
+        self.selected_segment_id = segment.id
+        self.timeline.set_selected(segment.id)
+        self._select_table_row(segment.id)
         self._sync_selected_editor()
         self._syncing = True
         try:
@@ -1619,8 +1645,6 @@ class MainWindow(QMainWindow):
         finally:
             self._syncing = False
         self.timeline.set_marks(segment.start, segment.end, segment.id)
-        self._preview_end = None
-        self.seek(segment.start)
 
     def selected_segment(self) -> Segment | None:
         return self.project.segment_by_id(self.selected_segment_id)
@@ -1857,6 +1881,7 @@ class MainWindow(QMainWindow):
             if item and item.data(Qt.ItemDataRole.UserRole) == segment_id:
                 with QSignalBlocker(self.segment_table):
                     self.segment_table.selectRow(row)
+                self.segment_table.scrollToItem(item)
                 return
 
     def _table_selection_changed(self) -> None:
@@ -1937,6 +1962,9 @@ class MainWindow(QMainWindow):
                 item.strip() for item in self.speakers_edit.text().split(",") if item.strip()
             )
         )
+        row = self._row_for_segment(segment.id)
+        if row >= 0:
+            self.segment_table.item(row, 3).setText(", ".join(segment.characters))
         self.video_widget.set_segments(self.project.segments)
         self._set_dirty(True)
         self._refresh_validation_label()

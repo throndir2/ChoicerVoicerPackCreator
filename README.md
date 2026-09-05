@@ -15,9 +15,13 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
   as you edit, follow seeking and segment timings, and work with saved projects and imported packs.
   Overlapping lines are shown together; source video and exports are not changed.
 - Keeps the decoded video frame visible when seeking while playback is stopped.
-- Cues playback to a segment's In point when selected or clicked in the list or timeline,
+- Cues playback to a segment's In point when you select or click it in the list or timeline,
   including another click on the selected segment. Scrub the playhead or click the waveform
   to seek to an exact point instead.
+- Automatically selects and scrolls to each active segment during video playback, keeping the
+  Selected Segment editor in sync without interrupting playback. Gaps keep the current selection;
+  overlapping lines follow the most recently started segment. Paused editing and single-segment
+  previews keep their selection.
 - Extracts and displays a zoomable waveform.
 - Marks precise In/Out points in seconds.
 - Adds, previews, splits, duplicates, deletes, and re-times segments.
