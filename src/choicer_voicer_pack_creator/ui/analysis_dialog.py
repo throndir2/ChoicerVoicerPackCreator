@@ -409,6 +409,8 @@ class AnalysisDialog(QDialog):
         self.youtube_tabs = QTabWidget()
         if self.source_choice:
             splitter = QSplitter(Qt.Orientation.Horizontal)
+            splitter.setObjectName("transcriptSplitter")
+            splitter.setHandleWidth(1)
             for panel, radio, status, table in (
                 (self.youtube_panel, self.youtube_radio, self.youtube_status, self.youtube_table),
                 (self.refined_panel, self.refined_radio, self.refined_status, self.refined_table),
