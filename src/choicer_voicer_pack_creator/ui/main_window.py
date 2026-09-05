@@ -16,7 +16,6 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QKeySequence
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
-from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -68,6 +67,7 @@ from choicer_voicer_pack_creator.ui.analysis_dialog import (
     save_diagnostic_logs,
 )
 from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
+from choicer_voicer_pack_creator.ui.subtitles import SubtitleVideoWidget
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
 from choicer_voicer_pack_creator.ui.update_controller import UpdateController
 from choicer_voicer_pack_creator.ui.youtube_dialog import YouTubeDialog
@@ -319,9 +319,12 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(7, 7, 7, 7)
         left_layout.setSpacing(7)
 
-        self.video_widget = QVideoWidget(left)
+        self.video_widget = SubtitleVideoWidget(left)
+        self.video_widget.setObjectName("videoPreview")
         self.video_widget.setMinimumHeight(320)
-        self.video_widget.setStyleSheet("background: #000; border: 1px solid #26384d;")
+        self.video_widget.setStyleSheet(
+            "QGraphicsView#videoPreview { background: #000; border: 1px solid #26384d; }"
+        )
         left_layout.addWidget(self.video_widget, 1)
 
         transport = QHBoxLayout()
@@ -351,6 +354,7 @@ class MainWindow(QMainWindow):
 
         self.timeline = TimelineWidget(left)
         self.timeline.setToolTip(
+            "Drag the white playback line or its top arrow to scrub. "
             "Drag IN/OUT handles to trim, drag inside the highlighted waveform range to move it, "
             "or drag across empty waveform space to define a range. Segment blocks can also be "
             "moved by their center or trimmed by their edges."
@@ -363,6 +367,7 @@ class MainWindow(QMainWindow):
         self.timeline.zoom_changed.connect(self._timeline_zoom_changed)
         left_layout.addWidget(self.timeline)
         timeline_hint = QLabel(
+            "Drag the white playback line or its top arrow to scrub. "
             "Drag the waveform highlight or its IN/OUT handles to edit a range. "
             "Drag a segment block to move it, or drag its edges to trim."
         )
@@ -776,7 +781,7 @@ class MainWindow(QMainWindow):
         self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(0.8)
         self.player.setAudioOutput(self.audio_output)
-        self.player.setVideoOutput(self.video_widget)
+        self.player.setVideoSink(self.video_widget.videoSink())
         self.video_widget.videoSink().videoFrameChanged.connect(self._video_frame_changed)
         self.player.positionChanged.connect(self._player_position_changed)
         self.player.durationChanged.connect(self._player_duration_changed)
@@ -1255,6 +1260,7 @@ class MainWindow(QMainWindow):
             self._start_waveform(project.video_path, project.video_duration)
         else:
             self.player.setSource(QUrl())
+        self.video_widget.set_position(self.current_position())
         self._set_dirty(mark_dirty)
         self._refresh_validation_label()
 
@@ -1325,6 +1331,7 @@ class MainWindow(QMainWindow):
 
     def seek(self, seconds: float) -> None:
         target_ms = int(max(0.0, seconds) * 1000)
+        self.video_widget.set_position(target_ms / 1000.0)
         if (
             self.player.playbackState() == QMediaPlayer.PlaybackState.StoppedState
             or self._stopped_seek_active
@@ -1372,6 +1379,7 @@ class MainWindow(QMainWindow):
         self.player.pause()
         self.audio_output.setMuted(self._stopped_seek_audio_was_muted)
         self.timeline.set_playhead(target_ms / 1000.0)
+        self.video_widget.set_position(target_ms / 1000.0)
         self._playback_state_changed(self.player.playbackState())
 
     @Slot()
@@ -1403,6 +1411,9 @@ class MainWindow(QMainWindow):
     def _player_position_changed(self, milliseconds: int) -> None:
         position = milliseconds / 1000.0
         self.timeline.set_playhead(position)
+        self.video_widget.set_position(
+            self._stopped_seek_target_ms / 1000.0 if self._stopped_seek_active else position
+        )
         if not self._slider_dragging and self.project.video_duration > 0:
             self.seek_slider.setValue(int(position / self.project.video_duration * 100_000))
         self.position_label.setText(
@@ -1628,6 +1639,7 @@ class MainWindow(QMainWindow):
         if not segment:
             return
         segment.start, segment.end = start, end
+        self.video_widget.set_segments(self.project.segments)
         self.selected_segment_id = segment_id
         self._set_dirty(True)
         row = self._row_for_segment(segment_id)
@@ -1788,6 +1800,7 @@ class MainWindow(QMainWindow):
         finally:
             self.segment_table.blockSignals(False)
         self.timeline.set_segments(self.project.segments)
+        self.video_widget.set_segments(self.project.segments)
         if selected:
             self._select_table_row(selected)
         self._refresh_validation_label()
@@ -1914,6 +1927,7 @@ class MainWindow(QMainWindow):
                 item.strip() for item in self.speakers_edit.text().split(",") if item.strip()
             )
         )
+        self.video_widget.set_segments(self.project.segments)
         self._set_dirty(True)
         self._refresh_validation_label()
 
@@ -1924,6 +1938,7 @@ class MainWindow(QMainWindow):
         if not segment:
             return
         segment.caption = self.caption_edit.toPlainText()
+        self.video_widget.set_segments(self.project.segments)
         self._set_dirty(True)
         row = self._row_for_segment(segment.id)
         if row >= 0:
@@ -2006,6 +2021,7 @@ class MainWindow(QMainWindow):
             )
             segment.caption = self.caption_edit.toPlainText()
         if self.project.to_dict() != before:
+            self.video_widget.set_segments(self.project.segments)
             self._set_dirty(True)
 
     def choose_source_video(self) -> None:

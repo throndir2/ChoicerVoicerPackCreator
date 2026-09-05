@@ -10,6 +10,9 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Downloads a single YouTube video from its URL and offers YouTube and local Whisper transcripts
   side by side, each with its own text and timings.
 - Plays the source video inside the editor.
+- Overlays each segment's line during playback with its speaker(s) above it. Subtitles update
+  as you edit, follow seeking and segment timings, and work with saved projects and imported packs.
+  Overlapping lines are shown together; source video and exports are not changed.
 - Keeps the decoded video frame visible when seeking while playback is stopped.
 - Cues playback to a segment's In point whenever that segment is selected.
 - Extracts and displays a zoomable waveform.
@@ -328,7 +331,8 @@ hide pauses and two speakers without a pause can still share a row. It does not 
 misrecognized words, perform forced alignment, or separate overlapping voices.
 
 Choose the preferred source, then click **Use Refined YouTube Transcript** or **Use Whisper
-Transcript**.
+Transcript**. Click a row in that draft or its **Select**
+control to choose the source; merely finishing a background Whisper run does not select it.
 The checked rows from that source become editable project segments with that source's timings
 and no assigned speakers. Other sources are not mixed in. Playback also uses the chosen draft's
 own edited In/Out range. Choosing an available draft while another scan runs stops that scan.
@@ -336,9 +340,16 @@ Existing project segments are never
 silently replaced; adding another set requires confirmation.
 
 If captions are unavailable, the same automatic Whisper pass drafts suggestions from the audio.
-Declining Whisper setup or a failed/canceled Whisper scan leaves downloaded media and the
-Refined YouTube draft intact. If automatic refinement fails or is canceled, no original rows are
-shown as a fallback and Whisper does not start automatically; either pass can be retried manually.
+Declining Whisper setup or a failed/canceled/empty Whisper scan leaves downloaded media and all
+existing drafts intact. **Whisper model (next scan)** and **Spoken language (next scan)** affect
+only a new run; they do not select or change an existing transcript. The current local draft
+shows the model and detected language from its last successful nonempty scan, also after
+saving and reopening the project. Older drafts without model information say **model not recorded**.
+If a larger model fails due to memory limits, select **Select Whisper transcript** (or click
+one of its rows), then **Use Whisper Transcript** to use the retained draft without rerunning.
+If all rows are unchecked, check at least one before using the transcript.
+If automatic refinement fails, is canceled, or returns no rows, no original rows are shown as a
+fallback and Whisper does not start automatically; either pass can be retried manually.
 Any previously completed refined draft is retained.
 **Cancel Scan** keeps the analysis window open. **Keep Drafts & Close** stops a running scan and
 retains all available drafts, including edits, checked rows, source selection, and the pause setting, without adding
@@ -361,6 +372,8 @@ attempt access-restriction workarounds. An authorized local copy can still be op
 
 ### Direct waveform editing
 
+- Drag the white playback line or its top arrow to scrub without changing any ranges. The arrow
+  remains draggable when the line overlaps an In/Out handle or a segment block.
 - Drag across empty waveform space to define a new In/Out range.
 - Drag the cyan **IN** or orange **OUT** handle to trim the range precisely.
 - Drag inside the highlighted waveform range to move it without changing its duration.

@@ -234,6 +234,8 @@ class AnalysisDialog(QDialog):
             review and (review.youtube_rows or review.refined_rows)
         )
         self.local_source = review.local_source if review else "Whisper"
+        self.local_model_name = review.local_model_name if review else ""
+        self.local_detected_language = review.local_detected_language if review else ""
         self.analysis_result: AnalysisResult | None = None
         self.hardware = detect_hardware()
         diagnostic_event(
@@ -292,7 +294,10 @@ class AnalysisDialog(QDialog):
         self.model_combo.currentIndexChanged.connect(
             lambda _index: self._whisper_toggled(self.whisper_check.isChecked())
         )
-        options.addRow("Whisper model", self.model_combo)
+        self.model_combo.setToolTip(
+            "Model for the next scan only. Changing it does not change or select the current draft."
+        )
+        options.addRow("Whisper model (next scan)", self.model_combo)
 
         self.language_combo = QComboBox()
         for label, code in (
@@ -315,7 +320,10 @@ class AnalysisDialog(QDialog):
                 self.language_combo.addItem(spoken_language, spoken_language)
                 index = self.language_combo.count() - 1
             self.language_combo.setCurrentIndex(index)
-        options.addRow("Spoken language", self.language_combo)
+        self.language_combo.setToolTip(
+            "Language for the next scan only. The current draft keeps its text and timings."
+        )
+        options.addRow("Spoken language (next scan)", self.language_combo)
 
         hardware_label = QLabel(self.hardware.description)
         hardware_label.setWordWrap(True)
@@ -366,11 +374,15 @@ class AnalysisDialog(QDialog):
         if self.source_choice:
             self.refined_table.setColumnHidden(5, True)
             self.local_table.setColumnHidden(4, True)
-        self.refined_radio = QRadioButton("YouTube text + audio-pause boundaries")
-        self.local_radio = QRadioButton("Whisper text + timings")
+        self.refined_radio = QRadioButton("Select Refined YouTube transcript")
+        self.local_radio = QRadioButton("Select Whisper transcript")
         self.source_group = QButtonGroup(self)
-        self.source_group.addButton(self.refined_radio)
-        self.source_group.addButton(self.local_radio)
+        for radio in (self.refined_radio, self.local_radio):
+            radio.setToolTip(
+                "Select this draft's text and timings for the highlighted Use action. "
+                "This does not run analysis."
+            )
+            self.source_group.addButton(radio)
         selected = review.selected_source if review else (
             "refined" if self.source_captions else "local"
         )
@@ -387,6 +399,8 @@ class AnalysisDialog(QDialog):
             "No original YouTube caption evidence is available. Reimport the video to retrieve it."
         )
         self.local_status = QLabel("Whisper has not run yet.")
+        self.local_draft_label = QLabel()
+        self.local_draft_label.setWordWrap(True)
         self.refined_panel = QGroupBox("Refined YouTube", self)
         self.local_panel = QGroupBox(
             "Whisper Transcript" if self.local_source == "Whisper" else "Detected Audio Ranges",
@@ -421,6 +435,8 @@ class AnalysisDialog(QDialog):
                 panel_layout.addWidget(radio)
                 status.setWordWrap(True)
                 panel_layout.addWidget(status)
+                if panel is self.local_panel:
+                    panel_layout.addWidget(self.local_draft_label)
                 if panel is self.refined_panel:
                     refine_options = QHBoxLayout()
                     refine_options.addWidget(QLabel("Minimum pause"))
@@ -438,7 +454,9 @@ class AnalysisDialog(QDialog):
             self.pause_spin.hide()
             self.refine_button.hide()
             local_layout = QVBoxLayout(self.local_panel)
+            self.local_status.setWordWrap(True)
             local_layout.addWidget(self.local_status)
+            local_layout.addWidget(self.local_draft_label)
             local_layout.addWidget(self.local_table)
             layout.addWidget(self.local_panel, 1)
 
@@ -475,7 +493,6 @@ class AnalysisDialog(QDialog):
                     f"Saved Refined YouTube draft: {len(review.refined_rows)} rows. "
                     "Review Source notes for timing limitations."
                 )
-        self.refined_radio.setEnabled(bool(self.refined_table.rowCount()))
         if not self.source_captions and not self.refined_table.rowCount():
             self.local_radio.setChecked(True)
         self.source_group.buttonToggled.connect(self._source_changed)
@@ -483,6 +500,12 @@ class AnalysisDialog(QDialog):
         for table in (self.refined_table, self.local_table):
             table.itemChanged.connect(self._draft_edited)
             table.itemSelectionChanged.connect(self._update_selection_controls)
+            table.cellClicked.connect(
+                lambda _row, _column, table=table: self._select_table(table)
+            )
+            table.cellActivated.connect(
+                lambda _row, _column, table=table: self._select_table(table)
+            )
         self._update_selection_controls()
         self._update_scan_button()
         if review:
@@ -537,6 +560,7 @@ class AnalysisDialog(QDialog):
             list(self._original_youtube_rows), self._draft_rows(self.local_table),
             self.selected_source, self.local_source,
             self._draft_rows(self.refined_table), self.pause_spin.value(),
+            self.local_model_name, self.local_detected_language,
         )
 
     @staticmethod
@@ -555,7 +579,15 @@ class AnalysisDialog(QDialog):
         if item.column() == 3 and item.toolTip() != item.text():
             with QSignalBlocker(item.tableWidget()):
                 item.setToolTip(item.text())
+        self._update_selection_controls()
         self.review_changed.emit(self.review_state())
+
+    def _select_table(self, table: QTableWidget) -> None:
+        if not self._close_after_cancel and table.isEnabled() and table.rowCount():
+            {
+                self.refined_table: self.refined_radio,
+                self.local_table: self.local_radio,
+            }[table].setChecked(True)
 
     def _source_changed(self, _button: QWidget, checked: bool) -> None:
         if checked:
@@ -563,8 +595,38 @@ class AnalysisDialog(QDialog):
             self.review_changed.emit(self.review_state())
 
     def _update_selection_controls(self) -> None:
+        sources = (
+            (self.refined_radio, self.refined_table),
+            (self.local_radio, self.local_table),
+        )
+        for radio, table in sources:
+            radio.setEnabled(bool(table.rowCount()) and not self._close_after_cancel)
+        if not self.table.rowCount():
+            for radio, table in sources:
+                if table.rowCount():
+                    radio.setChecked(True)
+                    break
+        self.local_radio.setText(
+            "Select Whisper transcript" if self.local_source == "Whisper" else "Select detected ranges"
+        )
+        if self.local_table.rowCount():
+            details = ""
+            if self.local_source == "Whisper":
+                details = f" ({self.local_model_name or 'model not recorded'}"
+                if self.local_detected_language:
+                    details += f"; detected {self.local_detected_language}"
+                details += ")"
+            self.local_draft_label.setText(
+                f"Current draft: {self.local_table.rowCount()} {self.local_source} rows{details}."
+            )
+        else:
+            self.local_draft_label.setText("No current local draft is available.")
         usable = bool(self.table.rowCount()) and self.table.isEnabled()
-        self.add_button.setEnabled(usable and not self._close_after_cancel)
+        checked = any(
+            self.table.item(row, 0).checkState() == Qt.CheckState.Checked
+            for row in range(self.table.rowCount())
+        )
+        self.add_button.setEnabled(usable and checked and not self._close_after_cancel)
         self.preview_button.setEnabled(
             usable and self.table.currentRow() >= 0 and not self._close_after_cancel
         )
@@ -580,6 +642,10 @@ class AnalysisDialog(QDialog):
         self.preview_button.setToolTip(
             "Play the selected line's In/Out range in the source video. Select a line first."
         )
+        self.add_button.setToolTip(
+            "Import checked rows from the selected draft without running analysis. "
+            "Click a row or its Select control to choose a transcript; check at least one row."
+        )
 
     def _update_scan_button(self) -> None:
         whisper = self.source_choice or self.whisper_check.isChecked()
@@ -590,7 +656,7 @@ class AnalysisDialog(QDialog):
             )
             self.scan_button.setEnabled(False)
         else:
-            rerun = self.analysis_result is not None or bool(self.local_table.rowCount())
+            rerun = bool(self.local_table.rowCount())
             self.scan_button.setText(
                 ("Rerun Whisper..." if rerun else "Run Whisper")
                 if whisper else ("Rescan Audio..." if rerun else "Scan Audio")
@@ -659,6 +725,7 @@ class AnalysisDialog(QDialog):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 diagnostic_event("analysis_scan_declined", reason="keep_existing_draft")
+                self.progress_label.setText(f"Scan not started. {self._recovery_hint()}")
                 return
         use_whisper = self.source_choice or self.whisper_check.isChecked()
         model_key = str(self.model_combo.currentData())
@@ -667,7 +734,9 @@ class AnalysisDialog(QDialog):
                 manager = WhisperManager(self.data_root)
             except Exception as error:
                 diagnostic_exception("whisper_setup_unavailable", error)
-                QMessageBox.critical(self, "Whisper setup is unavailable", str(error))
+                hint = self._recovery_hint()
+                self.progress_label.setText(f"Whisper not started. {hint}")
+                QMessageBox.critical(self, "Whisper setup is unavailable", f"{error}\n\n{hint}")
                 return
             model_missing = not manager.model_path(model_key).is_file()
             runtime_missing = not manager.cli_path.is_file()
@@ -693,7 +762,7 @@ class AnalysisDialog(QDialog):
                 )
                 if answer != QMessageBox.StandardButton.Yes:
                     self.progress_label.setText(
-                        "Whisper not started. You can still edit and add available captions."
+                        f"Whisper not started. {self._recovery_hint()}"
                     )
                     return
         self._start_worker(use_whisper=use_whisper)
@@ -731,13 +800,12 @@ class AnalysisDialog(QDialog):
                 QMessageBox.StandardButton.Cancel,
             )
             if answer != QMessageBox.StandardButton.Yes:
+                self._whisper_after_refinement = False
                 return
         self._start_worker(use_whisper=False, refine=True)
 
     def _start_worker(self, *, use_whisper: bool, refine: bool = False) -> None:
         self._scan_canceled = False
-        if not refine:
-            self.analysis_result = None
         self.scan_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         target_table = self.refined_table if refine else self.local_table
@@ -810,6 +878,9 @@ class AnalysisDialog(QDialog):
             self._failed("Analysis returned an unexpected result")
             return
         if value.refined_captions is not None:
+            if not value.refined_captions:
+                self._empty_result(refine=True)
+                return
             self._populate_rows(self.refined_table, [
                 AnalysisDraftRow(f"{cue.start:.3f}", f"{cue.end:.3f}", cue.text, cue.source)
                 for cue in value.refined_captions
@@ -833,14 +904,19 @@ class AnalysisDialog(QDialog):
             self._set_idle()
             self.review_changed.emit(self.review_state())
             return
-        self.analysis_result = value
-        self.local_source = "Whisper" if value.model_name else "Audio activity"
-        self.local_panel.setTitle(
-            "Whisper Transcript" if value.model_name else "Detected Audio Ranges"
-        )
         suggestions = [
             item for item in value.suggestions if item.source == "Whisper"
         ] if self.source_choice else value.suggestions
+        if not suggestions:
+            self._empty_result()
+            return
+        self.analysis_result = value
+        self.local_source = "Whisper" if value.model_name else "Audio activity"
+        self.local_model_name = value.model_name or ""
+        self.local_detected_language = value.detected_language or ""
+        self.local_panel.setTitle(
+            "Whisper Transcript" if value.model_name else "Detected Audio Ranges"
+        )
         self._populate(suggestions)
         self.local_status.setText(
             f"{len(suggestions)} {self.local_source} rows with their own text and timings."
@@ -856,6 +932,35 @@ class AnalysisDialog(QDialog):
         if self.local_table.rowCount():
             self.local_table.selectRow(0)
         self.review_changed.emit(self.review_state())
+
+    def _recovery_hint(self, *, refine: bool = False) -> str:
+        table = self.refined_table if refine else self.local_table
+        source = "Refined YouTube" if refine else self.local_source
+        if table.rowCount():
+            action = f"Use {source} Transcript" if source != "Audio activity" else "Use Detected Ranges"
+            selection = f"Select {source} transcript" if source != "Audio activity" else "Select detected ranges"
+            return (
+                f"The current {source} draft and edits are unchanged. "
+                + (
+                    f"Choose '{selection}' or click one of its rows, then click "
+                    if self.source_choice else "Click "
+                )
+                + f"'{action}' to use checked rows without rerunning."
+            )
+        return (
+            f"No {source} draft is available. Choose another available transcript, "
+            "or retry the scan with suitable settings."
+        )
+
+    def _empty_result(self, *, refine: bool = False) -> None:
+        self._whisper_after_refinement = False
+        diagnostic_event("analysis_empty_result_retained_drafts", refine=refine)
+        message = f"No new rows were found. {self._recovery_hint(refine=refine)}"
+        (self.refined_status if refine else self.local_status).setText(message)
+        self.progress_label.setText(message)
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(1000)
+        self._set_idle()
 
     def _populate(self, suggestions: list[AnalysisSuggestion]) -> None:
         self._populate_rows(self.local_table, [
@@ -910,14 +1015,14 @@ class AnalysisDialog(QDialog):
             return
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
-        self.progress_label.setText("Analysis failed")
-        if self.worker is not None and self.worker.source_captions is not None:
-            self.refined_status.setText("YouTube refinement failed; all saved drafts are unchanged.")
-        else:
-            self.local_status.setText("Local analysis failed; any saved draft is unchanged.")
+        refine = self.worker is not None and self.worker.source_captions is not None
+        hint = self._recovery_hint(refine=refine)
+        status = f"Analysis failed. {hint}"
+        self.progress_label.setText(status)
+        (self.refined_status if refine else self.local_status).setText(status)
         self._set_idle()
         QMessageBox.critical(
-            self, "Video analysis failed", f"{message}\n\nDiagnostic log: {self.log_path}"
+            self, "Video analysis failed", f"{message}\n\n{hint}\n\nDiagnostic log: {self.log_path}"
         )
 
     @Slot()
@@ -925,11 +1030,10 @@ class AnalysisDialog(QDialog):
         self._whisper_after_refinement = False
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
-        self.progress_label.setText("Analysis canceled; diagnostic log retained.")
-        if self.worker is not None and self.worker.source_captions is not None:
-            self.refined_status.setText("YouTube refinement canceled; all saved drafts are unchanged.")
-        else:
-            self.local_status.setText("Local analysis canceled; any saved draft is unchanged.")
+        refine = self.worker is not None and self.worker.source_captions is not None
+        status = f"Analysis canceled. {self._recovery_hint(refine=refine)}"
+        self.progress_label.setText(status)
+        (self.refined_status if refine else self.local_status).setText(status)
         self._set_idle()
 
     @Slot()
