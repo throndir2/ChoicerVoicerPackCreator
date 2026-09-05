@@ -16,6 +16,8 @@ from pathlib import Path
 import deno
 from ffmpeg_bundle import prepare_bundle
 
+from choicer_voicer_pack_creator.updates import write_portable_manifest
+
 ROOT = Path(__file__).resolve().parents[1]
 with (ROOT / "pyproject.toml").open("rb") as project_file:
     APP_VERSION = str(tomllib.load(project_file)["project"]["version"])
@@ -191,6 +193,7 @@ def build_candidate() -> int:
         if result.returncode != 0:
             print(f"Bundled tool failed to start: {executable}", file=sys.stderr)
             return 1
+    write_portable_manifest(app_dir, APP_VERSION)
     stable_archive = DIST / f"Choicer-Voicer-Pack-Creator-{APP_VERSION}-Windows-x64.zip"
     candidate_archive = portable_root / f".{stable_archive.name}.candidate"
     partial_archive = portable_root / f".{stable_archive.name}.partial"

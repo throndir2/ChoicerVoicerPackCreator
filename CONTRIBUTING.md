@@ -32,3 +32,11 @@ Pushes and pull requests do not run GitHub Actions. Complete all checks locally.
 committing the release version, a maintainer can manually run **Create GitHub Release** from the
 Actions page. That release-only workflow builds the validated portable ZIP and attaches it, together
 with a SHA-256 checksum, to a new versioned GitHub Release.
+
+The portable build also generates `portable-files.json` after all application files have been
+assembled. Keep this inventory and the exact versioned Windows ZIP/checksum asset names: the
+updater uses them to verify releases and distinguish shipped files from user-owned content.
+`Build-Portable.ps1` exercises the packaged updater, including its staged, Qt-free helper entry
+point, waiting for the old process, preserving extra files, and restarting the updated application.
+Keep `--apply-update` and `--update-result=` compatible across releases; source installations do
+not self-update. Never embed a GitHub token in the application.

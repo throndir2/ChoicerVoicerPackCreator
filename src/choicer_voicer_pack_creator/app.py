@@ -148,4 +148,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if smoke_test:
         window.dirty = False
         QTimer.singleShot(350, app.quit)
+    else:
+        result_argument = next(
+            (item.split("=", 1)[1] for item in arguments if item.startswith("--update-result=")),
+            None,
+        )
+        QTimer.singleShot(
+            0, lambda: window.updater.startup(Path(result_argument) if result_argument else None)
+        )
     return app.exec()
