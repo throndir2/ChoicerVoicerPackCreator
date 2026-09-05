@@ -24,7 +24,7 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
   previews keep their selection.
 - Extracts and displays a zoomable waveform.
 - Marks precise In/Out points in seconds.
-- Adds, previews, splits, duplicates, deletes, and re-times segments.
+- Adds, previews, splits, combines, duplicates, deletes, and re-times segments.
   Press **Backspace** (or **Ctrl+Delete**) to delete the selected segment after confirmation;
   Backspace still works normally when editing text or numbers.
 - Resizes or collapses Pack Details, Segments, and Selected Segment so the segment list can use
@@ -198,6 +198,21 @@ The activity bar stays indeterminate because these operations do not have a reli
 percentage. Keep the dialog open while export runs; **Close** becomes available only after
 the worker finishes. The dialog then keeps the output locations, cleanup notes, or failure
 details visible until dismissed.
+
+### Combine segments
+
+In the **Segments** list, use **Ctrl-click** to select individual rows or **Shift-click** to select
+a range, then click **Combine** (or **Segments > Combine Selected Segments**, `Ctrl+Shift+M`).
+The selected segments become one segment from the earliest In to the latest Out, including any
+gaps. Their nonempty lines are joined with spaces in timeline order, and their speakers are
+combined without duplicates. Unselected segments are left unchanged.
+
+The combined segment uses source-video audio. Preserved recordings must first be given precise
+source-video In/Out values using **Apply Range** and explicitly switched to regenerated audio.
+A custom still image is retained; if the selection contains different custom stills, the app
+asks before keeping the first one in timeline order. No source media files are deleted.
+Playback keeps a multi-selection intact so you can combine segments while listening.
+Select a single row again to edit or preview an individual segment and resume playback following.
 
 ### Analyze and transcribe a video
 

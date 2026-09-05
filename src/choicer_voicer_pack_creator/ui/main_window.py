@@ -4,6 +4,7 @@ import getpass
 from pathlib import Path
 
 from PySide6.QtCore import (
+    QItemSelectionModel,
     QSettings,
     QSignalBlocker,
     QStandardPaths,
@@ -255,6 +256,12 @@ class MainWindow(QMainWindow):
         self.action_split = QAction("Split at Playhead", self)
         self.action_split.setShortcut(QKeySequence("Ctrl+Shift+S"))
         self.action_split.triggered.connect(self.split_segment)
+        self.action_combine = QAction("Combine Selected Segments", self)
+        self.action_combine.setShortcut(QKeySequence("Ctrl+Shift+M"))
+        self.action_combine.setToolTip(
+            "Select multiple rows with Ctrl or Shift, then combine their ranges and lines."
+        )
+        self.action_combine.triggered.connect(self.combine_segments)
         self.action_delete = QAction("Delete Segment", self)
         self.action_delete.setShortcuts(
             [QKeySequence(Qt.Key.Key_Backspace), QKeySequence("Ctrl+Delete")]
@@ -277,7 +284,10 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.action_exit)
         edit_menu = self.menuBar().addMenu("&Segments")
         edit_menu.addActions(
-            [self.action_add, self.action_split, self.action_duplicate, self.action_delete]
+            [
+                self.action_add, self.action_split, self.action_combine,
+                self.action_duplicate, self.action_delete,
+            ]
         )
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self.action_analyze)
@@ -503,7 +513,8 @@ class MainWindow(QMainWindow):
             ["#", "In", "Out", "Speaker(s)", "Line", "Audio"]
         )
         self.segment_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.segment_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.segment_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        self.segment_table.setToolTip("Use Ctrl-click or Shift-click to select segments to combine.")
         self.segment_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.segment_table.setAlternatingRowColors(True)
         self.segment_table.verticalHeader().hide()
@@ -531,6 +542,13 @@ class MainWindow(QMainWindow):
                 button.setObjectName("danger")
             button.clicked.connect(handler)
             row_buttons.addWidget(button)
+        self.combine_button = QPushButton("Combine")
+        self.combine_button.setToolTip(self.action_combine.toolTip())
+        self.combine_button.clicked.connect(self.action_combine.trigger)
+        self.action_combine.changed.connect(
+            lambda: self.combine_button.setEnabled(self.action_combine.isEnabled())
+        )
+        row_buttons.addWidget(self.combine_button)
         row_buttons.addStretch()
         segment_layout.addLayout(row_buttons)
         self.segments_section.set_content(segment_content)
@@ -1263,7 +1281,7 @@ class MainWindow(QMainWindow):
             self.timeline.set_waveform([])
             self.timeline.set_segments(project.segments)
             self.timeline.set_marks(self.mark_in_spin.value(), self.mark_out_spin.value())
-            self._refresh_table()
+            self._refresh_table("")
             self._sync_selected_editor()
         finally:
             self._syncing = False
@@ -1443,6 +1461,7 @@ class MainWindow(QMainWindow):
             or self._preview_end is not None
             or self._range_edit_record is not None
             or self._syncing
+            or len(self._selected_table_ids()) > 1
         ):
             return
         # Follow the latest start, keeping simultaneous-speaker selections stable.
@@ -1590,6 +1609,45 @@ class MainWindow(QMainWindow):
             "Segment duplicated at the same timestamp—useful for simultaneous speakers."
         )
 
+    def combine_segments(self) -> None:
+        identifiers = self._selected_table_ids()
+        selected = sorted(
+            (segment for segment in self.project.segments if segment.id in identifiers),
+            key=lambda segment: (segment.start, segment.end),
+        )
+        images = list(dict.fromkeys(segment.image_path for segment in selected if segment.image_path))
+        discard_other_images = False
+        if len(images) > 1 and all(
+            segment.audio_mode == "video" and segment.source_range_known for segment in selected
+        ):
+            answer = QMessageBox.question(
+                self,
+                "Choose the combined still image",
+                f"The selected segments use different still images. Keep {Path(images[0]).name}, "
+                "the first custom still in timeline order, for the combined segment?\n\n"
+                "The other still images will no longer be attached to these segments. "
+                "No image files will be deleted.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            discard_other_images = True
+        try:
+            combined = self.project.combine_segments(
+                identifiers, discard_other_images=discard_other_images
+            )
+        except ValueError as error:
+            QMessageBox.information(self, "Cannot combine segments", str(error))
+            return
+        self._set_dirty(True)
+        self._refresh_table(combined.id)
+        self.select_segment(combined.id)
+        self.statusBar().showMessage(
+            f"Combined {len(selected)} segments. Lines and speakers were joined in timeline order; "
+            "the source-video range includes any gaps."
+        )
+
     def delete_segment(self) -> None:
         segment = self.selected_segment()
         if segment is None:
@@ -1639,6 +1697,7 @@ class MainWindow(QMainWindow):
         self.selected_segment_id = segment.id
         self.timeline.set_selected(segment.id)
         self._select_table_row(segment.id)
+        self._update_combine_action()
         self._sync_selected_editor()
         self._syncing = True
         try:
@@ -1811,10 +1870,13 @@ class MainWindow(QMainWindow):
             self._clear_recovery_snapshot()
 
     def _refresh_table(self, selected_id: str | None = None) -> None:
-        selected = selected_id if selected_id is not None else self.selected_segment_id
+        selected = self._selected_table_ids()
+        if selected_id is not None or len(selected) < 2:
+            selected = [selected_id if selected_id is not None else self.selected_segment_id]
         timeline_warnings = audit_timeline_overlaps(self.project.segments)
         self.segment_table.blockSignals(True)
         try:
+            self.segment_table.clearSelection()
             self.segment_table.setRowCount(len(self.project.segments))
             for row, segment in enumerate(self.project.segments):
                 values = (
@@ -1832,13 +1894,20 @@ class MainWindow(QMainWindow):
                     if column in {4, 5}:
                         item.setToolTip(value)
                     self.segment_table.setItem(row, column, item)
+                if segment.id in selected:
+                    self.segment_table.selectionModel().select(
+                        self.segment_table.model().index(row, 0),
+                        QItemSelectionModel.SelectionFlag.Select
+                        | QItemSelectionModel.SelectionFlag.Rows,
+                    )
             self._apply_timeline_review_highlights(timeline_warnings)
         finally:
             self.segment_table.blockSignals(False)
         self.timeline.set_segments(self.project.segments)
         self.video_widget.set_segments(self.project.segments)
-        if selected:
-            self._select_table_row(selected)
+        if selected_id is None:
+            self._table_selection_changed()
+        self._update_combine_action()
         self._refresh_validation_label()
 
     def _apply_timeline_review_highlights(self, warnings: list[TimelineOverlap]) -> None:
@@ -1882,20 +1951,40 @@ class MainWindow(QMainWindow):
             item = self.segment_table.item(row, 0)
             if item and item.data(Qt.ItemDataRole.UserRole) == segment_id:
                 with QSignalBlocker(self.segment_table):
-                    self.segment_table.selectRow(row)
+                    self.segment_table.selectionModel().setCurrentIndex(
+                        self.segment_table.model().index(row, 0),
+                        QItemSelectionModel.SelectionFlag.ClearAndSelect
+                        | QItemSelectionModel.SelectionFlag.Rows,
+                    )
                 self.segment_table.scrollToItem(item)
                 return
 
     def _table_selection_changed(self) -> None:
         if self._syncing:
             return
-        selected = self.segment_table.selectedItems()
-        if not selected:
-            return
-        row = selected[0].row()
-        identifier = self.segment_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        if identifier and identifier != self.selected_segment_id:
-            self.select_segment(str(identifier))
+        identifiers = self._selected_table_ids()
+        self._update_combine_action()
+        if len(identifiers) == 1:
+            if identifiers[0] != self.selected_segment_id:
+                self.select_segment(identifiers[0])
+        else:
+            self.prompt_player.stop()
+            self._preview_end = None
+            self.selected_segment_id = ""
+            self.timeline.set_selected("")
+            self.timeline.set_marks(self.mark_in_spin.value(), self.mark_out_spin.value())
+            self._sync_selected_editor()
+
+    def _selected_table_ids(self) -> list[str]:
+        return [
+            str(self.segment_table.item(index.row(), 0).data(Qt.ItemDataRole.UserRole))
+            for index in self.segment_table.selectionModel().selectedRows()
+        ]
+
+    def _update_combine_action(self) -> None:
+        self.action_combine.setEnabled(
+            self.editor_splitter.isEnabled() and len(self._selected_table_ids()) >= 2
+        )
 
     def _sync_selected_editor(self) -> None:
         segment = self.selected_segment()
@@ -1913,7 +2002,11 @@ class MainWindow(QMainWindow):
                 self.caption_edit.clear()
                 self.segment_audio_label.setText("None")
                 self.segment_image_label.setText("Generated from video")
+                count = len(self._selected_table_ids())
                 self.segment_audio_help.setText(
+                    f"{count} segments selected. Use Combine to join their ranges and lines, "
+                    "or select a single segment to edit it."
+                    if count > 1 else
                     "Select a segment to edit its range, prompt source, and still image."
                 )
                 return
@@ -2364,11 +2457,13 @@ class MainWindow(QMainWindow):
             self.action_export,
             self.action_add,
             self.action_split,
+            self.action_combine,
             self.action_delete,
             self.action_duplicate,
         ):
             action.setEnabled(not busy)
         self.editor_splitter.setEnabled(not busy)
+        self._update_combine_action()
 
     def _refresh_validation_label(self) -> None:
         errors = self.project.validate()
