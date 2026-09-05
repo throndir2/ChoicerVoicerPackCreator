@@ -269,6 +269,48 @@ class PackProject:
         self.segments = [item for item in self.segments if item.id != segment_id]
         return len(self.segments) != previous
 
+    def combine_segments(
+        self, segment_ids: list[str], *, discard_other_images: bool = False
+    ) -> Segment:
+        identifiers = set(segment_ids)
+        if len(identifiers) < 2:
+            raise ValueError("Select at least two segments to combine.")
+        selected = sorted(
+            (segment for segment in self.segments if segment.id in identifiers),
+            key=lambda segment: (segment.start, segment.end),
+        )
+        if len(selected) != len(identifiers):
+            raise ValueError("A selected segment no longer exists. Select the segments again.")
+        if any(segment.audio_mode != "video" or not segment.source_range_known for segment in selected):
+            raise ValueError(
+                "Preserved recordings cannot be combined safely. For each recording, mark the "
+                "exact source-video In/Out range, click Apply Range, and choose Yes to regenerate "
+                "its prompt audio. Then select the segments and combine them."
+            )
+        if any(
+            not math.isfinite(segment.start) or not math.isfinite(segment.end)
+            or segment.start < 0 or segment.end <= segment.start
+            for segment in selected
+        ):
+            raise ValueError("Correct the selected segments' In/Out ranges before combining them.")
+        images = list(dict.fromkeys(segment.image_path for segment in selected if segment.image_path))
+        if len(images) > 1 and not discard_other_images:
+            raise ValueError("Combining different still images requires choosing which image to keep.")
+        combined = Segment(
+            start=selected[0].start,
+            end=max(segment.end for segment in selected),
+            caption=" ".join(segment.caption.strip() for segment in selected if segment.caption.strip()),
+            characters=list(dict.fromkeys(
+                character for segment in selected for character in segment.characters
+            )),
+            image_path=images[0] if images else "",
+        )
+        self.segments = [
+            segment for segment in self.segments if segment.id not in identifiers
+        ]
+        self.add_segment(combined)
+        return combined
+
     def validate(self) -> list[str]:
         errors: list[str] = []
         if not self.title.strip():

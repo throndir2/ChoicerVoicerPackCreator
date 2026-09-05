@@ -17,7 +17,7 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Cues playback to a segment's In point whenever that segment is selected.
 - Extracts and displays a zoomable waveform.
 - Marks precise In/Out points in seconds.
-- Adds, previews, splits, duplicates, deletes, and re-times segments.
+- Adds, previews, splits, combines, duplicates, deletes, and re-times segments.
 - Resizes or collapses Pack Details, Segments, and Selected Segment so the segment list can use
 	most of the sidebar when needed.
 - Freely shrinks or fully collapses the video/timeline pane; drag the thin divider back to reopen it.
@@ -181,6 +181,20 @@ If `py` is unavailable, invoke your installed Python executable directly.
 9. Optionally choose a clean backing track and custom icon.
 10. Save the editable project.
 11. Choose **Export Pack + ZIP** and select an output directory.
+
+### Combine segments
+
+In the **Segments** list, use **Ctrl-click** to select individual rows or **Shift-click** to select
+a range, then click **Combine** (or **Segments > Combine Selected Segments**, `Ctrl+Shift+M`).
+The selected segments become one segment from the earliest In to the latest Out, including any
+gaps. Their nonempty lines are joined with spaces in timeline order, and their speakers are
+combined without duplicates. Unselected segments are left unchanged.
+
+The combined segment uses source-video audio. Preserved recordings must first be given precise
+source-video In/Out values using **Apply Range** and explicitly switched to regenerated audio.
+A custom still image is retained; if the selection contains different custom stills, the app
+asks before keeping the first one in timeline order. No source media files are deleted.
+Select a single row again to edit or preview an individual segment.
 
 ### Analyze and transcribe a video
 

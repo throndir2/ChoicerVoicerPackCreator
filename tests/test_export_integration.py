@@ -130,6 +130,18 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
     assert file_hash(modified.pack_path / "001_Alice.mp3") == original_audio_hash
     assert file_hash(modified.pack_path / "001_Alice.png") == original_image_hash
 
+    project.combine_segments([segment.id for segment in reversed(project.segments)])
+    combined = PackExporter(media).export(project, tmp_path / "combined-output")
+    assert combined.validation["status"] == "passed"
+    assert combined.validation["clip_count"] == 1
+    assert combined.validation["file_count"] == 7
+    combined_metadata = read_config(combined.pack_path / "001_Alice.txt")["data"]
+    assert combined_metadata["caption"] == "First line Second line"
+    assert combined_metadata["dub_characters"] == ["Alice", "Bob"]
+    assert combined_metadata["dub_timestamps"] == [0.1]
+    combined_duration = media.probe_audio_duration(combined.pack_path / "001_Alice.mp3")
+    assert combined_duration == pytest.approx(1.55 - 0.2 + 0.1 + 0.15, abs=0.05)
+
 
 @pytest.mark.integration
 def test_export_rejects_silent_and_out_of_bounds_source_content(tmp_path: Path) -> None:
