@@ -595,8 +595,16 @@ def test_download_total_deadline_is_enforced(
         )
 
 
-def test_whisper_parser_uses_lexical_token_bounds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("invalid_edge", [
+    None, "missing-first", "missing-last", "zero-first", "zero-last",
+    "nonfinite", "negative", "outside-segment", "backwards",
+])
+@pytest.mark.parametrize(("segment_bounds", "expected"), [
+    ((0, 12240), (0, 12)),
+    ((400, 5400), (0.25, 5.65)),
+])
+def test_whisper_parser_preserves_segment_envelope_instead_of_trusting_token_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_edge, segment_bounds, expected,
 ) -> None:
     wav_path = tmp_path / "source.wav"
     with wave.open(str(wav_path), "wb") as output:
@@ -621,20 +629,37 @@ def test_whisper_parser_uses_lexical_token_bounds(
         _kwargs["output_line"]("whisper_print_progress_callback: progress =  40%")
         _kwargs["tick"](3)
         output_base = Path(command[command.index("--output-file") + 1])
+        tokens = [
+            {"text": " Hello", "offsets": {"from": 500, "to": 1500}, "p": 0.9},
+            {"text": " there", "offsets": {"from": 1600, "to": 3000}, "p": 0.8},
+            {"text": ".", "offsets": {"from": 3100, "to": 11990}, "p": 0.9},
+            {"text": "[_TT_612]", "offsets": {"from": 12240, "to": 12240}, "p": 0.2},
+        ]
+        if invalid_edge == "missing-first":
+            tokens[0].pop("offsets")
+        elif invalid_edge == "missing-last":
+            tokens[1].pop("offsets")
+        elif invalid_edge == "zero-first":
+            tokens[0]["offsets"]["to"] = 500
+        elif invalid_edge == "zero-last":
+            tokens[1]["offsets"]["from"] = 3000
+        elif invalid_edge == "nonfinite":
+            tokens[0]["offsets"]["from"] = float("nan")
+        elif invalid_edge == "negative":
+            tokens[0]["offsets"]["from"] = -1
+        elif invalid_edge == "outside-segment":
+            tokens[1]["offsets"]["to"] = 13000
+        elif invalid_edge == "backwards":
+            tokens[1]["offsets"] = {"from": 300, "to": 1000}
         output_base.with_suffix(".json").write_text(
             json.dumps(
                 {
                     "result": {"language": "en"},
                     "transcription": [
                         {
-                            "offsets": {"from": 0, "to": 12240},
+                            "offsets": {"from": segment_bounds[0], "to": segment_bounds[1]},
                             "text": "Hello there.",
-                            "tokens": [
-                                {"text": " Hello", "offsets": {"from": 500, "to": 1500}, "p": 0.9},
-                                {"text": " there", "offsets": {"from": 1600, "to": 3000}, "p": 0.8},
-                                {"text": ".", "offsets": {"from": 3100, "to": 11990}, "p": 0.9},
-                                {"text": "[_TT_612]", "offsets": {"from": 12240, "to": 12240}, "p": 0.2},
-                            ],
+                            "tokens": tokens,
                         }
                     ],
                 }
@@ -656,9 +681,7 @@ def test_whisper_parser_uses_lexical_token_bounds(
     )
 
     assert language == "en"
-    assert suggestions == [
-        AnalysisSuggestion(0.42, 3.12, "Hello there.", "Whisper", 0.867)
-    ]
+    assert suggestions == [AnalysisSuggestion(*expected, "Hello there.", "Whisper", 0.867)]
     assert any("Loading" in message and "elapsed" in message for message, _ in progress)
     assert any("first audio block" in message for message, _ in progress)
     measured = [fraction for message, fraction in progress if "% of audio" in message]

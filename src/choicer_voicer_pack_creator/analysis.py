@@ -20,7 +20,7 @@ import wave
 import zipfile
 from array import array
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any
 
@@ -31,7 +31,7 @@ try:
 except ImportError:  # Removed from Python 3.13; retain the pure-Python fallback.
     _audio_rms = None
 
-from choicer_voicer_pack_creator.captions import refine_captions
+from choicer_voicer_pack_creator.captions import pad_source_ranges, refine_captions
 from choicer_voicer_pack_creator.diagnostics import (
     diagnostic_event,
     diagnostic_exception,
@@ -834,29 +834,15 @@ class WhisperManager:
                 end = float(offsets["to"]) / 1000.0
             except (KeyError, TypeError, ValueError):
                 continue
+            if not math.isfinite(start) or not math.isfinite(end):
+                raise AnalysisError("Whisper produced a non-finite transcript timestamp")
             start = max(0.0, min(audio_duration, start))
             end = max(0.0, min(audio_duration, end))
             caption = " ".join(str(item.get("text", "")).split())
             if not caption or end - start < 0.05:
                 continue
-            lexical_tokens = [
-                token
-                for token in item.get("tokens", [])
-                if isinstance(token, dict)
-                and str(token.get("text", "")).strip()
-                and any(character.isalnum() for character in str(token.get("text", "")))
-                and not str(token.get("text", "")).startswith("[")
-                and isinstance(token.get("offsets"), dict)
-                and isinstance(token["offsets"].get("from"), (int, float))
-                and isinstance(token["offsets"].get("to"), (int, float))
-                and float(token["offsets"]["to"]) > float(token["offsets"]["from"])
-            ]
-            if lexical_tokens:
-                lexical_start = min(float(token["offsets"]["from"]) for token in lexical_tokens)
-                lexical_end = max(float(token["offsets"]["to"]) for token in lexical_tokens)
-                if lexical_end - lexical_start >= 50:
-                    start = max(0.0, lexical_start / 1000.0 - 0.08)
-                    end = min(audio_duration, lexical_end / 1000.0 + 0.12)
+            # Token offsets are estimates, not forced alignment. Even complete, monotonic
+            # lexical times can omit a final word; keep the segment envelope for review.
             probabilities = [
                 float(token["p"])
                 for token in item.get("tokens", [])
@@ -867,13 +853,21 @@ class WhisperManager:
             confidence = sum(probabilities) / len(probabilities) if probabilities else None
             suggestions.append(
                 AnalysisSuggestion(
-                    start=round(start, 3),
-                    end=round(end, 3),
+                    start=start,
+                    end=end,
                     caption=caption,
                     source="Whisper",
                     confidence=round(confidence, 3) if confidence is not None else None,
                 )
             )
+        padded = pad_source_ranges(
+            [(item.start, item.end) for item in suggestions], audio_duration,
+            check_cancel=lambda: _check_cancel(cancelled),
+        )
+        suggestions = [
+            replace(item, start=round(start, 3), end=min(audio_duration, round(end, 3)))
+            for item, (start, end) in zip(suggestions, padded, strict=True)
+        ]
         progress(f"Whisper produced {len(suggestions)} transcript region(s).", 1.0)
         diagnostic_event(
             "whisper_transcript_parsed", regions=len(suggestions), detected_language=detected_language,

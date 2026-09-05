@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
     QStyleOptionViewItem,
     QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -43,6 +42,7 @@ from choicer_voicer_pack_creator.analysis import (
     analyze_video,
     detect_hardware,
 )
+from choicer_voicer_pack_creator.captions import SOURCE_HEAD_PADDING, SOURCE_TAIL_PADDING
 from choicer_voicer_pack_creator.diagnostics import (
     AnalysisDiagnostics,
     analysis_log_path,
@@ -228,6 +228,8 @@ class AnalysisDialog(QDialog):
         self._accept_after_cancel = False
         self._accepted_suggestions: list[AnalysisSuggestion] = []
         self.source_captions = list(source_captions or [])
+        # Retain legacy original-draft edits in project files, never as a selectable transcript.
+        self._original_youtube_rows = list(review.youtube_rows) if review else []
         self.source_choice = youtube_import or bool(self.source_captions) or bool(
             review and (review.youtube_rows or review.refined_rows)
         )
@@ -252,12 +254,16 @@ class AnalysisDialog(QDialog):
         layout = QVBoxLayout(self)
         intro = QLabel(
             (
-                "Choose original YouTube, Refined YouTube, or Whisper. Each draft keeps its own "
+                "Choose Refined YouTube or Whisper. YouTube rows appear only after processing. "
+                "Each draft keeps its own "
                 "text and timings; only checked rows from the selected source are added. "
                 "Closing saves all drafts without adding segments. "
                 if self.source_choice else
                 "Create editable starting points from local audio. Activity scanning is deterministic. "
             ) +
+            f"Caption drafts include up to {SOURCE_HEAD_PADDING:.2f}s before and "
+            f"{SOURCE_TAIL_PADDING:.2f}s after of source audio, limited by neighboring rows. "
+            "Adjust In/Out when reviewing. "
             "Whisper can suggest text and timestamps, but it can be wrong—especially for names, "
             "stylized speech, music, and overlapping speakers. Token scores are not accuracy "
             "guarantees, and no speaker is assigned automatically."
@@ -362,41 +368,39 @@ class AnalysisDialog(QDialog):
         progress_row.addWidget(self.progress_bar)
         layout.addLayout(progress_row)
 
-        self.youtube_table = self._create_table()
         self.refined_table = self._create_table()
         self.refined_table.setMinimumHeight(140)
         self.local_table = self._create_table()
         if self.source_choice:
-            self.youtube_table.setColumnHidden(5, True)
             self.refined_table.setColumnHidden(5, True)
             self.local_table.setColumnHidden(4, True)
-        self.youtube_radio = QRadioButton("Select YouTube transcript")
         self.refined_radio = QRadioButton("Select Refined YouTube transcript")
         self.local_radio = QRadioButton("Select Whisper transcript")
         self.source_group = QButtonGroup(self)
-        for radio in (self.youtube_radio, self.refined_radio, self.local_radio):
+        for radio in (self.refined_radio, self.local_radio):
             radio.setToolTip(
                 "Select this draft's text and timings for the highlighted Use action. "
                 "This does not run analysis."
             )
             self.source_group.addButton(radio)
         selected = review.selected_source if review else (
-            "youtube" if self.source_captions else "local"
+            "refined" if self.source_captions else "local"
         )
+        if selected == "youtube":
+            selected = "refined"
         {
-            "youtube": self.youtube_radio,
             "refined": self.refined_radio,
             "local": self.local_radio,
         }[selected].setChecked(True)
-        self.youtube_status = QLabel()
         self.refined_status = QLabel(
-            "New YouTube imports are refined automatically using local audio pauses; no model download. "
-            "Music can hide pauses, and speaker changes are not detected."
+            "YouTube captions are waiting for refinement; no unprocessed rows are shown. "
+            "Uses local audio pauses with no model download. Music can hide pauses."
+            if self.source_captions else
+            "No original YouTube caption evidence is available. Reimport the video to retrieve it."
         )
         self.local_status = QLabel("Whisper has not run yet.")
         self.local_draft_label = QLabel()
         self.local_draft_label.setWordWrap(True)
-        self.youtube_panel = QGroupBox("YouTube Captions", self)
         self.refined_panel = QGroupBox("Refined YouTube", self)
         self.local_panel = QGroupBox(
             "Whisper Transcript" if self.local_source == "Whisper" else "Detected Audio Ranges",
@@ -419,13 +423,11 @@ class AnalysisDialog(QDialog):
             "Create a separate draft from original imported captions, not your edited drafts. "
             "Uses local audio only. Wait for or cancel any running scan first."
         )
-        self.youtube_tabs = QTabWidget()
         if self.source_choice:
             splitter = QSplitter(Qt.Orientation.Horizontal)
             splitter.setObjectName("transcriptSplitter")
             splitter.setHandleWidth(1)
             for panel, radio, status, table in (
-                (self.youtube_panel, self.youtube_radio, self.youtube_status, self.youtube_table),
                 (self.refined_panel, self.refined_radio, self.refined_status, self.refined_table),
                 (self.local_panel, self.local_radio, self.local_status, self.local_table),
             ):
@@ -442,20 +444,13 @@ class AnalysisDialog(QDialog):
                     refine_options.addWidget(self.refine_button)
                     panel_layout.addLayout(refine_options)
                 panel_layout.addWidget(table)
-            self.youtube_tabs.addTab(self.youtube_panel, "Original YouTube")
-            self.youtube_tabs.addTab(self.refined_panel, "Refined YouTube")
-            self.youtube_tabs.setCurrentIndex(1 if selected == "refined" else 0)
-            self.youtube_tabs.currentChanged.connect(self._youtube_tab_changed)
-            splitter.addWidget(self.youtube_tabs)
+            splitter.addWidget(self.refined_panel)
             splitter.addWidget(self.local_panel)
             splitter.setChildrenCollapsible(False)
             layout.addWidget(splitter, 1)
         else:
-            self.youtube_table.hide()
-            self.youtube_panel.hide()
             self.refined_table.hide()
             self.refined_panel.hide()
-            self.youtube_tabs.hide()
             self.pause_spin.hide()
             self.refine_button.hide()
             local_layout = QVBoxLayout(self.local_panel)
@@ -489,10 +484,6 @@ class AnalysisDialog(QDialog):
         controls.addButton(self.add_button, QDialogButtonBox.ButtonRole.AcceptRole)
         controls.rejected.connect(self.reject)
         layout.addWidget(controls)
-        self._populate_rows(self.youtube_table, review.youtube_rows if review else [
-            AnalysisDraftRow(f"{cue.start:.3f}", f"{cue.end:.3f}", cue.text, cue.source)
-            for cue in self.source_captions
-        ])
         if review:
             self._populate_rows(self.local_table, review.local_rows)
             self._populate_rows(self.refined_table, review.refined_rows)
@@ -500,15 +491,13 @@ class AnalysisDialog(QDialog):
             if review.refined_rows:
                 self.refined_status.setText(
                     f"Saved Refined YouTube draft: {len(review.refined_rows)} rows. "
-                    "Review Source notes for limited timing or unchanged ranges."
+                    "Review Source notes for timing limitations."
                 )
-        self.youtube_status.setText(
-            f"{self.youtube_table.rowCount()} YouTube caption rows."
-            if self.youtube_table.rowCount() else "No YouTube captions are available for this video."
-        )
+        if not self.source_captions and not self.refined_table.rowCount():
+            self.local_radio.setChecked(True)
         self.source_group.buttonToggled.connect(self._source_changed)
         self.pause_spin.valueChanged.connect(lambda _value: self.review_changed.emit(self.review_state()))
-        for table in (self.youtube_table, self.refined_table, self.local_table):
+        for table in (self.refined_table, self.local_table):
             table.itemChanged.connect(self._draft_edited)
             table.itemSelectionChanged.connect(self._update_selection_controls)
             table.cellClicked.connect(
@@ -522,32 +511,29 @@ class AnalysisDialog(QDialog):
         if review:
             self.progress_label.setText("Saved drafts restored; choose a source or regenerate a draft.")
         elif self.source_choice:
-            self.progress_label.setText("Choose YouTube now or wait for the separate Whisper transcript.")
-        if auto_start:
-            diagnostic_event("analysis_auto_start_scheduled")
-            if self.source_captions and review is None:
-                self.progress_label.setText(
-                    "Refining YouTube captions automatically before the separate Whisper transcript."
-                )
+            self.progress_label.setText("Process YouTube captions or run the separate Whisper transcript.")
+        needs_refinement = bool(self.source_captions) and not (review and review.refined_rows)
+        if needs_refinement and (auto_start or review is not None):
+            self.progress_label.setText("Refining YouTube captions before showing their draft.")
+            if auto_start and review is None:
                 QTimer.singleShot(0, self._start_automatic_refinement)
             else:
-                QTimer.singleShot(0, self.start_scan)
+                QTimer.singleShot(0, self._start_pending_refinement)
+        elif auto_start:
+            diagnostic_event("analysis_auto_start_scheduled")
+            QTimer.singleShot(0, self.start_scan)
 
     @property
     def table(self) -> QTableWidget:
         return {
-            "youtube": self.youtube_table,
             "refined": self.refined_table,
             "local": self.local_table,
         }[self.selected_source]
 
     @property
     def selected_source(self) -> str:
-        if self.source_choice:
-            if self.youtube_radio.isChecked():
-                return "youtube"
-            if self.refined_radio.isChecked():
-                return "refined"
+        if self.source_choice and self.refined_radio.isChecked():
+            return "refined"
         return "local"
 
     def _create_table(self) -> QTableWidget:
@@ -571,7 +557,7 @@ class AnalysisDialog(QDialog):
 
     def review_state(self) -> AnalysisReview:
         return AnalysisReview(
-            self._draft_rows(self.youtube_table), self._draft_rows(self.local_table),
+            list(self._original_youtube_rows), self._draft_rows(self.local_table),
             self.selected_source, self.local_source,
             self._draft_rows(self.refined_table), self.pause_spin.value(),
             self.local_model_name, self.local_detected_language,
@@ -599,27 +585,18 @@ class AnalysisDialog(QDialog):
     def _select_table(self, table: QTableWidget) -> None:
         if not self._close_after_cancel and table.isEnabled() and table.rowCount():
             {
-                self.youtube_table: self.youtube_radio,
                 self.refined_table: self.refined_radio,
                 self.local_table: self.local_radio,
             }[table].setChecked(True)
 
     def _source_changed(self, _button: QWidget, checked: bool) -> None:
         if checked:
-            if self.selected_source in {"youtube", "refined"}:
-                self.youtube_tabs.setCurrentIndex(1 if self.selected_source == "refined" else 0)
             self._update_selection_controls()
             self.review_changed.emit(self.review_state())
-
-    def _youtube_tab_changed(self, index: int) -> None:
-        radio = self.refined_radio if index == 1 else self.youtube_radio
-        if radio.isEnabled() and not self._close_after_cancel:
-            radio.setChecked(True)
 
     def _update_selection_controls(self) -> None:
         sources = (
             (self.refined_radio, self.refined_table),
-            (self.youtube_radio, self.youtube_table),
             (self.local_radio, self.local_table),
         )
         for radio, table in sources:
@@ -654,9 +631,9 @@ class AnalysisDialog(QDialog):
             usable and self.table.currentRow() >= 0 and not self._close_after_cancel
         )
         source = {
-            "youtube": "YouTube", "refined": "Refined YouTube", "local": self.local_source,
+            "refined": "Refined YouTube", "local": self.local_source,
         }[self.selected_source]
-        if source in {"YouTube", "Refined YouTube", "Whisper"}:
+        if source in {"Refined YouTube", "Whisper"}:
             self.add_button.setText(f"Use {source} Transcript")
             self.preview_button.setText(f"Play Selected {source} Line")
         else:
@@ -738,7 +715,7 @@ class AnalysisDialog(QDialog):
                 self,
                 "Replace local analysis draft?",
                 "A successful scan will replace the local draft and its edits. "
-                "The original and Refined YouTube drafts will not change. "
+                "The Refined YouTube draft will not change. "
                 "A failed or canceled scan keeps all drafts. "
                 "Continue?" if self.source_choice else
                 "A successful scan will replace the current draft and its edits. "
@@ -791,13 +768,16 @@ class AnalysisDialog(QDialog):
         self._start_worker(use_whisper=use_whisper)
 
     def _start_automatic_refinement(self) -> None:
+        self._start_pending_refinement(start_whisper=True)
+
+    def _start_pending_refinement(self, *, start_whisper: bool = False) -> None:
         if self.worker is not None or self._close_after_cancel or self._scan_canceled:
             diagnostic_event(
                 "automatic_refinement_skipped", already_running=self.worker is not None,
                 closing=self._close_after_cancel, canceled=self._scan_canceled,
             )
             return
-        self._whisper_after_refinement = True
+        self._whisper_after_refinement = start_whisper
         self.start_refinement()
 
     def start_refinement(self) -> None:
@@ -814,8 +794,8 @@ class AnalysisDialog(QDialog):
                 self,
                 "Replace Refined YouTube draft?",
                 "A successful refinement will replace only the Refined YouTube draft and its edits, "
-                "using the original imported captions. Your original YouTube and Whisper drafts "
-                "will not change. A failed or canceled scan keeps all drafts. Continue?",
+                "using the original imported captions. Your Whisper draft will not change. "
+                "A failed or canceled scan keeps all drafts. Continue?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             )
@@ -907,7 +887,7 @@ class AnalysisDialog(QDialog):
             ])
             self.refined_status.setText(
                 f"{len(value.refined_captions)} Refined YouTube rows. "
-                "Review Source notes for limited timing or unchanged ranges. "
+                "Review Source notes for timing limitations. "
                 "Music can hide pauses; speaker changes are not detected."
             )
             self.refined_radio.setEnabled(bool(self.refined_table.rowCount()))
@@ -917,7 +897,7 @@ class AnalysisDialog(QDialog):
             elif self.refined_radio.isChecked():
                 self.local_radio.setChecked(True)
             self.progress_label.setText(
-                "YouTube refinement complete; original YouTube and local drafts are unchanged."
+                "YouTube refinement complete; the local draft is unchanged."
             )
             self.progress_bar.setRange(0, 1000)
             self.progress_bar.setValue(1000)
@@ -1069,6 +1049,8 @@ class AnalysisDialog(QDialog):
             self.start_scan()
 
     def checked_suggestions(self) -> list[AnalysisSuggestion]:
+        if not self.table.isEnabled():
+            raise ValueError("Wait for this transcript to finish processing before using it.")
         selected: list[AnalysisSuggestion] = []
         for row in range(self.table.rowCount()):
             use = self.table.item(row, 0)
@@ -1107,6 +1089,11 @@ class AnalysisDialog(QDialog):
 
     def preview_row(self, row: int, table: QTableWidget | None = None) -> None:
         table = self.table if table is None else table
+        if not table.isEnabled():
+            QMessageBox.information(
+                self, "Transcript processing", "Wait for this transcript to finish processing."
+            )
+            return
         try:
             start = float(table.item(row, 1).text())
             end = float(table.item(row, 2).text())
@@ -1154,7 +1141,6 @@ class AnalysisDialog(QDialog):
         self._close_after_cancel = True
         self.review_changed.emit(self.review_state())
         if self.worker is not None:
-            self.youtube_table.setEnabled(False)
             self.refined_table.setEnabled(False)
             self.local_table.setEnabled(False)
             self._update_selection_controls()
@@ -1163,7 +1149,7 @@ class AnalysisDialog(QDialog):
             self._finish_review()
 
     def _commit_draft_editors(self) -> None:
-        for table in (self.youtube_table, self.refined_table, self.local_table):
+        for table in (self.refined_table, self.local_table):
             delegate = table.itemDelegate()
             if isinstance(delegate, DraftDelegate):
                 delegate.commit_pending()

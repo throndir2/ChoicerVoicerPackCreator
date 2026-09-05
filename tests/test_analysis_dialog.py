@@ -6,7 +6,15 @@ from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtWidgets import QDialog, QFileDialog, QLineEdit, QMessageBox, QSplitter
+from PySide6.QtWidgets import (
+    QDialog,
+    QFileDialog,
+    QLineEdit,
+    QMessageBox,
+    QSplitter,
+    QTableWidget,
+    QTabWidget,
+)
 
 from choicer_voicer_pack_creator.analysis import (
     AnalysisCancelled,
@@ -33,6 +41,16 @@ class UnusedMedia:
     pass
 
 
+def complete_refinement(dialog):
+    dialog._completed(AnalysisResult(
+        [], 1, 0, -30, None, None, detect_hardware(),
+        refined_captions=[
+            SourceCaption(cue.start, cue.end, cue.text, "Refined YouTube")
+            for cue in dialog.source_captions
+        ],
+    ))
+
+
 @pytest.fixture
 def installed_whisper(tmp_path, monkeypatch):
     runtime = tmp_path / "runtime"
@@ -48,9 +66,8 @@ def installed_whisper(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
-@pytest.mark.parametrize("tab_index", [0, 1], ids=["original", "refined"])
 def test_transcript_divider_has_a_thin_gap_and_remains_draggable(
-    qtbot, tmp_path: Path, stylesheet: str, tab_index: int,
+    qtbot, tmp_path: Path, stylesheet: str,
 ) -> None:
     dialog = AnalysisDialog(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
@@ -58,15 +75,14 @@ def test_transcript_divider_has_a_thin_gap_and_remains_draggable(
     )
     qtbot.addWidget(dialog)
     dialog.setStyleSheet(stylesheet)
-    dialog.youtube_tabs.setCurrentIndex(tab_index)
     dialog.show()
-    splitter = dialog.youtube_tabs.parentWidget()
+    splitter = dialog.refined_panel.parentWidget()
     assert isinstance(splitter, QSplitter)
     qtbot.waitUntil(lambda: splitter.isVisible())
 
     for width in (1300, 1600):
         dialog.resize(width, 900)
-        left = dialog.youtube_tabs.geometry()
+        left = dialog.refined_panel.geometry()
         right = dialog.local_panel.geometry()
         assert right.x() - (left.x() + left.width()) == 1
         assert splitter.handleWidth() == 1
@@ -83,7 +99,7 @@ def test_transcript_divider_has_a_thin_gap_and_remains_draggable(
     assert splitter.sizes()[1] < before[1]
     assert not splitter.childrenCollapsible()
     assert dialog.local_panel.x() - (
-        dialog.youtube_tabs.x() + dialog.youtube_tabs.width()
+        dialog.refined_panel.x() + dialog.refined_panel.width()
     ) == 1
 
 
@@ -182,11 +198,11 @@ def test_suggestion_range_dedup_uses_canonical_milliseconds(qtbot, tmp_path: Pat
     window.close()
 
 
-def test_caption_rows_are_editable_before_automatic_refinement(qtbot, tmp_path, monkeypatch) -> None:
+def test_unprocessed_captions_are_never_shown_or_selectable(qtbot, tmp_path, monkeypatch) -> None:
     starts = []
 
     def start(dialog):
-        starts.append(dialog.table.item(0, 3).text())
+        starts.append(dialog.table.rowCount())
 
     monkeypatch.setattr(AnalysisDialog, "start_refinement", start)
     dialog = AnalysisDialog(
@@ -195,11 +211,20 @@ def test_caption_rows_are_editable_before_automatic_refinement(qtbot, tmp_path, 
         caption_language="en-US", auto_start=True,
     )
     qtbot.addWidget(dialog)
-    assert dialog.table.item(0, 3).text() == "YouTube text"
-    assert dialog.add_button.isEnabled()
+    dialog.show()
+    assert dialog.table.rowCount() == 0
+    assert not dialog.add_button.isEnabled()
+    assert not dialog.preview_button.isEnabled()
+    assert not dialog.refined_radio.isEnabled()
+    assert not dialog.findChildren(QTabWidget)
+    assert len(dialog.findChildren(QTableWidget)) == 2
+    assert dialog.checked_suggestions() == []
     assert dialog.language_combo.currentData() == "en"
     qtbot.waitUntil(lambda: bool(starts))
-    assert starts == ["YouTube text"]
+    assert starts == [0]
+    complete_refinement(dialog)
+    assert dialog.table.item(0, 3).text() == "YouTube text"
+    assert dialog.add_button.isEnabled()
 
 
 def test_whisper_completion_does_not_replace_edits_or_checks(qtbot, tmp_path) -> None:
@@ -208,6 +233,7 @@ def test_whisper_completion_does_not_replace_edits_or_checks(qtbot, tmp_path) ->
         source_captions=[SourceCaption(1, 2, "Original", "YouTube automatic (en)")],
     )
     qtbot.addWidget(dialog)
+    complete_refinement(dialog)
     dialog.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
     dialog.table.item(0, 1).setText("1.100")
     dialog.table.item(0, 3).setText("My edit")
@@ -226,12 +252,12 @@ def test_whisper_completion_does_not_replace_edits_or_checks(qtbot, tmp_path) ->
     assert dialog.checked_suggestions() == [
         AnalysisSuggestion(0.5, 3, "Whisper longer draft", "Whisper", 0.8)
     ]
-    dialog.youtube_radio.setChecked(True)
+    dialog.refined_radio.setChecked(True)
     assert dialog.table.item(0, 3).text() == "My edit"
     assert dialog.checked_suggestions() == []
 
 
-@pytest.mark.parametrize("source", ["youtube", "refined"])
+@pytest.mark.parametrize("source", ["youtube", "refined"], ids=["legacy-selection", "refined"])
 def test_adding_captions_during_background_scan_waits_for_cancellation(
     qtbot, tmp_path, monkeypatch, source,
 ) -> None:
@@ -267,8 +293,7 @@ def test_adding_captions_during_background_scan_waits_for_cancellation(
     assert dialog.scan_button.text() == "Whisper Running..."
     assert dialog.scan_button.objectName() != "primary"
     assert dialog.add_button.objectName() == "primary"
-    label = "YouTube" if source == "youtube" else "Refined YouTube"
-    assert dialog.add_button.text() == f"Use {label} Transcript"
+    assert dialog.add_button.text() == "Use Refined YouTube Transcript"
     assert dialog.table.isEnabled()
     dialog.table.item(0, 3).setText("Edited while Whisper runs")
     dialog.accept_suggestions()
@@ -357,14 +382,14 @@ def test_automatic_refinement_precedes_whisper_and_keeps_its_selected_draft(
     assert saved[-1].selected_source == "refined"
     assert saved[-1].youtube_rows == original_rows
     assert len(saved[-1].refined_rows) == 2
-    assert dialog.youtube_tabs.currentIndex() == 1
+    assert dialog.selected_source == "refined"
     assert dialog.add_button.text() == "Use Refined YouTube Transcript"
     assert dialog.add_button.isEnabled()
     assert dialog.refine_button.isEnabled()
     assert dialog.source_captions == captions
 
 
-@pytest.mark.parametrize("outcome", ["fail", "cancel", "close", "use"])
+@pytest.mark.parametrize("outcome", ["fail", "cancel", "close"])
 def test_interrupted_automatic_refinement_does_not_start_whisper(
     qtbot, tmp_path, monkeypatch, outcome,
 ):
@@ -397,8 +422,6 @@ def test_interrupted_automatic_refinement_does_not_start_whisper(
         dialog.cancel_scan()
     elif outcome == "close":
         dialog.reject()
-    elif outcome == "use":
-        dialog.accept_suggestions()
     qtbot.waitUntil(lambda: dialog.worker is None)
     assert dialog.review_state() == review
     assert len(calls) == 1
@@ -408,16 +431,16 @@ def test_interrupted_automatic_refinement_does_not_start_whisper(
     elif outcome == "cancel":
         assert "canceled" in dialog.refined_status.text()
         assert dialog.refine_button.isEnabled()
-    elif outcome == "use":
-        assert [suggestion.caption for suggestion in accepted] == ["Original"]
-        assert dialog.result() == QDialog.DialogCode.Accepted
     else:
         assert dialog.result() == QDialog.DialogCode.Rejected
+    assert not accepted
+    assert dialog.refined_table.rowCount() == 0
+    assert not dialog.add_button.isEnabled()
+    assert dialog.source_captions[0].text == "Original"
 
 
-@pytest.mark.parametrize("finish", ["close", "use"])
-def test_finishing_before_automatic_refinement_starts_keeps_original_captions(
-    qtbot, tmp_path, monkeypatch, finish,
+def test_closing_before_automatic_refinement_keeps_evidence_but_no_usable_rows(
+    qtbot, tmp_path, monkeypatch,
 ):
     starts = []
     monkeypatch.setattr(AnalysisDialog, "start_refinement", lambda _self: starts.append("refined"))
@@ -429,14 +452,13 @@ def test_finishing_before_automatic_refinement_starts_keeps_original_captions(
     qtbot.addWidget(dialog)
     accepted = []
     dialog.suggestions_accepted.connect(accepted.extend)
-    if finish == "close":
-        dialog.reject()
-    else:
-        dialog.accept_suggestions()
+    assert not dialog.add_button.isEnabled()
+    dialog.reject()
     qtbot.wait(10)
     assert not starts
-    assert dialog.checked_suggestions()[0].caption == "Original"
-    assert len(accepted) == (1 if finish == "use" else 0)
+    assert dialog.checked_suggestions() == []
+    assert not accepted
+    assert dialog.source_captions[0].text == "Original"
 
 
 @pytest.mark.parametrize("youtube_import", [False, True])
@@ -458,7 +480,7 @@ def test_automatic_analysis_without_captions_starts_whisper_directly(
 @pytest.mark.parametrize("refined_rows", [[], [
     AnalysisDraftRow("1.1", "2.9", "Refined edit", "Refined YouTube", checked=False),
 ]])
-def test_restoring_drafts_does_not_automatically_refine(
+def test_restoring_drafts_only_processes_missing_refinement(
     qtbot, tmp_path, monkeypatch, refined_rows,
 ):
     starts = []
@@ -475,8 +497,13 @@ def test_restoring_drafts_does_not_automatically_refine(
     )
     qtbot.addWidget(dialog)
     qtbot.wait(10)
-    assert not starts
-    assert dialog.review_state() == review
+    assert starts == ([] if refined_rows else ["refined"])
+    saved = dialog.review_state()
+    assert saved.selected_source == "refined"
+    assert saved.youtube_rows == review.youtube_rows
+    assert saved.refined_rows == refined_rows
+    assert saved.pause_threshold == 0.6
+    assert not dialog.findChildren(QTabWidget)
 
 
 def test_whisper_failure_keeps_edited_caption_rows(qtbot, tmp_path, monkeypatch):
@@ -486,6 +513,7 @@ def test_whisper_failure_keeps_edited_caption_rows(qtbot, tmp_path, monkeypatch)
         source_captions=[SourceCaption(1, 2, "Original", "YouTube creator (en)")],
     )
     qtbot.addWidget(dialog)
+    complete_refinement(dialog)
     dialog.table.item(0, 3).setText("Edited")
     dialog._failed("Model unavailable")
     assert dialog.checked_suggestions()[0].caption == "Edited"
@@ -493,7 +521,7 @@ def test_whisper_failure_keeps_edited_caption_rows(qtbot, tmp_path, monkeypatch)
     assert dialog.add_button.isEnabled()
 
 
-@pytest.mark.parametrize("source", ["youtube", "local", "refined"])
+@pytest.mark.parametrize("source", ["local", "refined"])
 def test_source_choice_imports_its_own_segmentation_and_saves_it(
     qtbot, tmp_path, source,
 ):
@@ -524,12 +552,11 @@ def test_source_choice_imports_its_own_segmentation_and_saves_it(
         refined_captions=[SourceCaption(1.1, 2.9, "Refined line", "Refined YouTube")],
     ))
     {
-        "youtube": dialog.youtube_radio,
         "refined": dialog.refined_radio,
         "local": dialog.local_radio,
     }[source].setChecked(True)
     expected = dialog.checked_suggestions()
-    assert len(expected) == (2 if source == "youtube" else 1)
+    assert len(expected) == 1
     dialog.accept_suggestions()
     assert window.save_project()
     window.open_path(window.project_path)
@@ -537,7 +564,8 @@ def test_source_choice_imports_its_own_segmentation_and_saves_it(
         (s.start, s.end, s.caption) for s in expected
     ]
     assert window.project.analysis_review.selected_source == source
-    assert len(window.project.analysis_review.youtube_rows) == 2
+    assert window.project.analysis_review.youtube_rows == []
+    assert window.project.source_captions == captions
     assert len(window.project.analysis_review.local_rows) == 1
     assert len(window.project.analysis_review.refined_rows) == 1
     window.dirty = False
@@ -548,9 +576,17 @@ def test_closing_review_preserves_all_edited_drafts_and_checkboxes(
     qtbot, tmp_path,
 ):
     captions = [SourceCaption(1, 2, "Original", "YouTube creator (en)")]
+    legacy_rows = [
+        AnalysisDraftRow("unfinished time", "2", "Legacy YouTube edit", "YouTube", checked=False),
+    ]
     dialog = AnalysisDialog(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
         source_captions=captions,
+        review=AnalysisReview(
+            youtube_rows=legacy_rows,
+            refined_rows=[AnalysisDraftRow("1", "2", "Previous draft", "Refined YouTube")],
+            selected_source="refined",
+        ),
     )
     qtbot.addWidget(dialog)
     dialog._completed(AnalysisResult([
@@ -560,9 +596,6 @@ def test_closing_review_preserves_all_edited_drafts_and_checkboxes(
         [], 1, 0, -30, None, None, detect_hardware(),
         refined_captions=[SourceCaption(1.1, 1.9, "Refined draft", "Refined YouTube")],
     ))
-    dialog.youtube_table.item(0, 3).setText("Edited YouTube")
-    dialog.youtube_table.item(0, 1).setText("unfinished time")
-    dialog.youtube_table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
     dialog.local_table.item(0, 3).setText("Edited Whisper")
     dialog.refined_table.item(0, 3).setText("Edited refinement")
     dialog.refined_table.item(0, 2).setText("unfinished out")
@@ -585,7 +618,7 @@ def test_closing_review_preserves_all_edited_drafts_and_checkboxes(
     qtbot.addWidget(restored)
     assert restored.review_state() == saved[-1]
     assert restored.refined_radio.isChecked()
-    assert restored.youtube_tabs.currentIndex() == 1
+    assert restored.review_state().youtube_rows == legacy_rows
     assert restored.pause_spin.value() == 0.65
     assert restored.checked_suggestions() == []
     restored.local_radio.setChecked(True)
@@ -596,7 +629,7 @@ def test_closing_review_preserves_all_edited_drafts_and_checkboxes(
 
 
 @pytest.mark.parametrize("finish", ["close", "use"])
-@pytest.mark.parametrize("source", ["youtube", "refined"])
+@pytest.mark.parametrize("source", ["local", "refined"])
 def test_finishing_commits_active_table_editor_to_draft(qtbot, tmp_path, finish, source):
     dialog = AnalysisDialog(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
@@ -608,6 +641,9 @@ def test_finishing_commits_active_table_editor_to_draft(qtbot, tmp_path, finish,
             [], 1, 0, -30, None, None, detect_hardware(),
             refined_captions=[SourceCaption(1, 2, "Refined", "Refined YouTube")],
         ))
+    else:
+        dialog._populate([AnalysisSuggestion(1, 2, "Whisper", "Whisper")])
+        dialog.local_radio.setChecked(True)
     dialog.show()
     item = dialog.table.item(0, 3)
     dialog.table.editItem(item)
@@ -624,7 +660,7 @@ def test_finishing_commits_active_table_editor_to_draft(qtbot, tmp_path, finish,
     else:
         dialog.accept_suggestions()
         assert accepted[0].caption == "New dialogue"
-    rows = changes[-1].youtube_rows if source == "youtube" else changes[-1].refined_rows
+    rows = changes[-1].local_rows if source == "local" else changes[-1].refined_rows
     assert rows[0].caption == "New dialogue"
 
 
@@ -634,7 +670,6 @@ def test_no_youtube_captions_still_offers_whisper_source(qtbot, tmp_path):
         youtube_import=True,
     )
     qtbot.addWidget(dialog)
-    assert not dialog.youtube_radio.isEnabled()
     assert not dialog.refined_radio.isEnabled()
     assert not dialog.refine_button.isEnabled()
     assert dialog.local_radio.isChecked()
@@ -761,12 +796,13 @@ def test_source_labels_and_play_action_identify_the_selected_transcript(qtbot, t
         source_captions=[SourceCaption(1, 2, "YouTube line", "YouTube creator (en)")],
     )
     qtbot.addWidget(dialog)
-    assert dialog.youtube_panel.title() == "YouTube Captions"
+    assert dialog.refined_panel.title() == "Refined YouTube"
     assert dialog.local_panel.title() == "Whisper Transcript"
     assert not dialog.preview_button.isEnabled()
-    dialog.youtube_table.selectRow(0)
+    complete_refinement(dialog)
+    dialog.refined_table.selectRow(0)
     assert dialog.preview_button.isEnabled()
-    assert dialog.preview_button.text() == "Play Selected YouTube Line"
+    assert dialog.preview_button.text() == "Play Selected Refined YouTube Line"
     previews = []
     dialog.preview_requested.connect(lambda start, end: previews.append((start, end)))
     dialog.preview_button.click()
@@ -830,7 +866,6 @@ def test_refinement_runs_without_whisper_and_replaces_only_its_draft(
     )
     dialog.start_refinement()
     assert not dialog.refined_table.isEnabled()
-    assert dialog.youtube_table.isEnabled()
     assert dialog.local_table.isEnabled()
     assert not dialog.pause_spin.isEnabled()
     assert not dialog.refine_button.isEnabled()
@@ -846,7 +881,7 @@ def test_refinement_runs_without_whisper_and_replaces_only_its_draft(
     assert dialog.source_captions == captions
     assert [row.caption for row in saved.refined_rows] == ["First", "Second"]
     assert saved.selected_source == "refined"
-    assert dialog.youtube_tabs.currentIndex() == 1
+    assert dialog.selected_source == "refined"
     assert dialog.add_button.text() == "Use Refined YouTube Transcript"
     assert dialog.preview_button.text() == "Play Selected Refined YouTube Line"
     previews = []
@@ -878,7 +913,7 @@ def test_refinement_interruption_keeps_all_drafts(qtbot, tmp_path, monkeypatch, 
     review = AnalysisReview(
         youtube_rows=[AnalysisDraftRow("1", "3", "YouTube edit", "YouTube")],
         local_rows=[AnalysisDraftRow("0.5", "3.5", "Whisper edit", "Whisper")],
-        selected_source="youtube",
+        selected_source="local",
         refined_rows=[AnalysisDraftRow("1.1", "2.9", "Refined edit", "Refined YouTube")],
     )
     dialog = AnalysisDialog(
@@ -905,7 +940,7 @@ def test_refinement_interruption_keeps_all_drafts(qtbot, tmp_path, monkeypatch, 
         assert "canceled" in dialog.refined_status.text()
         assert dialog.refined_table.isEnabled()
     elif outcome == "use":
-        assert [suggestion.caption for suggestion in accepted] == ["YouTube edit"]
+        assert [suggestion.caption for suggestion in accepted] == ["Whisper edit"]
         assert dialog.result() == QDialog.DialogCode.Accepted
     else:
         assert dialog.result() == QDialog.DialogCode.Rejected
@@ -934,6 +969,28 @@ def test_whisper_rescan_leaves_refined_edits_and_pause_setting_unchanged(qtbot, 
     assert dialog.selected_source == "refined"
     assert not dialog.refine_button.isEnabled()
     assert dialog.local_table.item(0, 3).text() == "New Whisper"
+
+
+def test_processing_transcript_cannot_be_imported_or_previewed(qtbot, tmp_path, monkeypatch):
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        review=AnalysisReview(
+            refined_rows=[AnalysisDraftRow("1", "2", "Saved draft", "Refined YouTube")],
+            selected_source="refined",
+        ),
+    )
+    qtbot.addWidget(dialog)
+    dialog.refined_table.setEnabled(False)
+    messages = []
+    previews = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *args: messages.append(args[-1]))
+    dialog.preview_requested.connect(lambda *args: previews.append(args))
+    with pytest.raises(ValueError, match="finish processing"):
+        dialog.checked_suggestions()
+    dialog.preview_row(0)
+    assert not previews
+    assert len(messages) == 1
+    assert dialog.review_state().refined_rows[0].caption == "Saved draft"
 
 
 def test_compact_review_keeps_refined_rows_visible(qtbot, tmp_path):
@@ -992,11 +1049,11 @@ def test_late_cancellation_discards_completion_queued_after_final_worker_check(
     )
     review = AnalysisReview(
         youtube_rows=[AnalysisDraftRow("1", "3", "YouTube edit", "YouTube")],
-        local_rows=[AnalysisDraftRow("1.1", "2.9", "Whisper edit", "Whisper", checked=False)],
+        local_rows=[AnalysisDraftRow("1.1", "2.9", "Whisper edit", "Whisper")],
         refined_rows=[
-            AnalysisDraftRow("1.2", "2.8", "Refined edit", "Refined YouTube", checked=False),
+            AnalysisDraftRow("1.2", "2.8", "Refined edit", "Refined YouTube"),
         ],
-        selected_source="youtube",
+        selected_source="local" if source == "refined" else "refined",
     )
     dialog = AnalysisDialog(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
@@ -1023,7 +1080,7 @@ def test_late_cancellation_discards_completion_queued_after_final_worker_check(
     qtbot.waitUntil(lambda: dialog.worker is None)
     assert dialog.review_state() == review
     assert [suggestion.caption for suggestion in accepted] == (
-        ["YouTube edit"] if finish == "use" else []
+        ["Whisper edit" if source == "refined" else "Refined edit"] if finish == "use" else []
     )
 
 
@@ -1241,7 +1298,7 @@ def test_first_whisper_attempt_without_draft_can_retry(
     dialog.start_scan()
     qtbot.waitUntil(lambda: dialog.worker is None)
     assert not dialog.local_radio.isEnabled()
-    assert dialog.add_button.isEnabled() == with_captions
+    assert not dialog.add_button.isEnabled()
     assert dialog.scan_button.text() == "Run Whisper"
     assert "No Whisper draft is available" in dialog.progress_label.text()
     dialog.model_combo.setCurrentIndex(dialog.model_combo.findData("tiny"))
@@ -1264,7 +1321,7 @@ def test_empty_refinement_keeps_drafts_and_does_not_chain_whisper(
             [AnalysisDraftRow("1.1", "1.9", "Refined edit", "Refined YouTube")]
             if has_previous else []
         ),
-        selected_source="refined" if has_previous else "youtube",
+        selected_source="refined",
     )
     dialog = AnalysisDialog(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
@@ -1284,11 +1341,11 @@ def test_empty_refinement_keeps_drafts_and_does_not_chain_whisper(
     assert calls == [1]
     assert dialog.review_state() == review
     assert "No new rows" in dialog.refined_status.text()
-    assert dialog.add_button.isEnabled()
+    assert dialog.add_button.isEnabled() == has_previous
     assert dialog.refined_radio.isEnabled() == has_previous
 
 
-@pytest.mark.parametrize("source", ["youtube", "refined", "local"])
+@pytest.mark.parametrize("source", ["refined", "local"])
 def test_clicking_draft_selects_its_source_and_checked_rows_control_import(qtbot, tmp_path, source):
     dialog = AnalysisDialog(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
@@ -1297,15 +1354,11 @@ def test_clicking_draft_selects_its_source_and_checked_rows_control_import(qtbot
             youtube_rows=[AnalysisDraftRow("1", "2", "YouTube", "YouTube")],
             refined_rows=[AnalysisDraftRow("2", "3", "Refined", "Refined YouTube")],
             local_rows=[AnalysisDraftRow("3", "4", "Whisper", "Whisper")],
-            selected_source="local" if source != "local" else "youtube",
+            selected_source="local" if source != "local" else "refined",
         ),
     )
     qtbot.addWidget(dialog)
-    if source == "refined":
-        dialog.youtube_tabs.setCurrentIndex(1)
-        dialog.local_radio.setChecked(True)
-    table = {"youtube": dialog.youtube_table, "refined": dialog.refined_table,
-             "local": dialog.local_table}[source]
+    table = {"refined": dialog.refined_table, "local": dialog.local_table}[source]
     dialog.show()
     table.selectRow(0)
     assert dialog.selected_source != source
@@ -1363,9 +1416,12 @@ def test_restored_unavailable_source_selects_an_existing_draft(qtbot, tmp_path, 
     assert dialog.selected_source != unavailable
     assert dialog.table.rowCount() == 1
     assert dialog.add_button.isEnabled()
-    radio = {"youtube": dialog.youtube_radio, "refined": dialog.refined_radio,
-             "local": dialog.local_radio}[unavailable]
-    assert not radio.isEnabled()
+    if unavailable == "youtube":
+        assert dialog.selected_source == "refined"
+        assert not dialog.findChildren(QTabWidget)
+    else:
+        radio = {"refined": dialog.refined_radio, "local": dialog.local_radio}[unavailable]
+        assert not radio.isEnabled()
 
 
 def test_switching_to_activity_scan_keeps_whisper_draft_until_success(
