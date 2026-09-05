@@ -24,6 +24,7 @@ from typing import Any
 _POLL_INTERVAL = 0.1
 _HEADER = struct.Struct("!Q")
 _READ_SIZE = 64 * 1024
+_CLEANUP_TIMEOUT = 5.0
 
 
 class ProcessWorkerError(RuntimeError):
@@ -173,6 +174,19 @@ class _WindowsJob:
                 ("PeakJobMemoryUsed", ctypes.c_size_t),
             ]
 
+        class BasicAccounting(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_int64),
+                ("TotalKernelTime", ctypes.c_int64),
+                ("ThisPeriodTotalUserTime", ctypes.c_int64),
+                ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+                ("TotalPageFaultCount", wintypes.DWORD),
+                ("TotalProcesses", wintypes.DWORD),
+                ("ActiveProcesses", wintypes.DWORD),
+                ("TotalTerminatedProcesses", wintypes.DWORD),
+            ]
+
+        self.accounting_type = BasicAccounting
         self.api = ctypes.WinDLL("kernel32", use_last_error=True)
         for name, restype, argtypes in (
             ("CreateJobObjectW", wintypes.HANDLE, [ctypes.c_void_p, wintypes.LPCWSTR]),
@@ -183,6 +197,18 @@ class _WindowsJob:
             ),
             ("OpenProcess", wintypes.HANDLE, [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]),
             ("AssignProcessToJobObject", wintypes.BOOL, [wintypes.HANDLE, wintypes.HANDLE]),
+            (
+                "QueryInformationJobObject",
+                wintypes.BOOL,
+                [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p],
+            ),
+            ("TerminateJobObject", wintypes.BOOL, [wintypes.HANDLE, wintypes.UINT]),
+            ("WaitForSingleObject", wintypes.DWORD, [wintypes.HANDLE, wintypes.DWORD]),
+            (
+                "IsProcessInJob",
+                wintypes.BOOL,
+                [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)],
+            ),
             ("CloseHandle", wintypes.BOOL, [wintypes.HANDLE]),
         ):
             function = getattr(self.api, name)
@@ -192,6 +218,7 @@ class _WindowsJob:
         if not self.handle:
             raise ctypes.WinError(ctypes.get_last_error())
         limits = ExtendedLimits()
+        self.limits = limits
         limits.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         if not self.api.SetInformationJobObject(
             self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)
@@ -215,10 +242,113 @@ class _WindowsJob:
             if not self.api.CloseHandle(handle):
                 raise ctypes.WinError(ctypes.get_last_error())
 
-    def close(self) -> None:
+    def _close_handle(self, handle: int) -> None:
         import ctypes
 
-        if self.handle:
+        if not self.api.CloseHandle(handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    @staticmethod
+    def _remaining(deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProcessWorkerError(
+                "Timed out waiting for worker process tree cleanup",
+                error_type="WorkerCleanupTimeout",
+            )
+        return remaining
+
+    def _process_ids(self, deadline: float) -> list[int]:
+        import ctypes
+        from ctypes import wintypes
+
+        capacity = 16
+        while True:
+            self._remaining(deadline)
+
+            class ProcessIds(ctypes.Structure):
+                _fields_ = [
+                    ("NumberOfAssignedProcesses", wintypes.DWORD),
+                    ("NumberOfProcessIdsInList", wintypes.DWORD),
+                    ("ProcessIdList", ctypes.c_size_t * capacity),
+                ]
+
+            info = ProcessIds()
+            success = self.api.QueryInformationJobObject(
+                self.handle, 3, ctypes.byref(info), ctypes.sizeof(info), None
+            )
+            if success and info.NumberOfProcessIdsInList >= info.NumberOfAssignedProcesses:
+                return list(info.ProcessIdList[: info.NumberOfProcessIdsInList])
+            error = ctypes.get_last_error()
+            if not success and error != 234:  # ERROR_MORE_DATA: resize the snapshot.
+                raise ctypes.WinError(error)
+            capacity = max(capacity * 2, info.NumberOfAssignedProcesses)
+
+    def _active_process_count(self) -> int:
+        import ctypes
+
+        info = self.accounting_type()
+        if not self.api.QueryInformationJobObject(
+            self.handle, 1, ctypes.byref(info), ctypes.sizeof(info), None
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return info.ActiveProcesses
+
+    def close(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        if not self.handle:
+            return
+        deadline = time.monotonic() + _CLEANUP_TIMEOUT
+        try:
+            # Disallow further child creation before taking ownership of process handles.
+            # Lowering the limit doesn't terminate existing members; any live member
+            # already occupies the one allowed slot, closing the snapshot/spawn race.
+            self.limits.BasicLimitInformation.LimitFlags |= 0x0008
+            self.limits.BasicLimitInformation.ActiveProcessLimit = 1
+            if not self.api.SetInformationJobObject(
+                self.handle, 9, ctypes.byref(self.limits), ctypes.sizeof(self.limits)
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            with ExitStack() as resources:
+                processes = {}
+                while True:
+                    # Retain handles BEFORE termination: job accounting can reach zero
+                    # before process handle/I/O rundown has released descendant file locks.
+                    for pid in self._process_ids(deadline):
+                        if pid in processes:
+                            continue
+                        handle = self.api.OpenProcess(0x00101000, False, pid)  # SYNCHRONIZE | QUERY_LIMITED
+                        if not handle:
+                            error = ctypes.get_last_error()
+                            if error == 87:  # Already exited between snapshot and OpenProcess.
+                                continue
+                            raise ctypes.WinError(error)
+                        resources.callback(self._close_handle, handle)
+                        belongs = wintypes.BOOL()
+                        if not self.api.IsProcessInJob(handle, self.handle, ctypes.byref(belongs)):
+                            raise ctypes.WinError(ctypes.get_last_error())
+                        if belongs.value:
+                            processes[pid] = handle
+                    if not self.api.TerminateJobObject(self.handle, 1):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    for handle in processes.values():
+                        milliseconds = max(1, int(self._remaining(deadline) * 1000))
+                        status = self.api.WaitForSingleObject(handle, milliseconds)
+                        if status == 0xFFFFFFFF:
+                            raise ctypes.WinError(ctypes.get_last_error())
+                        if status != 0:
+                            raise ProcessWorkerError(
+                                "Timed out waiting for worker process tree cleanup",
+                                error_type="WorkerCleanupTimeout",
+                            )
+                    if self._active_process_count() == 0:
+                        break
+                    # A descendant may have spawned another process during the snapshot.
+                    time.sleep(min(0.01, self._remaining(deadline)))
+        finally:
+            # Kill-on-close remains a fallback even when querying/waiting fails.
             if not self.api.CloseHandle(self.handle):
                 raise ctypes.WinError(ctypes.get_last_error())
             self.handle = None

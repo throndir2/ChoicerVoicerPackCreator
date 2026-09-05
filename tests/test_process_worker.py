@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -79,15 +80,24 @@ def _threaded_events(emit):
     return "complete"
 
 
-def _descendants(emit, exit_mode):
-    script = (
-        "import os, subprocess, sys, time; "
-        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
-        "print(str(os.getpid()) + ' ' + str(child.pid), flush=True); "
-        "time.sleep(60)"
-    )
+def _descendants(emit, exit_mode, locked_file=""):
+    script = """
+import os, subprocess, sys, time
+lock = open(sys.argv[1], "rb") if sys.argv[1] else None
+child_script = (
+    'import sys, time; '
+    'lock = open(sys.argv[1], "rb") if sys.argv[1] else None; '
+    'print("locked", flush=True); time.sleep(60)'
+)
+child = subprocess.Popen(
+    [sys.executable, "-c", child_script, sys.argv[1]], stdout=subprocess.PIPE, text=True
+)
+assert child.stdout.readline().strip() == "locked"
+print(str(os.getpid()) + ' ' + str(child.pid), flush=True)
+time.sleep(60)
+"""
     child = subprocess.Popen(
-        [sys.executable, "-c", script], stdout=subprocess.PIPE, text=True
+        [sys.executable, "-c", script, locked_file], stdout=subprocess.PIPE, text=True
     )
     try:
         pids = [int(pid) for pid in child.stdout.readline().split()]
@@ -178,10 +188,42 @@ def _is_running(pid):
 
 
 def _assert_stopped(pids):
+    if os.name == "nt":
+        assert not any(_is_running(pid) for pid in pids)
+        return
     until = time.monotonic() + 5
     while any(_is_running(pid) for pid in pids) and time.monotonic() < until:
         time.sleep(0.05)
     assert not any(_is_running(pid) for pid in pids)
+
+
+@pytest.fixture
+def locked_file():
+    path = Path(f".process-worker-{uuid4().hex}.locked")
+    path.write_bytes(b"descendant-held staging file")
+    try:
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def _assert_delete_access(path):
+    import ctypes
+    from ctypes import wintypes
+
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    api.CreateFileW.restype = wintypes.HANDLE
+    api.CloseHandle.argtypes = [wintypes.HANDLE]
+    api.CloseHandle.restype = wintypes.BOOL
+    handle = api.CreateFileW(str(path), 0x00010000, 7, None, 3, 0, None)  # DELETE access
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not api.CloseHandle(handle):
+        raise ctypes.WinError(ctypes.get_last_error())
 
 
 def test_spawn_returns_trusted_picklable_values_without_qt():
@@ -402,13 +444,17 @@ def test_incomplete_ipc_cannot_block_timeout_or_cancellation(monkeypatch, replac
         ("waiting", ValueError),
     ],
 )
-def test_entire_process_tree_is_cleaned_on_every_exit(mode, expected):
+def test_entire_process_tree_is_cleaned_on_every_exit(mode, expected, locked_file):
     pids = []
     cancel = False
 
     def on_event(event, details):
         nonlocal cancel
         pids.extend(details["pids"])
+        if os.name == "nt":
+            with pytest.raises(OSError) as caught:
+                _assert_delete_access(locked_file)
+            assert caught.value.winerror == 32
         if mode == "callback":
             raise ValueError("callback failed")
         if mode == "cancel":
@@ -421,7 +467,7 @@ def test_entire_process_tree_is_cleaned_on_every_exit(mode, expected):
 
     def run():
         return run_process_worker(
-            _descendants, (mode,), on_event=on_event, cancelled=lambda: cancel,
+            _descendants, (mode, str(locked_file)), on_event=on_event, cancelled=lambda: cancel,
             waiting=waiting, timeout=1.6 if mode == "timeout" else 6,
         )
 
@@ -430,8 +476,38 @@ def test_entire_process_tree_is_cleaned_on_every_exit(mode, expected):
     else:
         with pytest.raises(expected):
             run()
+    if os.name == "nt":
+        _assert_delete_access(locked_file)
+    locked_file.unlink()
     assert len(pids) == 2
     _assert_stopped(pids)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows descendant file-handle rundown")
+@pytest.mark.parametrize("attempt", range(10))
+@pytest.mark.parametrize("mode", ["return", "exit"])
+def test_descendant_file_locks_are_released_immediately(mode, attempt, locked_file):
+    pids = []
+
+    def on_event(event, details):
+        pids.extend(details["pids"])
+        return True
+
+    if mode == "return":
+        run_process_worker(
+            _descendants, (mode, str(locked_file)), on_event=on_event,
+            cancelled=_never_cancelled, timeout=5,
+        )
+    else:
+        with pytest.raises(ProcessWorkerError, match="without returning a result"):
+            run_process_worker(
+                _descendants, (mode, str(locked_file)), on_event=on_event,
+                cancelled=_never_cancelled, timeout=5,
+            )
+    # No retries or grace interval: staging cleanup/retry happens immediately in callers.
+    _assert_delete_access(locked_file)
+    locked_file.unlink()
+    assert not any(_is_running(pid) for pid in pids)
 
 
 def test_launch_failure_propagates_and_closes_resources(monkeypatch):
@@ -499,6 +575,37 @@ def test_cleanup_errors_are_not_suppressed(monkeypatch):
         run_process_worker(
             _return, (None,), on_event=_ignore_event, cancelled=_never_cancelled, timeout=5
         )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows bounded process-tree cleanup")
+def test_job_drain_timeout_is_bounded_and_not_a_retryable_worker_timeout(monkeypatch):
+    monkeypatch.setattr(process_worker, "_CLEANUP_TIMEOUT", 0.15)
+    monkeypatch.setattr(process_worker._WindowsJob, "_active_process_count", lambda self: 1)
+    started = time.monotonic()
+    with pytest.raises(ProcessWorkerError, match="process tree cleanup") as caught:
+        run_process_worker(
+            _return, (None,), on_event=_ignore_event, cancelled=_never_cancelled, timeout=5
+        )
+    assert caught.value.error_type == "WorkerCleanupTimeout"
+    assert not isinstance(caught.value, ProcessWorkerTimeout)
+    assert time.monotonic() - started < 3
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows job termination failures")
+def test_job_termination_failure_is_propagated_and_job_handle_closed(monkeypatch):
+    import ctypes
+
+    job = process_worker._WindowsJob()
+
+    def fail(handle, exit_code):
+        ctypes.set_last_error(5)
+        return 0
+
+    monkeypatch.setattr(job.api, "TerminateJobObject", fail)
+    with pytest.raises(OSError) as caught:
+        job.close()
+    assert caught.value.winerror == 5
+    assert job.handle is None
 
 
 @pytest.mark.parametrize(
