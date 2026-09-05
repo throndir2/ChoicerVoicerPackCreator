@@ -14,9 +14,9 @@ from choicer_voicer_pack_creator.ui.main_window import MainWindow
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("use_playhead", [False, True])
+@pytest.mark.parametrize("seek_method", ["table", "timeline", "playhead"])
 def test_stopped_seek_retains_requested_video_frame(
-    qtbot, tmp_path: Path, use_playhead: bool
+    qtbot, tmp_path: Path, seek_method: str
 ) -> None:
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         pytest.skip("FFmpeg is not available")
@@ -111,6 +111,7 @@ def test_stopped_seek_retains_requested_video_frame(
     frames.clear()
 
     # Pixel-rounded drags should land inside the cue, not just before its start.
+    use_playhead = seek_method == "playhead"
     target_seconds = second.start + (0.1 if use_playhead else 0.0)
     target_ms = round(target_seconds * 1000)
     if use_playhead:
@@ -130,6 +131,17 @@ def test_stopped_seek_retains_requested_video_frame(
             pos=QPoint(round(timeline._time_to_x(target_seconds)), 4),
         )
         assert timeline.playhead == pytest.approx(target_seconds, abs=0.01)
+    elif seek_method == "timeline":
+        window.player.stop()
+        timeline = window.timeline
+        qtbot.mouseClick(
+            timeline,
+            Qt.MouseButton.LeftButton,
+            pos=QPoint(
+                round(timeline._time_to_x(3.3)),
+                round(timeline._segment_rect(second).center().y()),
+            ),
+        )
     else:
         window.segment_table.selectRow(1)
 

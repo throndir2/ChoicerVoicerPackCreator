@@ -342,7 +342,8 @@ class TimelineWidget(QWidget):
                 QToolTip.showText(
                     event.globalPosition().toPoint(),
                     f"{segment.primary_character}\n{segment.start:.3f}–{segment.end:.3f}s\n"
-                    f"Drag the center to move; drag an edge to trim.\n{segment.caption}",
+                    f"Click to cue the start; drag the center to move; drag an edge to trim.\n"
+                    f"{segment.caption}",
                     self,
                 )
                 return
@@ -362,6 +363,8 @@ class TimelineWidget(QWidget):
                 final_start,
                 final_end,
             )
+        elif self._drag_kind == "segment-body":
+            self.seek_requested.emit(self._drag_original_start)
         else:
             self.seek_requested.emit(self._drag_anchor_time)
         self._clear_drag()
