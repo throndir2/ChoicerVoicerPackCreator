@@ -351,6 +351,7 @@ class MainWindow(QMainWindow):
 
         self.timeline = TimelineWidget(left)
         self.timeline.setToolTip(
+            "Drag the white playback line or its top arrow to scrub. "
             "Drag IN/OUT handles to trim, drag inside the highlighted waveform range to move it, "
             "or drag across empty waveform space to define a range. Segment blocks can also be "
             "moved by their center or trimmed by their edges."
@@ -363,6 +364,7 @@ class MainWindow(QMainWindow):
         self.timeline.zoom_changed.connect(self._timeline_zoom_changed)
         left_layout.addWidget(self.timeline)
         timeline_hint = QLabel(
+            "Drag the white playback line or its top arrow to scrub. "
             "Drag the waveform highlight or its IN/OUT handles to edit a range. "
             "Drag a segment block to move it, or drag its edges to trim."
         )

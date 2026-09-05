@@ -348,6 +348,8 @@ attempt access-restriction workarounds. An authorized local copy can still be op
 
 ### Direct waveform editing
 
+- Drag the white playback line or its top arrow to scrub without changing any ranges. The arrow
+  remains draggable when the line overlaps an In/Out handle or a segment block.
 - Drag across empty waveform space to define a new In/Out range.
 - Drag the cyan **IN** or orange **OUT** handle to trim the range precisely.
 - Drag inside the highlighted waveform range to move it without changing its duration.
