@@ -33,6 +33,20 @@ class UnusedMedia:
     pass
 
 
+@pytest.fixture
+def installed_whisper(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    runtime.touch()
+    monkeypatch.setattr(
+        analysis_dialog, "WhisperManager",
+        lambda _root: SimpleNamespace(
+            cli_path=runtime, model_path=lambda _key: runtime,
+            model_download_bytes=lambda _key: 141 * 1024**2,
+        ),
+    )
+    return runtime
+
+
 @pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
 @pytest.mark.parametrize("tab_index", [0, 1], ids=["original", "refined"])
 def test_transcript_divider_has_a_thin_gap_and_remains_draggable(
@@ -1011,3 +1025,385 @@ def test_late_cancellation_discards_completion_queued_after_final_worker_check(
     assert [suggestion.caption for suggestion in accepted] == (
         ["YouTube edit"] if finish == "use" else []
     )
+
+
+@pytest.mark.parametrize("selected_source", ["local", "refined"])
+@pytest.mark.parametrize("outcome", [
+    "memory", "runtime", "cancel", "empty", "invalid",
+    "decline-replacement", "decline-download", "setup",
+])
+def test_model_switch_recovery_can_use_current_whisper_without_rerunning(
+    qtbot, tmp_path, monkeypatch, installed_whisper, selected_source, outcome,
+):
+    import time
+
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        youtube_import=True,
+        review=AnalysisReview(
+            youtube_rows=[AnalysisDraftRow("1", "3", "YouTube edit", "YouTube")],
+            refined_rows=[AnalysisDraftRow("1.1", "2.9", "Refined edit", "Refined YouTube")],
+            selected_source="refined",
+        ),
+    )
+    qtbot.addWidget(dialog)
+    tiny_result = AnalysisResult([
+        AnalysisSuggestion(0.5, 3, "Tiny draft", "Whisper", 0.8),
+        AnalysisSuggestion(4, 5, "Excluded line", "Whisper"),
+    ], 2, 2, -30, "tiny", "en", detect_hardware())
+    dialog._completed(tiny_result)
+    dialog.local_table.item(0, 3).setText("My current Whisper edit")
+    dialog.local_table.item(1, 0).setCheckState(Qt.CheckState.Unchecked)
+    if selected_source == "local":
+        dialog.local_radio.setChecked(True)
+    before = dialog.review_state()
+    dialog.model_combo.setCurrentIndex(dialog.model_combo.findData("base"))
+    dialog.language_combo.setCurrentIndex(dialog.language_combo.findData("ja"))
+    calls = []
+    errors = []
+    prompts = []
+
+    def analyze(*_args, cancelled, **kwargs):
+        calls.append(kwargs)
+        if outcome == "cancel":
+            while not cancelled():
+                time.sleep(0.01)
+            raise AnalysisCancelled("Canceled")
+        if outcome == "empty":
+            return AnalysisResult(
+                [AnalysisSuggestion(1, 3, "", "Untranscribed activity")],
+                1, 0, -30, "base", "ja", detect_hardware(),
+            )
+        if outcome == "invalid":
+            return object()
+        raise AnalysisError(
+            "This video/model combination exceeds the conservative local-memory budget."
+            if outcome == "memory" else "Runtime failed to load"
+        )
+
+    def question(_parent, title, *_args):
+        prompts.append(title)
+        if (
+            outcome == "decline-replacement"
+            or outcome == "decline-download" and title.startswith("Download")
+        ):
+            return QMessageBox.StandardButton.Cancel
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
+    monkeypatch.setattr(QMessageBox, "question", question)
+    monkeypatch.setattr(QMessageBox, "critical", lambda *_args: errors.append(_args[-1]))
+    if outcome == "decline-download":
+        monkeypatch.setattr(
+            analysis_dialog, "WhisperManager",
+            lambda _root: SimpleNamespace(
+                cli_path=installed_whisper, model_path=lambda _key: tmp_path / "missing-base",
+                model_download_bytes=lambda _key: 141 * 1024**2,
+            ),
+        )
+    elif outcome == "setup":
+        def unavailable(_root):
+            raise AnalysisError("Setup manifest unavailable")
+
+        monkeypatch.setattr(analysis_dialog, "WhisperManager", unavailable)
+
+    dialog.start_scan()
+    if outcome == "cancel":
+        qtbot.waitUntil(lambda: bool(calls))
+        dialog.cancel_scan()
+    qtbot.waitUntil(lambda: dialog.worker is None)
+    assert dialog.review_state() == before
+    assert dialog.analysis_result is tiny_result
+    assert dialog.local_table.isEnabled()
+    assert dialog.scan_button.isEnabled()
+    assert dialog.scan_button.text() == "Rerun Whisper..."
+    assert dialog.model_combo.currentData() == "base"
+    assert dialog.language_combo.currentData() == "ja"
+    assert "tiny; detected en" in dialog.local_draft_label.text()
+    assert "base" not in dialog.local_draft_label.text()
+    assert "Use Whisper Transcript" in dialog.progress_label.text()
+    assert bool(errors) == (outcome in {"memory", "runtime", "invalid", "setup"})
+    if errors:
+        assert "Use Whisper Transcript" in errors[0]
+    assert len(calls) == (0 if outcome in {
+        "decline-replacement", "decline-download", "setup",
+    } else 1)
+    if calls:
+        assert calls[0]["model_key"] == "base"
+        assert calls[0]["language"] == "ja"
+        assert calls[0]["use_whisper"]
+    assert len(prompts) == (2 if outcome == "decline-download" else 1)
+
+    # Clicking the already-selected row must choose its transcript, not just highlight it.
+    dialog.show()
+    dialog.local_table.selectRow(0)
+    qtbot.mouseClick(
+        dialog.local_table.viewport(), Qt.MouseButton.LeftButton,
+        pos=dialog.local_table.visualItemRect(dialog.local_table.item(0, 3)).center(),
+    )
+    assert dialog.selected_source == "local"
+    assert dialog.add_button.text() == "Use Whisper Transcript"
+    assert dialog.add_button.isEnabled()
+    accepted = []
+    dialog.suggestions_accepted.connect(accepted.extend)
+    dialog.add_button.click()
+    assert accepted == [AnalysisSuggestion(0.5, 3, "My current Whisper edit", "Whisper", 0.8)]
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert len(calls) <= 1
+
+
+def test_successful_model_switch_updates_only_local_draft_provenance(
+    qtbot, tmp_path, monkeypatch, installed_whisper,
+):
+    review = AnalysisReview(
+        youtube_rows=[AnalysisDraftRow("1", "2", "YouTube edit", "YouTube")],
+        local_rows=[AnalysisDraftRow("1", "2", "Tiny edit", "Whisper", checked=False)],
+        refined_rows=[AnalysisDraftRow("1.1", "1.9", "Refined edit", "Refined YouTube")],
+        selected_source="refined", local_model_name="tiny", local_detected_language="en",
+    )
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        youtube_import=True, review=review,
+    )
+    qtbot.addWidget(dialog)
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(
+        analysis_dialog, "analyze_video",
+        lambda *_args, **_kwargs: AnalysisResult(
+            [AnalysisSuggestion(3, 5, "New base draft", "Whisper")],
+            1, 1, -30, "base", "ja", detect_hardware(),
+        ),
+    )
+    dialog.model_combo.setCurrentIndex(dialog.model_combo.findData("base"))
+    dialog.start_scan()
+    qtbot.waitUntil(lambda: dialog.worker is None)
+    saved = dialog.review_state()
+    assert saved.selected_source == review.selected_source
+    assert saved.youtube_rows == review.youtube_rows
+    assert saved.refined_rows == review.refined_rows
+    assert saved.local_rows == [AnalysisDraftRow("3.000", "5.000", "New base draft", "Whisper")]
+    assert saved.local_model_name == "base"
+    assert saved.local_detected_language == "ja"
+    path = tmp_path / "review.cvpack.json"
+    ProjectStore.save(PackProject(analysis_review=saved), path)
+    restored = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        youtube_import=True, review=ProjectStore.load(path).analysis_review,
+    )
+    qtbot.addWidget(restored)
+    assert "base; detected ja" in restored.local_draft_label.text()
+    assert restored.review_state() == saved
+    restored.local_radio.click()
+    assert restored.checked_suggestions() == [AnalysisSuggestion(3, 5, "New base draft", "Whisper")]
+    assert restored.add_button.isEnabled()
+
+
+def test_legacy_whisper_draft_does_not_claim_next_scan_model(qtbot, tmp_path):
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        youtube_import=True,
+        review=AnalysisReview(local_rows=[AnalysisDraftRow("1", "2", "Saved", "Whisper")]),
+    )
+    qtbot.addWidget(dialog)
+    for model in ("base", "tiny"):
+        dialog.model_combo.setCurrentIndex(dialog.model_combo.findData(model))
+        assert "model not recorded" in dialog.local_draft_label.text()
+        assert model not in dialog.local_draft_label.text()
+        assert dialog.add_button.isEnabled()
+
+
+@pytest.mark.parametrize("outcome", ["fail", "empty"])
+@pytest.mark.parametrize("with_captions", [False, True])
+def test_first_whisper_attempt_without_draft_can_retry(
+    qtbot, tmp_path, monkeypatch, installed_whisper, outcome, with_captions,
+):
+    calls = []
+
+    def analyze(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            if outcome == "fail":
+                raise AnalysisError("Insufficient memory")
+            return AnalysisResult([], 0, 0, -30, "base", "en", detect_hardware())
+        return AnalysisResult(
+            [AnalysisSuggestion(1, 2, "Retry result", "Whisper")],
+            1, 1, -30, "tiny", "en", detect_hardware(),
+        )
+
+    monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
+    monkeypatch.setattr(QMessageBox, "critical", lambda *_args: None)
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        youtube_import=True,
+        source_captions=[SourceCaption(1, 2, "Original", "YouTube")] if with_captions else [],
+    )
+    qtbot.addWidget(dialog)
+    dialog.start_scan()
+    qtbot.waitUntil(lambda: dialog.worker is None)
+    assert not dialog.local_radio.isEnabled()
+    assert dialog.add_button.isEnabled() == with_captions
+    assert dialog.scan_button.text() == "Run Whisper"
+    assert "No Whisper draft is available" in dialog.progress_label.text()
+    dialog.model_combo.setCurrentIndex(dialog.model_combo.findData("tiny"))
+    dialog.start_scan()
+    qtbot.waitUntil(lambda: dialog.worker is None)
+    assert len(calls) == 2
+    assert dialog.local_radio.isEnabled()
+    dialog.local_radio.click()
+    assert dialog.add_button.isEnabled()
+    assert dialog.checked_suggestions() == [AnalysisSuggestion(1, 2, "Retry result", "Whisper")]
+
+
+@pytest.mark.parametrize("has_previous", [False, True])
+def test_empty_refinement_keeps_drafts_and_does_not_chain_whisper(
+    qtbot, tmp_path, monkeypatch, has_previous,
+):
+    review = AnalysisReview(
+        youtube_rows=[AnalysisDraftRow("1", "2", "Original", "YouTube")],
+        refined_rows=(
+            [AnalysisDraftRow("1.1", "1.9", "Refined edit", "Refined YouTube")]
+            if has_previous else []
+        ),
+        selected_source="refined" if has_previous else "youtube",
+    )
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        source_captions=[SourceCaption(1, 2, "Original", "YouTube")], review=review,
+    )
+    qtbot.addWidget(dialog)
+    calls = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(
+        analysis_dialog, "analyze_video",
+        lambda *_args, **_kwargs: calls.append(1) or AnalysisResult(
+            [], 0, 0, -30, None, None, detect_hardware(), refined_captions=[],
+        ),
+    )
+    dialog._start_automatic_refinement()
+    qtbot.waitUntil(lambda: dialog.worker is None)
+    assert calls == [1]
+    assert dialog.review_state() == review
+    assert "No new rows" in dialog.refined_status.text()
+    assert dialog.add_button.isEnabled()
+    assert dialog.refined_radio.isEnabled() == has_previous
+
+
+@pytest.mark.parametrize("source", ["youtube", "refined", "local"])
+def test_clicking_draft_selects_its_source_and_checked_rows_control_import(qtbot, tmp_path, source):
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        youtube_import=True,
+        review=AnalysisReview(
+            youtube_rows=[AnalysisDraftRow("1", "2", "YouTube", "YouTube")],
+            refined_rows=[AnalysisDraftRow("2", "3", "Refined", "Refined YouTube")],
+            local_rows=[AnalysisDraftRow("3", "4", "Whisper", "Whisper")],
+            selected_source="local" if source != "local" else "youtube",
+        ),
+    )
+    qtbot.addWidget(dialog)
+    if source == "refined":
+        dialog.youtube_tabs.setCurrentIndex(1)
+        dialog.local_radio.setChecked(True)
+    table = {"youtube": dialog.youtube_table, "refined": dialog.refined_table,
+             "local": dialog.local_table}[source]
+    dialog.show()
+    table.selectRow(0)
+    assert dialog.selected_source != source
+    qtbot.mouseClick(
+        table.viewport(), Qt.MouseButton.LeftButton,
+        pos=table.visualItemRect(table.item(0, 3)).center(),
+    )
+    assert dialog.selected_source == source
+    assert dialog.add_button.isEnabled()
+    table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    assert not dialog.add_button.isEnabled()
+    assert dialog.preview_button.isEnabled()
+    table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    assert dialog.add_button.isEnabled()
+
+
+@pytest.mark.parametrize("start,end", [("unfinished", "2"), ("nan", "2"), ("1", "inf"), ("2", "1")])
+def test_invalid_checked_draft_stays_editable_until_fixed(
+    qtbot, tmp_path, monkeypatch, start, end,
+):
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        youtube_import=True,
+        review=AnalysisReview(local_rows=[AnalysisDraftRow(start, end, "Edit", "Whisper")]),
+    )
+    qtbot.addWidget(dialog)
+    warnings = []
+    accepted = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *_args: warnings.append(_args[-1]))
+    dialog.suggestions_accepted.connect(accepted.extend)
+    dialog.add_button.click()
+    assert warnings
+    assert not accepted
+    assert not dialog._close_after_cancel
+    dialog.local_table.item(0, 1).setText("1")
+    dialog.local_table.item(0, 2).setText("2")
+    dialog.add_button.click()
+    assert accepted == [AnalysisSuggestion(1, 2, "Edit", "Whisper")]
+
+
+@pytest.mark.parametrize("unavailable", ["youtube", "refined", "local"])
+def test_restored_unavailable_source_selects_an_existing_draft(qtbot, tmp_path, unavailable):
+    rows = [AnalysisDraftRow("1", "2", "Available", "Whisper")]
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        youtube_import=True,
+        review=AnalysisReview(
+            youtube_rows=[] if unavailable == "youtube" else rows,
+            refined_rows=[] if unavailable == "refined" else rows,
+            local_rows=[] if unavailable == "local" else rows,
+            selected_source=unavailable,
+        ),
+    )
+    qtbot.addWidget(dialog)
+    assert dialog.selected_source != unavailable
+    assert dialog.table.rowCount() == 1
+    assert dialog.add_button.isEnabled()
+    radio = {"youtube": dialog.youtube_radio, "refined": dialog.refined_radio,
+             "local": dialog.local_radio}[unavailable]
+    assert not radio.isEnabled()
+
+
+def test_switching_to_activity_scan_keeps_whisper_draft_until_success(
+    qtbot, tmp_path, monkeypatch,
+):
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        review=AnalysisReview(
+            local_rows=[AnalysisDraftRow("1", "2", "Whisper edit", "Whisper")],
+            local_model_name="tiny", local_detected_language="en",
+        ),
+    )
+    qtbot.addWidget(dialog)
+    before = dialog.review_state()
+    dialog.whisper_check.setChecked(False)
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(QMessageBox, "critical", lambda *_args: None)
+
+    def fail(*_args, **_kwargs):
+        raise AnalysisError("Audio unavailable")
+
+    monkeypatch.setattr(analysis_dialog, "analyze_video", fail)
+    dialog.start_scan()
+    qtbot.waitUntil(lambda: dialog.worker is None)
+    assert dialog.review_state() == before
+    assert dialog.add_button.text() == "Use Whisper Transcript"
+    assert not dialog.model_combo.isEnabled()
+    assert not dialog.language_combo.isEnabled()
+    monkeypatch.setattr(
+        analysis_dialog, "analyze_video",
+        lambda *_args, **_kwargs: AnalysisResult(
+            [AnalysisSuggestion(3, 4, "", "Audio activity")],
+            1, 0, -30, None, None, detect_hardware(),
+        ),
+    )
+    dialog.start_scan()
+    qtbot.waitUntil(lambda: dialog.worker is None)
+    assert dialog.add_button.text() == "Use Detected Ranges"
+    assert dialog.review_state().local_model_name == ""
+    assert dialog.review_state().local_detected_language == ""
+    assert dialog.checked_suggestions() == [AnalysisSuggestion(3, 4, "", "Audio activity")]

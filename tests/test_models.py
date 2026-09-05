@@ -93,6 +93,7 @@ def test_analysis_review_round_trip_preserves_unfinished_edits() -> None:
         [AnalysisDraftRow("in progress", "2", "Edited YouTube", "YouTube", checked=False)],
         [AnalysisDraftRow("0.5", "3", "Edited Whisper", "Whisper", 0.876)],
         "local",
+        local_model_name="tiny", local_detected_language="en",
     )
     project = PackProject(analysis_review=review)
     assert PackProject.from_dict(project.to_dict()).analysis_review == review
@@ -101,6 +102,7 @@ def test_analysis_review_round_trip_preserves_unfinished_edits() -> None:
 @pytest.mark.parametrize("review", [
     [], {"youtube_rows": [None]}, {"local_rows": {}},
     {"selected_source": "unknown"}, {"local_source": "unknown"},
+    {"local_model_name": None}, {"local_detected_language": []},
     {"local_rows": [{"start": "1", "end": "2", "caption": "", "source": "Whisper",
                      "confidence": float("nan")}]},
 ])
@@ -136,6 +138,8 @@ def test_previous_caption_and_review_format_load_with_refinement_defaults() -> N
     assert project.analysis_review == AnalysisReview([], [], "youtube", "Audio activity")
     assert project.analysis_review.refined_rows == []
     assert project.analysis_review.pause_threshold == 0.4
+    assert project.analysis_review.local_model_name == ""
+    assert project.analysis_review.local_detected_language == ""
 
 
 @pytest.mark.parametrize("fragments", [
