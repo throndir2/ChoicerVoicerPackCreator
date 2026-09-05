@@ -7,8 +7,10 @@ import pytest
 from choicer_voicer_pack_creator.models import (
     AnalysisDraftRow,
     AnalysisReview,
+    CaptionFragment,
     PackProject,
     Segment,
+    SourceCaption,
 )
 
 
@@ -105,3 +107,65 @@ def test_analysis_review_round_trip_preserves_unfinished_edits() -> None:
 def test_invalid_review_state_is_reported(review) -> None:
     with pytest.raises(ValueError):
         PackProject.from_dict({"analysis_review": review})
+
+
+def test_caption_fragment_and_three_independent_drafts_round_trip() -> None:
+    cue = SourceCaption(1, 3, "Raw & text", "YouTube", (
+        CaptionFragment(" Raw & ", 1.1), CaptionFragment("text", None),
+    ))
+    review = AnalysisReview(
+        [AnalysisDraftRow("1", "3", "YouTube edit", "YouTube")],
+        [AnalysisDraftRow("1.5", "3", "Whisper edit", "Whisper", 0.8)],
+        "refined", "Whisper",
+        [AnalysisDraftRow("unfinished", "3.4", "Refined edit", "Refined YouTube", checked=False)],
+        0.8,
+    )
+    project = PackProject(source_captions=[cue], analysis_review=review)
+    restored = PackProject.from_dict(project.to_dict())
+    assert restored.source_captions == [cue]
+    assert restored.analysis_review == review
+    assert restored.source_captions[0].fragments[1].start is None
+
+
+def test_previous_caption_and_review_format_load_with_refinement_defaults() -> None:
+    project = PackProject.from_dict({
+        "source_captions": [{"start": 1, "end": 2, "text": "Original", "source": "YouTube"}],
+        "analysis_review": {"selected_source": "youtube", "local_source": "Audio activity"},
+    })
+    assert project.source_captions == [SourceCaption(1, 2, "Original", "YouTube")]
+    assert project.analysis_review == AnalysisReview([], [], "youtube", "Audio activity")
+    assert project.analysis_review.refined_rows == []
+    assert project.analysis_review.pause_threshold == 0.4
+
+
+@pytest.mark.parametrize("fragments", [
+    None, {}, "text", [None], [{"text": None}], [{"text": 1}],
+    [{"text": "word", "start": "1"}], [{"text": "word", "start": True}],
+    [{"text": "word", "start": []}], [{"text": "word", "start": -0.1}],
+    [{"text": "word", "start": float("nan")}],
+    [{"text": "word", "start": float("inf")}],
+])
+def test_invalid_persisted_fragments_are_rejected(fragments) -> None:
+    with pytest.raises(ValueError, match="fragment"):
+        SourceCaption.from_dict({
+            "start": 0, "end": 3, "text": "word", "source": "YouTube",
+            "fragments": fragments,
+        })
+
+
+@pytest.mark.parametrize("threshold", [
+    None, {}, "0.4", True, -1, 0.199, 1.001, float("nan"), float("inf"),
+])
+def test_invalid_persisted_pause_threshold_is_rejected(threshold) -> None:
+    with pytest.raises(ValueError, match="pause threshold"):
+        AnalysisReview.from_dict({"pause_threshold": threshold})
+
+
+@pytest.mark.parametrize("threshold", [0.2, 0.4, 1.0])
+def test_persisted_pause_threshold_accepts_inclusive_bounds(threshold) -> None:
+    assert AnalysisReview.from_dict({"pause_threshold": threshold}).pause_threshold == threshold
+
+
+def test_invalid_refined_rows_are_validated_like_other_drafts() -> None:
+    with pytest.raises(ValueError, match="draft rows"):
+        AnalysisReview.from_dict({"refined_rows": [None]})

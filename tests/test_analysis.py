@@ -27,6 +27,7 @@ from choicer_voicer_pack_creator.analysis import (
 )
 from choicer_voicer_pack_creator.diagnostics import AnalysisDiagnostics, analysis_log_path
 from choicer_voicer_pack_creator.media import MediaTools
+from choicer_voicer_pack_creator.models import CaptionFragment, SourceCaption
 
 
 def _write_test_wav(path: Path) -> None:
@@ -63,6 +64,55 @@ def test_activity_scan_finds_deterministic_regions(tmp_path: Path) -> None:
     assert regions[1].start == pytest.approx(1.7, abs=0.04)
     assert regions[1].end == pytest.approx(2.4, abs=0.04)
     assert progress[-1][1] == 1.0
+
+
+def test_raw_activity_retains_real_gap_edges_without_default_padding(tmp_path: Path) -> None:
+    wav_path = tmp_path / "activity.wav"
+    _write_test_wav(wav_path)
+    messages = []
+    regions, threshold = scan_audio_activity(
+        wav_path, 2.4, "balanced", lambda message, _: messages.append(message),
+        lambda: False, raw=True,
+    )
+    assert regions == [ActivityRegion(0.5, 1.3), ActivityRegion(1.8, 2.4)]
+    assert threshold is not None
+    assert all("YouTube refinement" in message for message in messages)
+
+
+def test_raw_activity_retains_short_and_quiet_sounds_instead_of_false_pauses(tmp_path) -> None:
+    path = tmp_path / "activity.wav"
+    samples = array("h")
+    for seconds, amplitude in ((0.5, 12000), (0.4, 300), (0.04, 12000), (0.5, 0)):
+        samples.extend(amplitude if index % 16 < 8 else -amplitude
+                       for index in range(round(seconds * 16000)))
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(16000)
+        output.writeframes(samples.tobytes())
+    regions, _ = scan_audio_activity(
+        path, 1.44, "balanced", lambda *_: None, lambda: False, raw=True,
+    )
+    assert len(regions) == 1
+    assert (regions[0].start, regions[0].end) == pytest.approx((0, 0.94))
+
+
+def test_raw_activity_scan_checks_cancellation(tmp_path: Path) -> None:
+    wav_path = tmp_path / "activity.wav"
+    _write_test_wav(wav_path)
+    with pytest.raises(AnalysisCancelled):
+        scan_audio_activity(
+            wav_path, 2.4, "balanced", lambda *_: None, lambda: True, raw=True,
+        )
+
+
+def test_raw_activity_end_never_rounds_beyond_video_duration(tmp_path: Path) -> None:
+    wav_path = tmp_path / "activity.wav"
+    _write_test_wav(wav_path)
+    regions, _ = scan_audio_activity(
+        wav_path, 1.23456, "balanced", lambda *_: None, lambda: False, raw=True,
+    )
+    assert regions == [ActivityRegion(0.5, 1.23456)]
 
 
 def test_silent_activity_scan_returns_no_suggestions(tmp_path: Path) -> None:
@@ -219,6 +269,101 @@ def test_video_activity_analysis_runs_end_to_end_without_model(tmp_path: Path) -
     assert result.transcript_regions == 0
     assert all(item.source == "Audio activity" for item in result.suggestions)
     assert all(item.caption == "" for item in result.suggestions)
+    assert result.refined_captions is None
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_refine_only_analysis_uses_audio_without_whisper_and_reports_separate_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty: bool,
+) -> None:
+    def extract(_media, _video, destination, _progress, _cancelled):
+        _write_test_wav(destination)
+
+    def forbidden_whisper(*_args, **_kwargs):
+        raise AssertionError("Refinement must not construct a Whisper manager or download models")
+
+    monkeypatch.setattr(analysis_module, "extract_analysis_audio", extract)
+    monkeypatch.setattr(analysis_module, "WhisperManager", forbidden_whisper)
+    cues = [] if empty else [SourceCaption(0.5, 2.4, "Hello there", "YouTube", (
+        CaptionFragment("Hello ", 0.5), CaptionFragment("there", 1.8),
+    ))]
+    original = [cue.to_dict() for cue in cues]
+    messages = []
+    with AnalysisDiagnostics(tmp_path / "diagnostics"):
+        result = analyze_video(
+            object(), tmp_path / "video.mp4", 2.4, tmp_path / "data",
+            sensitivity="balanced", use_whisper=False, model_key="tiny", language="auto",
+            progress=lambda message, _: messages.append(message), cancelled=lambda: False,
+            source_captions=cues, pause_threshold=0.4,
+        )
+    assert result.suggestions == []
+    assert result.refined_captions is not None
+    assert [row.text for row in result.refined_captions] == ([] if empty else ["Hello", "there"])
+    assert result.activity_regions == 2
+    assert result.transcript_regions == 0
+    assert result.model_name is None
+    assert [cue.to_dict() for cue in cues] == original
+    assert any("Refining YouTube" in message for message in messages)
+    events = [json.loads(line) for line in analysis_log_path(tmp_path / "diagnostics")
+              .read_text(encoding="utf-8").splitlines()]
+    configuration = next(event for event in events if event["event"] == "analysis_configuration")
+    assert configuration["refine_youtube"] is True
+    outcome = next(event for event in events if event["event"] == "analysis_results")
+    assert outcome["refined_captions"] == (0 if empty else 2)
+
+
+def test_normal_analysis_keeps_default_scan_and_whisper_output(tmp_path, monkeypatch) -> None:
+    calls = []
+    transcript = AnalysisSuggestion(0.5, 1, "Original Whisper", "Whisper", 0.8)
+    component = tmp_path / "installed-component"
+    component.write_bytes(b"test")
+
+    class FakeWhisper:
+        cli_path = component
+        models = {"tiny": {"name": "Fake tiny"}}
+
+        def __init__(self, *_):
+            pass
+
+        def model_path(self, _key):
+            return component
+
+        def transcribe(self, *_):
+            return [transcript], "en"
+
+    def scan(*_args, **kwargs):
+        calls.append(kwargs)
+        return [ActivityRegion(0.5, 1)], -30
+
+    monkeypatch.setattr(analysis_module, "WhisperManager", FakeWhisper)
+    monkeypatch.setattr(analysis_module, "extract_analysis_audio", lambda *_: None)
+    monkeypatch.setattr(analysis_module, "scan_audio_activity", scan)
+    monkeypatch.setattr(
+        analysis_module, "detect_hardware", lambda: HardwareProfile(4, None, None, "tiny", "test")
+    )
+    result = analyze_video(
+        object(), tmp_path / "video", 2, tmp_path,
+        sensitivity="balanced", use_whisper=True, model_key="tiny", language="en",
+        progress=lambda *_: None, cancelled=lambda: False,
+    )
+    assert calls == [{}]
+    assert result.suggestions == [transcript]
+    assert result.refined_captions is None
+    assert result.detected_language == "en"
+
+
+def test_refinement_shares_disk_checks_and_propagates_cancellation(tmp_path, monkeypatch) -> None:
+    arguments = dict(
+        sensitivity="balanced", use_whisper=False, model_key="tiny", language="auto",
+        progress=lambda *_: None, source_captions=[],
+    )
+    with pytest.raises(AnalysisCancelled):
+        analyze_video(object(), tmp_path / "video", 2, tmp_path, **arguments, cancelled=lambda: True)
+    monkeypatch.setattr(
+        analysis_module.shutil, "disk_usage", lambda _: shutil._ntuple_diskusage(1, 1, 0)
+    )
+    with pytest.raises(AnalysisError, match="free"):
+        analyze_video(object(), tmp_path / "video", 2, tmp_path, **arguments, cancelled=lambda: False)
 
 
 def test_whisper_setup_uses_verified_allowlist_and_cache(

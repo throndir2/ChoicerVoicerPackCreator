@@ -10,11 +10,35 @@ AudioMode = Literal["video", "file"]
 
 
 @dataclass(frozen=True, slots=True)
+class CaptionFragment:
+    text: str
+    start: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"text": self.text, "start": self.start}
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> CaptionFragment:
+        text = value.get("text")
+        start = value.get("start")
+        if not isinstance(text, str):
+            raise ValueError("Caption fragment text must be a string")
+        if start is not None:
+            if isinstance(start, bool) or not isinstance(start, (int, float)):
+                raise ValueError("Caption fragment start must be a number or null")
+            if not math.isfinite(start) or start < 0:
+                raise ValueError("Caption fragment has an invalid start")
+            start = float(start)
+        return cls(text, start)
+
+
+@dataclass(frozen=True, slots=True)
 class SourceCaption:
     start: float
     end: float
     text: str
     source: str
+    fragments: tuple[CaptionFragment, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -22,6 +46,7 @@ class SourceCaption:
             "end": self.end,
             "text": self.text,
             "source": self.source,
+            "fragments": [fragment.to_dict() for fragment in self.fragments],
         }
 
     @classmethod
@@ -29,7 +54,15 @@ class SourceCaption:
         start, end = float(value["start"]), float(value["end"])
         if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
             raise ValueError("Source caption has an invalid time range")
-        return cls(start, end, str(value["text"]), str(value["source"]))
+        fragments = value.get("fragments", [])
+        if not isinstance(fragments, list) or not all(
+            isinstance(fragment, dict) for fragment in fragments
+        ):
+            raise ValueError("Caption fragments must be an array of JSON objects")
+        return cls(
+            start, end, str(value["text"]), str(value["source"]),
+            tuple(CaptionFragment.from_dict(fragment) for fragment in fragments),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +104,8 @@ class AnalysisReview:
     local_rows: list[AnalysisDraftRow] = field(default_factory=list)
     selected_source: str = "local"
     local_source: str = "Whisper"
+    refined_rows: list[AnalysisDraftRow] = field(default_factory=list)
+    pause_threshold: float = 0.4
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -78,23 +113,36 @@ class AnalysisReview:
             "local_rows": [row.to_dict() for row in self.local_rows],
             "selected_source": self.selected_source,
             "local_source": self.local_source,
+            "refined_rows": [row.to_dict() for row in self.refined_rows],
+            "pause_threshold": self.pause_threshold,
         }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> AnalysisReview:
         rows: dict[str, list[AnalysisDraftRow]] = {}
-        for key in ("youtube_rows", "local_rows"):
+        for key in ("youtube_rows", "local_rows", "refined_rows"):
             items = value.get(key, [])
             if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
                 raise ValueError("Analysis draft rows must be an array of JSON objects")
             rows[key] = [AnalysisDraftRow.from_dict(item) for item in items]
         selected_source = str(value.get("selected_source", "local"))
         local_source = str(value.get("local_source", "Whisper"))
-        if selected_source not in {"youtube", "local"}:
+        if selected_source not in {"youtube", "local", "refined"}:
             raise ValueError("Unknown analysis transcript selection")
         if local_source not in {"Whisper", "Audio activity"}:
             raise ValueError("Unknown local analysis source")
-        return cls(rows["youtube_rows"], rows["local_rows"], selected_source, local_source)
+        pause_threshold = value.get("pause_threshold", 0.4)
+        if (
+            isinstance(pause_threshold, bool)
+            or not isinstance(pause_threshold, (int, float))
+            or not math.isfinite(pause_threshold)
+            or not 0.2 <= pause_threshold <= 1.0
+        ):
+            raise ValueError("Caption pause threshold must be between 0.2 and 1.0 seconds")
+        return cls(
+            rows["youtube_rows"], rows["local_rows"], selected_source, local_source,
+            rows["refined_rows"], float(pause_threshold),
+        )
 
 
 @dataclass(slots=True)
