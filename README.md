@@ -281,18 +281,21 @@ you can also select or type a language code. YouTube-generated translations are 
 creator-uploaded tracks can themselves be translations. Some videos have no accessible captions,
 and caption delivery can fail independently of the video download.
 
-Available captions immediately populate the **YouTube Captions** panel. Whisper starts
-automatically on a background thread, asking permission first if its runtime/model must be
-downloaded. Its result appears alongside YouTube in the **Whisper Transcript** panel. Each
-transcript keeps its own row count, text, and In/Out boundaries: a longer Whisper passage is not
+Available captions immediately populate the **YouTube Captions** panel. A local audio-only
+refinement pass runs automatically on a background thread, then selects the **Refined YouTube**
+draft for review and use. It requires no model download and keeps the original captions available.
+After refinement completes, Whisper starts automatically, asking permission first if its
+runtime/model must be downloaded. Its result appears alongside YouTube in the **Whisper Transcript**
+panel without changing the selected draft. Each transcript keeps its own row count, text, and
+In/Out boundaries: a longer Whisper passage is not
 forced onto shorter YouTube captions or flagged as a conflict. You can edit, preview, and uncheck
 rows in each draft independently.
-The playback button names the chosen source: **Play Selected YouTube Line** or **Play Selected
-Whisper Line**.
+The playback button names the chosen source: **Play Selected YouTube Line**,
+**Play Selected Refined YouTube Line**, or **Play Selected Whisper Line**.
 
-For pause-aware segmentation, open the **Refined YouTube** tab and click **Refine YouTube**.
-Wait for or cancel a running Whisper scan first. This optional, local audio-only pass requires
-no model download and uses the original imported YouTube words, not edits made to either draft.
+To adjust pause-aware segmentation, open the **Refined YouTube** tab and click
+**Refine YouTube Again...**. Wait for or cancel a running Whisper scan first. Refinement
+uses the original imported YouTube words, not edits made to either draft.
 New imports retain YouTube's available word/text-fragment offsets. Refinement uses these
 boundaries together with measured audio pauses to split lines and conservatively join display
 fragments, rather than treating subtitle display windows as spoken phrases. **Minimum pause**
@@ -315,7 +318,9 @@ Existing project segments are never
 silently replaced; adding another set requires confirmation.
 
 If captions are unavailable, the same automatic Whisper pass drafts suggestions from the audio.
-Declining setup or a failed/canceled scan leaves downloaded media and available captions intact.
+Declining Whisper setup or a failed/canceled Whisper scan leaves downloaded media and both
+YouTube drafts intact. If automatic refinement fails or is canceled, the original captions remain
+available and Whisper does not start automatically; either pass can be started manually.
 **Cancel Scan** keeps the analysis window open. **Keep Drafts & Close** stops a running scan and
 retains all available drafts, including edits, checked rows, source selection, and the pause setting, without adding
 segments. Draft changes are included in recovery snapshots and **Save Project**, just like other
