@@ -31,8 +31,10 @@ try:
 except ImportError:  # Removed from Python 3.13; retain the pure-Python fallback.
     _audio_rms = None
 
+from choicer_voicer_pack_creator.captions import refine_captions
 from choicer_voicer_pack_creator.diagnostics import diagnostic_event
 from choicer_voicer_pack_creator.media import MediaTools
+from choicer_voicer_pack_creator.models import SourceCaption
 
 ProgressCallback = Callable[[str, float | None], None]
 CancelCallback = Callable[[], bool]
@@ -92,6 +94,7 @@ class AnalysisResult:
     model_name: str | None
     detected_language: str | None
     hardware: HardwareProfile
+    refined_captions: list[SourceCaption] | None = None
 
 
 def default_manifest_path() -> Path:
@@ -330,8 +333,14 @@ def scan_audio_activity(
     sensitivity: str,
     progress: ProgressCallback,
     cancelled: CancelCallback,
+    *,
+    raw: bool = False,
 ) -> tuple[list[ActivityRegion], float | None]:
-    progress("Measuring deterministic audio activity…", 0.0)
+    message = (
+        "Measuring low-activity gaps for YouTube refinement…"
+        if raw else "Measuring deterministic audio activity…"
+    )
+    progress(message, 0.0)
     with wave.open(str(wav_path), "rb") as source:
         if source.getnchannels() != 1 or source.getsampwidth() != 2:
             raise AnalysisError("Analysis audio must be 16-bit mono PCM")
@@ -358,7 +367,8 @@ def scan_audio_activity(
                 normalized = math.sqrt(mean_square) / 32768.0
             levels.append(20.0 * math.log10(max(normalized, 1e-8)))
             if index % 250 == 0:
-                progress("Measuring deterministic audio activity…", index / total_windows)
+                progress(message, index / total_windows)
+    _check_cancel(cancelled)
     ordered_levels = sorted(levels)
     if not levels or max(levels) < -58.0:
         return [], None
@@ -370,16 +380,22 @@ def scan_audio_activity(
         sensitivity, 0.0
     )
     threshold = max(-58.0, min(-20.0, foreground - 3.0, threshold))
+    if raw:
+        # Quiet speech must not become a false pause merely because another sound is loud.
+        threshold = min(threshold, -45.0)
     active = [level >= threshold for level in levels]
 
-    max_gap = round(0.28 / 0.02)
+    max_gap = 0 if raw else round(0.28 / 0.02)
     index = 0
     while index < len(active):
+        _check_cancel(cancelled)
         if active[index]:
             index += 1
             continue
         gap_start = index
         while index < len(active) and not active[index]:
+            if index % 250 == 0:
+                _check_cancel(cancelled)
             index += 1
         if gap_start > 0 and index < len(active) and index - gap_start <= max_gap:
             active[gap_start:index] = [True] * (index - gap_start)
@@ -387,22 +403,33 @@ def scan_audio_activity(
     regions: list[ActivityRegion] = []
     index = 0
     while index < len(active):
+        _check_cancel(cancelled)
         if not active[index]:
             index += 1
             continue
         start_index = index
         while index < len(active) and active[index]:
+            if index % 250 == 0:
+                _check_cancel(cancelled)
             index += 1
         end_index = index
-        if (end_index - start_index) * 0.02 < 0.16:
+        if not raw and (end_index - start_index) * 0.02 < 0.16:
             continue
-        start = max(0.0, start_index * 0.02 - 0.10)
-        end = min(duration, end_index * 0.02 + 0.14)
-        if regions and start - regions[-1].end <= 0.08:
+        start = max(0.0, start_index * 0.02 - (0 if raw else 0.10))
+        end = min(duration, end_index * 0.02 + (0 if raw else 0.14))
+        if end <= start:
+            continue
+        if not raw and regions and start - regions[-1].end <= 0.08:
             regions[-1] = ActivityRegion(regions[-1].start, round(end, 3))
+        elif raw:
+            regions.append(ActivityRegion(start, end))
         else:
             regions.append(ActivityRegion(round(start, 3), round(end, 3)))
-    progress(f"Found {len(regions)} deterministic activity region(s).", 1.0)
+    progress(
+        f"Found {len(regions)} raw activity region(s) for YouTube refinement."
+        if raw else f"Found {len(regions)} deterministic activity region(s).",
+        1.0,
+    )
     return regions, round(threshold, 2)
 
 
@@ -865,13 +892,24 @@ def analyze_video(
     progress: ProgressCallback,
     cancelled: CancelCallback,
     manifest_path: Path | None = None,
+    source_captions: list[SourceCaption] | None = None,
+    pause_threshold: float = 0.4,
 ) -> AnalysisResult:
+    _check_cancel(cancelled)
+    if not math.isfinite(duration) or duration <= 0:
+        raise AnalysisError("Video analysis requires a finite, positive duration")
+    if source_captions is not None and (
+        isinstance(pause_threshold, bool) or not math.isfinite(pause_threshold)
+        or not 0.2 <= pause_threshold <= 1.0
+    ):
+        raise ValueError("Caption pause threshold must be between 0.2 and 1.0 seconds")
     hardware = detect_hardware()
     diagnostic_event(
         "analysis_configuration", source_video=str(video), duration_seconds=duration,
         sensitivity=sensitivity, use_whisper=use_whisper, model=model_key, language=language,
         cpu_threads=hardware.cpu_threads, memory_bytes=hardware.memory_bytes,
         available_memory_bytes=hardware.available_memory_bytes,
+        refine_youtube=source_captions is not None, pause_threshold=pause_threshold,
     )
     estimated_audio_bytes = max(1, math.ceil(duration * 16_000 * 2))
     temporary_root = Path(tempfile.gettempdir()).resolve()
@@ -914,9 +952,26 @@ def analyze_video(
         temporary = Path(temporary_text)
         wav_path = temporary / "analysis.wav"
         extract_analysis_audio(media, video, wav_path, progress, cancelled)
-        activity, threshold = scan_audio_activity(
-            wav_path, duration, sensitivity, progress, cancelled
-        )
+        refined: list[SourceCaption] | None = None
+        if source_captions is not None:
+            activity, threshold = scan_audio_activity(
+                wav_path, duration, sensitivity, progress, cancelled, raw=True
+            )
+            progress("Refining YouTube fragments using measured audio pauses…", None)
+            refined = refine_captions(
+                source_captions, [(region.start, region.end) for region in activity], duration,
+                pause_threshold=pause_threshold, check_cancel=lambda: _check_cancel(cancelled),
+            )
+            progress(f"Prepared {len(refined)} Refined YouTube caption row(s).", 1.0)
+            # If both outputs were requested, retain the ordinary scan for Whisper suggestions.
+            if use_whisper:
+                activity, threshold = scan_audio_activity(
+                    wav_path, duration, sensitivity, progress, cancelled
+                )
+        else:
+            activity, threshold = scan_audio_activity(
+                wav_path, duration, sensitivity, progress, cancelled
+            )
         transcripts: list[AnalysisSuggestion] = []
         detected_language: str | None = None
         model_name: str | None = None
@@ -932,10 +987,14 @@ def analyze_video(
                 cancelled,
             )
             model_name = str(manager.models[model_key]["name"])
-        suggestions = combine_suggestions(activity, transcripts)
+        suggestions = (
+            [] if source_captions is not None and not use_whisper
+            else combine_suggestions(activity, transcripts)
+        )
         diagnostic_event(
             "analysis_results", activity_regions=len(activity), transcript_regions=len(transcripts),
             suggestions=len(suggestions), detected_language=detected_language,
+            refined_captions=len(refined) if refined is not None else None,
         )
         return AnalysisResult(
             suggestions=suggestions,
@@ -945,4 +1004,5 @@ def analyze_video(
             model_name=model_name,
             detected_language=detected_language,
             hardware=hardware,
+            refined_captions=refined,
         )

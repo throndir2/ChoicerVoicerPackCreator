@@ -7,7 +7,14 @@ from pathlib import Path
 import pytest
 
 import choicer_voicer_pack_creator.project_io as project_io
-from choicer_voicer_pack_creator.models import PackProject, Segment, SourceCaption
+from choicer_voicer_pack_creator.models import (
+    AnalysisDraftRow,
+    AnalysisReview,
+    CaptionFragment,
+    PackProject,
+    Segment,
+    SourceCaption,
+)
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
 
 
@@ -44,7 +51,15 @@ def test_youtube_caption_provenance_survives_save_and_recovery(tmp_path: Path) -
     project = PackProject(
         source_url="https://www.youtube.com/watch?v=abcdefghijk",
         caption_language="en",
-        source_captions=[SourceCaption(1, 2, "Original caption", "YouTube creator (en)")],
+        source_captions=[SourceCaption(1, 2, "Original caption", "YouTube creator (en)", (
+            CaptionFragment("Original ", 1), CaptionFragment("caption"),
+        ))],
+        analysis_review=AnalysisReview(
+            [AnalysisDraftRow("1", "2", "YouTube edit", "YouTube")],
+            [AnalysisDraftRow("1", "2", "Whisper edit", "Whisper")],
+            "refined", "Whisper",
+            [AnalysisDraftRow("1.1", "1.9", "Refined edit", "Refined YouTube")], 0.6,
+        ),
     )
     path = tmp_path / "captions.cvpack.json"
     ProjectStore.save(project, path)
@@ -52,9 +67,11 @@ def test_youtube_caption_provenance_survives_save_and_recovery(tmp_path: Path) -
     assert loaded.source_url == project.source_url
     assert loaded.caption_language == "en"
     assert loaded.source_captions == project.source_captions
+    assert loaded.analysis_review == project.analysis_review
     recovery = RecoveryStore(tmp_path / "recovery.json")
     recovery.save(project, path)
     assert recovery.load().project.source_captions == project.source_captions
+    assert recovery.load().project.analysis_review == project.analysis_review
 
 
 def test_save_retains_previous_version_and_save_as_preserves_original(tmp_path: Path) -> None:
