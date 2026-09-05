@@ -7,8 +7,10 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from contextvars import copy_context
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from http.cookiejar import Cookie
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from threading import Lock
@@ -18,7 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 import deno
 from yt_dlp import YoutubeDL
 from yt_dlp.extractor.youtube import YoutubeIE
-from yt_dlp.networking.exceptions import RequestError
+from yt_dlp.networking.exceptions import HTTPError, RequestError
 from yt_dlp.postprocessor.common import PostProcessor
 from yt_dlp.utils import DownloadCancelled, DownloadError
 
@@ -30,9 +32,22 @@ from choicer_voicer_pack_creator.diagnostics import (
     diagnostic_exception,
     diagnostic_operation,
     diagnostic_text,
+    forward_diagnostics,
 )
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import SourceCaption
+from choicer_voicer_pack_creator.process_worker import (
+    ProcessWorkerCancelled,
+    ProcessWorkerError,
+    ProcessWorkerTimeout,
+    run_process_worker,
+)
+
+METADATA_TIMEOUT = 60.0
+CAPTION_TIMEOUT = 30.0
+TRANSFER_IDLE_TIMEOUT = 120.0
+POSTPROCESS_IDLE_TIMEOUT = 600.0
+PROBE_TIMEOUT = 60.0
 
 
 class YouTubeError(ValueError):
@@ -40,6 +55,10 @@ class YouTubeError(ValueError):
 
 
 class YouTubeCancelled(DownloadCancelled):
+    pass
+
+
+class YouTubeNetworkError(YouTubeError):
     pass
 
 
@@ -231,12 +250,17 @@ class _Transfer:
 
 
 class _DownloadProgress:
-    def __init__(self, progress: ProgressCallback, cancelled: CancelCallback) -> None:
+    def __init__(
+        self, progress: ProgressCallback, cancelled: CancelCallback,
+        activity: Callable[[], None] = lambda: None,
+    ) -> None:
         self.progress = progress
         self.cancelled = cancelled
+        self.activity = activity
         self.transfers: list[_Transfer] = []
         self.fraction = 0.0
         self.held_estimate = False
+        self._unmatched_downloaded = 0.0
         self._lock = Lock()
         self._diagnostic_last = float("-inf")
         self._diagnostic_context = copy_context()
@@ -326,6 +350,10 @@ class _DownloadProgress:
         if len(matches) != 1:
             # External downloaders may report a whole merged selection rather than a stream.
             # Do not guess how those bytes should be allocated across the selected formats.
+            downloaded = _positive_size(status.get("downloaded_bytes")) or 0
+            if downloaded > self._unmatched_downloaded:
+                self.activity()
+            self._unmatched_downloaded = downloaded
             self._report_diagnostics(status, None)
             self.progress("Downloading YouTube video and audio — transfer size unavailable", None)
             return
@@ -337,6 +365,11 @@ class _DownloadProgress:
         elif estimate is not None and (transfer.estimated or transfer.total is None):
             transfer.total, transfer.estimated = estimate, True
         downloaded = status.get("downloaded_bytes")
+        if (
+            (_positive_size(downloaded) is not None and downloaded > transfer.downloaded)
+            or (status["status"] == "finished" and not transfer.finished)
+        ):
+            self.activity()
         if downloaded == 0 or _positive_size(downloaded) is not None:
             transfer.downloaded = float(downloaded)
         if status["status"] == "finished":
@@ -393,6 +426,241 @@ class _DownloadProgressPP(PostProcessor):
         return [], info
 
 
+@dataclass(slots=True)
+class _YouTubeRequest:
+    stage: Path
+    url: str
+    ffmpeg: str
+    runtime: Path
+    ipv4: bool = False
+    cookies: list[Cookie] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _YouTubeResponse:
+    value: Any
+    warnings: list[str]
+    cookies: list[Cookie] = field(default_factory=list)
+
+
+def _is_network_error(error: BaseException) -> bool:
+    seen: set[int] = set()
+    while id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, HTTPError):
+            return False
+        if isinstance(error, (RequestError, TimeoutError, ConnectionError)):
+            return True
+        nested = getattr(error, "cause", None) or error.__cause__ or error.__context__
+        if nested is None and isinstance(error, DownloadError) and error.exc_info:
+            nested = error.exc_info[1]
+        if not isinstance(nested, BaseException):
+            return False
+        error = nested
+    return False
+
+
+def _youtube_worker(
+    emit: Callable[[str, dict[str, Any]], None],
+    request: _YouTubeRequest,
+    action: str,
+    payload: Any,
+) -> _YouTubeResponse:
+    with forward_diagnostics(
+        lambda event, details: emit("diagnostic", {"event": event, "details": details}),
+    ):
+        if action == "probe":
+            media, video = payload
+            return _YouTubeResponse(media.probe(video), [])
+        notes: list[str] = []
+        tracker = _DownloadProgress(
+            lambda message, fraction: emit("progress", {"message": message, "fraction": fraction}),
+            lambda: False,
+            lambda: emit("activity", {}),
+        )
+
+        def postprocess(status: dict[str, Any]) -> None:
+            if status.get("postprocessor") != _DownloadProgressPP.pp_key():
+                emit("phase", {"postprocessing": True})
+            tracker.postprocessor_hook(status)
+
+        options = {
+            "noplaylist": True,
+            "format": "bv*+ba/b",
+            "outtmpl": str(request.stage / "source.%(ext)s"),
+            "merge_output_format": "mkv",
+            "ffmpeg_location": str(Path(request.ffmpeg).parent),
+            "cachedir": False,
+            "quiet": True,
+            "no_warnings": False,
+            "logger": _DownloadLogger(notes, lambda: False),
+            "progress_hooks": [tracker.download_hook],
+            "postprocessor_hooks": [postprocess],
+            "socket_timeout": 15,
+            "source_address": "0.0.0.0" if request.ipv4 else None,
+            "retries": 2,
+            "extractor_retries": 2,
+            "fragment_retries": 2,
+            "skip_unavailable_fragments": False,
+            "remote_components": set(),
+            "js_runtimes": {"deno": {"path": str(request.runtime)}},
+            "extractor_args": {
+                "youtube": {"skip": ["translated_subs"], "fetch_pot": ["never"]},
+            },
+            "geo_bypass": False,
+            "cookiefile": None,
+            "cookiesfrombrowser": None,
+            "usenetrc": False,
+            "writesubtitles": False,
+            "writeautomaticsub": False,
+        }
+        try:
+            with YoutubeDL(options, auto_init=False) as downloader:
+                for cookie in request.cookies:
+                    downloader.cookiejar.set_cookie(cookie)
+                downloader.add_info_extractor(_PublicYoutubeIE())
+                downloader.add_post_processor(_DownloadProgressPP(tracker), when="before_dl")
+                if action == "metadata":
+                    value = downloader.extract_info(request.url, download=False, process=False)
+                elif action == "captions":
+                    with downloader.urlopen(payload) as response:
+                        raw = response.read(16 * 1024**2 + 1)
+                    if len(raw) > 16 * 1024**2:
+                        raise YouTubeError("Caption data exceeded the 16 MiB limit")
+                    value = json.loads(raw)
+                    diagnostic_event("youtube_caption_data_received", bytes=len(raw))
+                elif action == "media":
+                    downloader.process_ie_result(payload, download=True)
+                    value = None
+                else:
+                    raise ValueError(f"Unknown YouTube worker action: {action}")
+                cookies = list(downloader.cookiejar)
+        except DownloadError as error:
+            diagnostic_exception("youtube_extractor_failed", error)
+            if _is_network_error(error):
+                raise YouTubeNetworkError(str(error)) from error
+            raise YouTubeError(
+                "YouTube could not provide this video. It may be unavailable, restricted, or "
+                "rate-limited. No sign-in or restriction bypass is attempted. "
+                "You can also download an authorized copy separately and use New from Video."
+                f"\n\n{error}"
+            ) from error
+        except RequestError as error:
+            if _is_network_error(error):
+                raise YouTubeNetworkError(str(error)) from error
+            raise
+        return _YouTubeResponse(value, notes, cookies)
+
+
+def _run_youtube_stage(
+    request: _YouTubeRequest, action: str, payload: Any, notes: list[str],
+    progress: ProgressCallback, cancelled: CancelCallback,
+) -> Any:
+    labels = {
+        "metadata": "Fetching YouTube video details...",
+        "captions": "Fetching available YouTube captions...",
+        "media": "Preparing selected YouTube downloads...",
+        "probe": "Checking downloaded video...",
+    }
+    timeout = {
+        "metadata": METADATA_TIMEOUT, "captions": CAPTION_TIMEOUT, "probe": PROBE_TIMEOUT,
+    }.get(action)
+
+    def on_event(event: str, details: dict[str, Any]) -> bool:
+        nonlocal postprocessing, last_message, last_fraction, last_report
+        _check_cancel(cancelled)
+        if event == "diagnostic":
+            diagnostic_event(details["event"], **details["details"])
+        elif event == "progress":
+            last_message, last_fraction = details["message"], details["fraction"]
+            last_report = time.monotonic()
+            progress(last_message, last_fraction)
+        elif event == "phase":
+            changed = postprocessing != details["postprocessing"]
+            postprocessing = details["postprocessing"]
+            return changed
+        elif event == "activity":
+            return True
+        else:
+            raise YouTubeError(f"Unknown YouTube worker event: {event}")
+        return False
+
+    def waiting(elapsed: float) -> None:
+        nonlocal last_report
+        if time.monotonic() - last_report < 5:
+            return
+        last_report = time.monotonic()
+        diagnostic_event(
+            "youtube_waiting", stage=action, ipv4=request.ipv4,
+            stage_elapsed_seconds=round(elapsed, 1),
+        )
+        progress(
+            f"{last_message} Waiting ({int(elapsed)}s elapsed); you can cancel.",
+            last_fraction,
+        )
+
+    def idle_timeout() -> float:
+        return POSTPROCESS_IDLE_TIMEOUT if postprocessing else TRANSFER_IDLE_TIMEOUT
+
+    while True:
+        postprocessing = False
+        last_message, last_fraction = labels[action], None
+        last_report = time.monotonic()
+        progress(last_message, None)
+        diagnostic_event(
+            "youtube_stage_attempt", stage=action, ipv4=request.ipv4, timeout_seconds=timeout,
+        )
+        try:
+            result = run_process_worker(
+                _youtube_worker, (request, action, payload),
+                on_event=on_event, cancelled=cancelled, timeout=timeout,
+                idle_timeout=idle_timeout,
+                waiting=waiting,
+            )
+            _check_cancel(cancelled)
+            if not isinstance(result, _YouTubeResponse):
+                raise YouTubeError("The YouTube worker returned an invalid result.")
+            notes.extend(note for note in result.warnings if note not in notes)
+            if action != "probe":
+                request.cookies = result.cookies
+            return result.value
+        except ProcessWorkerCancelled as error:
+            raise YouTubeCancelled("YouTube download canceled") from error
+        except ProcessWorkerError as error:
+            _check_cancel(cancelled)
+            diagnostic_exception(
+                "youtube_stage_failed", error, stage=action, ipv4=request.ipv4,
+                remote_traceback=error.remote_traceback,
+            )
+            network_failure = isinstance(error, ProcessWorkerTimeout) or (
+                error.error_type == "YouTubeNetworkError"
+            )
+            if (
+                network_failure and not request.ipv4 and not postprocessing
+                and action != "probe"
+            ):
+                request.ipv4 = True
+                note = "The default YouTube connection stalled or failed; retrying using IPv4."
+                notes.append(note)
+                diagnostic_event("youtube_ipv4_retry", stage=action)
+                progress(note, None)
+                continue
+            if network_failure:
+                if postprocessing or action == "probe":
+                    raise YouTubeError(
+                        "Preparing the downloaded media exceeded its wait limit. "
+                        "The media tools have been stopped; existing media is unchanged. "
+                        "Retry or use New from Video with an authorized local copy."
+                    ) from error
+                raise YouTubeError(
+                    f"{labels[action].removesuffix('...')} did not finish within its wait limit "
+                    "or the connection failed. Check your internet connection, proxy/VPN settings, "
+                    "and whether your firewall permits this application. You can retry or open an "
+                    "authorized local copy with New from Video."
+                ) from error
+            raise YouTubeError(str(error)) from error
+
+
 @diagnostic_operation("youtube_download")
 def download_youtube(
     media: MediaTools,
@@ -412,7 +680,6 @@ def download_youtube(
         raise YouTubeError("Choose an existing destination folder.")
     _check_cancel(cancelled)
     notes: list[str] = []
-    tracker = _DownloadProgress(progress, cancelled)
     logged_progress = DiagnosticProgress("youtube_progress")
     callback = progress
 
@@ -434,96 +701,51 @@ def download_youtube(
     with tempfile.TemporaryDirectory(prefix=".cvpc-youtube-", dir=destination) as temporary:
         stage = Path(temporary)
         diagnostic_event("youtube_staging_created", path=stage)
-        options = {
-            "noplaylist": True,
-            "format": "bv*+ba/b",
-            "outtmpl": str(stage / "source.%(ext)s"),
-            "merge_output_format": "mkv",
-            "ffmpeg_location": str(Path(media.ffmpeg).parent),
-            "cachedir": False,
-            "quiet": True,
-            "no_warnings": False,
-            "logger": _DownloadLogger(notes, cancelled),
-            "progress_hooks": [tracker.download_hook],
-            "postprocessor_hooks": [tracker.postprocessor_hook],
-            "socket_timeout": 15,
-            "retries": 2,
-            "extractor_retries": 2,
-            "fragment_retries": 2,
-            "skip_unavailable_fragments": False,
-            "remote_components": set(),
-            "js_runtimes": {"deno": {"path": str(youtube_runtime_path())}},
-            "extractor_args": {
-                "youtube": {"skip": ["translated_subs"], "fetch_pot": ["never"]},
-            },
-            "geo_bypass": False,
-            "cookiefile": None,
-            "cookiesfrombrowser": None,
-            "usenetrc": False,
-            "writesubtitles": False,
-            "writeautomaticsub": False,
-        }
-        progress("Fetching YouTube video details...", None)
-        try:
-            with YoutubeDL(options, auto_init=False) as downloader:
-                downloader.add_info_extractor(_PublicYoutubeIE())
-                downloader.add_post_processor(_DownloadProgressPP(tracker), when="before_dl")
-                with diagnostic_operation("youtube_metadata"):
-                    info = downloader.extract_info(url, download=False, process=False)
-                _check_cancel(cancelled)
-                if not info or info.get("_type", "video") != "video" or "entries" in info:
-                    raise YouTubeError("The URL did not resolve to a single video.")
-                if info.get("is_live") or info.get("live_status") in {"is_live", "is_upcoming"}:
-                    raise YouTubeError("Live and upcoming streams cannot be imported.")
-                if (info.get("age_limit") or 0) >= 18 or info.get("availability") in {
-                    "private", "premium_only", "subscriber_only", "needs_auth",
-                }:
-                    raise YouTubeError("This video requires access that the importer does not request.")
-                diagnostic_event(
-                    "youtube_metadata_received",
-                    format_count=len(info.get("formats") or []),
-                    subtitle_language_count=len(info.get("subtitles") or {}),
-                    automatic_caption_language_count=len(info.get("automatic_captions") or {}),
-                    duration=_diagnostic_number(info.get("duration")),
-                    live_status=info.get("live_status"),
+        request = _YouTubeRequest(stage, url, media.ffmpeg, youtube_runtime_path())
+        with diagnostic_operation("youtube_metadata"):
+            info = _run_youtube_stage(request, "metadata", None, notes, progress, cancelled)
+        _check_cancel(cancelled)
+        if not info or info.get("_type", "video") != "video" or "entries" in info:
+            raise YouTubeError("The URL did not resolve to a single video.")
+        if info.get("is_live") or info.get("live_status") in {"is_live", "is_upcoming"}:
+            raise YouTubeError("Live and upcoming streams cannot be imported.")
+        if (info.get("age_limit") or 0) >= 18 or info.get("availability") in {
+            "private", "premium_only", "subscriber_only", "needs_auth",
+        }:
+            raise YouTubeError("This video requires access that the importer does not request.")
+        diagnostic_event(
+            "youtube_metadata_received",
+            format_count=len(info.get("formats") or []),
+            subtitle_language_count=len(info.get("subtitles") or {}),
+            automatic_caption_language_count=len(info.get("automatic_captions") or {}),
+            duration=_diagnostic_number(info.get("duration")),
+            live_status=info.get("live_status"),
+        )
+        track = select_caption_track(info, language)
+        diagnostic_event(
+            "youtube_caption_track_selected", available=track is not None,
+            language=track.language if track else None,
+            automatic=track.automatic if track else None,
+        )
+        captions_json: Any = None
+        if track:
+            try:
+                captions_json = _run_youtube_stage(
+                    request, "captions", track.url, notes, progress, cancelled,
                 )
-                track = select_caption_track(info, language)
-                diagnostic_event(
-                    "youtube_caption_track_selected", available=track is not None,
-                    language=track.language if track else None,
-                    automatic=track.automatic if track else None,
-                )
-                captions_json: Any = None
-                if track:
-                    progress("Fetching available YouTube captions...", None)
-                    try:
-                        with downloader.urlopen(track.url) as response:
-                            raw = response.read(16 * 1024**2 + 1)
-                        if len(raw) > 16 * 1024**2:
-                            raise ValueError("Caption data exceeded the 16 MiB limit")
-                        captions_json = json.loads(raw)
-                        diagnostic_event("youtube_caption_data_received", bytes=len(raw))
-                    except (RequestError, OSError, ValueError) as error:
-                        diagnostic_exception("youtube_caption_download_failed", error)
-                        diagnostic_event("youtube_caption_fallback", reason="download_failed")
-                        notes.append(f"Captions could not be downloaded; Whisper can draft them: {error}")
-                else:
-                    diagnostic_event("youtube_caption_fallback", reason="no_usable_track")
-                    notes.append(
-                        "No usable creator or automatic captions were available for the chosen "
-                        "language. Local Whisper will draft captions instead."
-                    )
-                _check_cancel(cancelled)
-                with diagnostic_operation("youtube_media_transfer"):
-                    downloader.process_ie_result(info, download=True)
-        except DownloadError as error:
-            diagnostic_exception("youtube_extractor_failed", error)
-            _check_cancel(cancelled)
-            raise YouTubeError(
-                "YouTube could not provide this video. It may be unavailable, restricted, or "
-                "rate-limited. No sign-in or restriction bypass is attempted. "
-                f"You can also download an authorized copy separately and use New from Video.\n\n{error}"
-            ) from error
+            except YouTubeError as error:
+                diagnostic_exception("youtube_caption_download_failed", error)
+                diagnostic_event("youtube_caption_fallback", reason="download_failed")
+                notes.append(f"Captions could not be downloaded; Whisper can draft them: {error}")
+        else:
+            diagnostic_event("youtube_caption_fallback", reason="no_usable_track")
+            notes.append(
+                "No usable creator or automatic captions were available for the chosen "
+                "language. Local Whisper will draft captions instead."
+            )
+        _check_cancel(cancelled)
+        with diagnostic_operation("youtube_media_transfer"):
+            _run_youtube_stage(request, "media", info, notes, progress, cancelled)
         _check_cancel(cancelled)
         files = [
             path for path in stage.iterdir()
@@ -534,9 +756,9 @@ def download_youtube(
         if len(files) != 1:
             raise YouTubeError("The download did not produce exactly one complete video file.")
         video = files[0]
-        progress("Checking downloaded video...", None)
-        _check_cancel(cancelled)
-        media_info = media.probe(video)
+        media_info = _run_youtube_stage(
+            request, "probe", (media, video), notes, progress, cancelled,
+        )
         diagnostic_event(
             "youtube_media_probed", path=video, duration=media_info.duration,
             has_audio=media_info.has_audio,

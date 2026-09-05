@@ -29,6 +29,9 @@ LOG_BYTES = 2 * 1024**2
 LOG_BACKUPS = 3
 _active_log: ContextVar[AnalysisDiagnostics | None] = ContextVar("analysis_diagnostics", default=None)
 _operation: ContextVar[str | None] = ContextVar("diagnostic_operation", default=None)
+_forward_log: ContextVar[Callable[[str, dict[str, Any]], None] | None] = ContextVar(
+    "forward_diagnostics", default=None,
+)
 _application_log: ApplicationDiagnostics | None = None
 _log_lock = threading.RLock()
 _URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
@@ -308,7 +311,25 @@ class AnalysisDiagnostics:
             self.last_progress = now
 
 
+@contextmanager
+def forward_diagnostics(callback: Callable[[str, dict[str, Any]], None]) -> Iterator[None]:
+    """Forward worker diagnostics to the parent process's single log writer."""
+    token = _forward_log.set(callback)
+    try:
+        yield
+    finally:
+        _forward_log.reset(token)
+
+
 def diagnostic_event(event: str, **details: Any) -> None:
+    forward = _forward_log.get()
+    if forward is not None:
+        forward(event, _safe_detail({
+            **details, "worker_pid": os.getpid(),
+            "worker_thread": threading.current_thread().name,
+            "worker_operation": _operation.get(),
+        }))
+        return
     log = _active_log.get()
     if log is not None:
         log.write(event, **details)

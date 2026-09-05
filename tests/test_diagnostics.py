@@ -21,6 +21,7 @@ from choicer_voicer_pack_creator.diagnostics import (
     application_log_path,
     diagnostic_event,
     diagnostic_operation,
+    forward_diagnostics,
     save_diagnostic_bundle,
 )
 from choicer_voicer_pack_creator.ui import analysis_dialog
@@ -30,6 +31,29 @@ from choicer_voicer_pack_creator.ui.main_window import MainWindow
 
 def records(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_worker_diagnostics_are_redacted_before_forwarding_and_context_is_restored(tmp_path):
+    forwarded = []
+    with ApplicationDiagnostics(tmp_path):
+        with (
+            forward_diagnostics(lambda event, details: forwarded.append((event, details))),
+            diagnostic_operation("network"),
+        ):
+            diagnostic_event(
+                "request", url="https://youtube.com/watch?signature=private",
+                cookie="private", path=Path.home() / "Downloads",
+            )
+        diagnostic_event("parent_resumed")
+    request = next(details for event, details in forwarded if event == "request")
+    assert request["url"] == "https://youtube.com/watch"
+    assert request["cookie"] == "[redacted]"
+    assert request["path"].startswith("<USER>")
+    assert request["worker_pid"] > 0
+    assert request["worker_operation"]
+    saved = records(application_log_path(tmp_path))
+    assert any(row["event"] == "parent_resumed" for row in saved)
+    assert not any(row["event"] == "request" for row in saved)
 
 
 def test_live_diagnostics_include_process_state_but_not_normal_transcript_stdout(

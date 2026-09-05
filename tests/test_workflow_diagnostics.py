@@ -5,6 +5,7 @@ import json
 import subprocess
 from array import array
 from concurrent.futures import ThreadPoolExecutor
+from http.cookiejar import CookieJar
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -204,12 +205,13 @@ def test_waveform_cancellation_logs_reaped_process_without_payload(tmp_path: Pat
 
 
 @pytest.fixture
-def fake_youtube(tmp_path: Path, monkeypatch):
+def fake_youtube(tmp_path: Path, monkeypatch, inline_youtube_worker):
     state = SimpleNamespace(caption_failure=False, download_failure=False)
 
     class Downloader:
         def __init__(self, options, **_kwargs):
             self.options = options
+            self.cookiejar = CookieJar()
 
         def __enter__(self):
             return self
