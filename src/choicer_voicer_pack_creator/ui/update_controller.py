@@ -11,6 +11,12 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QProgressDialog
 
 from choicer_voicer_pack_creator import __version__
+from choicer_voicer_pack_creator.diagnostics import (
+    DiagnosticProgress,
+    diagnostic_event,
+    diagnostic_exception,
+    diagnostic_operation,
+)
 from choicer_voicer_pack_creator.updates import (
     RELEASES_URL,
     PreparedUpdate,
@@ -44,21 +50,49 @@ class UpdateWorker(QThread):
         self.was_cancelled = False
 
     def run(self) -> None:
+        logged_progress = DiagnosticProgress("update_progress")
+
+        def report(message: str, fraction: float) -> None:
+            logged_progress.report(message, fraction)
+            self.progress.emit(message, fraction)
+
         try:
             if self.release is None:
-                self.result = find_release(
-                    include_prereleases=self.include_prereleases,
-                    cancelled=self.isInterruptionRequested,
-                )
+                with diagnostic_operation(
+                    "update_check", include_prereleases=self.include_prereleases,
+                    current_version=__version__,
+                ):
+                    self.result = find_release(
+                        include_prereleases=self.include_prereleases,
+                        cancelled=self.isInterruptionRequested,
+                    )
+                    diagnostic_event(
+                        "update_check_result", available=self.result is not None,
+                        version=self.result.version if self.result else None,
+                    )
             else:
-                if self.target is None:
-                    raise UpdateError("In-place updates require a portable Windows application.")
-                self.result = prepare_update(
-                    self.release, self.target, self.progress.emit, self.isInterruptionRequested
-                )
-        except UpdateCancelled:
+                with diagnostic_operation(
+                    "update_prepare", version=self.release.version, target=self.target,
+                    archive_bytes=self.release.archive_size,
+                ):
+                    if self.target is None:
+                        raise UpdateError("In-place updates require a portable Windows application.")
+                    diagnostic_event(
+                        "update_download_requested", version=self.release.version,
+                        archive_bytes=self.release.archive_size,
+                    )
+                    self.result = prepare_update(
+                        self.release, self.target, report, self.isInterruptionRequested
+                    )
+                    diagnostic_event(
+                        "update_prepared", directory=self.result.directory,
+                        target=self.result.target, version=self.result.version,
+                    )
+        except UpdateCancelled as error:
+            diagnostic_exception("update_worker_canceled", error)
             self.was_cancelled = True
         except (OSError, ValueError, UpdateError, zipfile.BadZipFile, http.client.HTTPException) as error:
+            diagnostic_exception("update_worker_failed", error, preparing=self.release is not None)
             self.error = str(error)
 
 
@@ -101,6 +135,10 @@ class UpdateController(QObject):
 
     def startup(self, result_directory: Path | None = None) -> None:
         target = installation_directory()
+        diagnostic_event(
+            "update_startup", target=target, result_directory=result_directory,
+            automatic=self.auto_action.isChecked(),
+        )
         if target is None:
             return  # Source checkouts offer manual discovery, never self-replacement.
         if result_directory is not None:
@@ -113,9 +151,15 @@ class UpdateController(QObject):
             self.worker or self.prepared or self.downloaded or self.pending_release
             or self.prompt_active or self.shutting_down
         ):
+            diagnostic_event("update_check_skipped", manual=manual, reason="busy_or_shutting_down")
             return
         if not manual and not self.auto_action.isChecked():
+            diagnostic_event("update_check_skipped", manual=manual, reason="automatic_disabled")
             return
+        diagnostic_event(
+            "update_check_requested", manual=manual,
+            include_prereleases=self.prerelease_action.isChecked(),
+        )
         self.manual = manual
         if manual:
             self.startup_timer.stop()
@@ -128,6 +172,7 @@ class UpdateController(QObject):
         self.check_action.setEnabled(False)
         worker.progress.connect(self._progress_changed)
         worker.finished.connect(self._worker_finished)
+        diagnostic_event("update_worker_launching", preparing=worker.release is not None)
         worker.start()
 
     def _progress_changed(self, message: str, fraction: float) -> None:
@@ -147,6 +192,10 @@ class UpdateController(QObject):
             worker.deleteLater()
             return
         canceled = self.cancel_requested or worker.was_cancelled
+        diagnostic_event(
+            "update_worker_finished", canceled=canceled, failed=bool(worker.error),
+            result_type=type(worker.result).__name__, preparing=worker.release is not None,
+        )
         self.worker = None
         self.check_action.setEnabled(True)
         if self.progress:
@@ -196,6 +245,10 @@ class UpdateController(QObject):
 
     def _offer_release(self, release: Release) -> None:
         target = installation_directory()
+        diagnostic_event(
+            "update_release_offered", version=release.version, prerelease=release.prerelease,
+            target=target, archive_bytes=release.archive_size,
+        )
         message = (
             f"Version {release.version}{' (prerelease)' if release.prerelease else ''} "
             f"is available on GitHub. You are running {__version__}.\n\n"
@@ -215,6 +268,7 @@ class UpdateController(QObject):
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
+            diagnostic_event("update_release_declined", version=release.version)
             return
         if target is None:
             self._open_release_page(release.page_url)
@@ -247,6 +301,10 @@ class UpdateController(QObject):
             QMessageBox.StandardButton.No,
         )
         self.downloaded = None
+        diagnostic_event(
+            "update_restart_decision", version=prepared.version,
+            accepted=answer == QMessageBox.StandardButton.Yes,
+        )
         if answer == QMessageBox.StandardButton.Yes:
             self.prepared = prepared
             if self.window.close():
@@ -269,6 +327,7 @@ class UpdateController(QObject):
 
     def _cancel_worker(self) -> None:
         if self.worker:
+            diagnostic_event("update_cancel_requested", preparing=self.worker.release is not None)
             self.cancel_requested = True
             self.worker.requestInterruption()
 
@@ -278,8 +337,14 @@ class UpdateController(QObject):
             # Once a helper may be running, leave its workspace intact even on launch failure.
             self.prepared = None
             try:
-                launch_update(prepared, self.window.project_path)
+                with diagnostic_operation(
+                    "update_handoff", directory=prepared.directory,
+                    target=prepared.target, version=prepared.version,
+                    project_path=self.window.project_path,
+                ):
+                    launch_update(prepared, self.window.project_path)
             except (OSError, ValueError, UpdateError) as error:
+                diagnostic_exception("update_handoff_failed_in_controller", error)
                 self._show_error(str(error))
                 return False
         if self.downloaded:
@@ -301,15 +366,22 @@ class UpdateController(QObject):
             self._open_release_page(release.page_url if release else RELEASES_URL)
 
     def _open_release_page(self, url: str) -> None:
-        if not QDesktopServices.openUrl(QUrl(url)):
+        opened = QDesktopServices.openUrl(QUrl(url))
+        diagnostic_event("update_release_page_opened", url=url, opened=opened)
+        if not opened:
             QMessageBox.warning(self.window, "Could not open browser", f"Open this URL manually:\n{url}")
 
     def _show_result(self, directory: Path, target: Path) -> None:
+        diagnostic_event("update_result_requested", directory=directory, target=target)
         try:
             success, message = read_update_result(directory, target)
         except (OSError, ValueError, UpdateError) as error:
+            diagnostic_exception("update_result_read_failed", error, directory=directory, target=target)
             QMessageBox.warning(self.window, "Could not read update result", str(error))
             return
+        diagnostic_event(
+            "update_result", success=success, message=message, directory=directory, target=target,
+        )
         self.window.statusBar().showMessage(message)
         if success:
             QTimer.singleShot(1500, lambda: self._discard(directory, retries=10))
@@ -323,9 +395,14 @@ class UpdateController(QObject):
         try:
             shutil.rmtree(directory)
         except OSError as error:
+            diagnostic_exception(
+                "update_cleanup_failed", error, directory=directory, retries_remaining=retries,
+            )
             if retries:
                 QTimer.singleShot(1000, lambda: self._discard(directory, retries=retries - 1))
             else:
                 self.window.statusBar().showMessage(
                     f"Could not clean temporary update files at {directory}: {error}"
                 )
+        else:
+            diagnostic_event("update_cleanup_completed", directory=directory)

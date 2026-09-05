@@ -32,7 +32,11 @@ except ImportError:  # Removed from Python 3.13; retain the pure-Python fallback
     _audio_rms = None
 
 from choicer_voicer_pack_creator.captions import refine_captions
-from choicer_voicer_pack_creator.diagnostics import diagnostic_event
+from choicer_voicer_pack_creator.diagnostics import (
+    diagnostic_event,
+    diagnostic_exception,
+    diagnostic_text,
+)
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import SourceCaption
 
@@ -180,17 +184,24 @@ def _run_cancellable(
         cwd=str(cwd) if cwd else None, timeout_seconds=timeout,
     )
     startupinfo = MediaTools._startup_info()
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        startupinfo=startupinfo,
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            startupinfo=startupinfo,
+        )
+    except OSError as error:
+        diagnostic_exception(
+            "process_launch_failed", error, description=description,
+            winerror=getattr(error, "winerror", None), errno=error.errno,
+        )
+        raise
     # Windows pipes need reader threads to report live output without blocking either stream.
     messages: queue.Queue[tuple[str, str | OSError | None]] = queue.Queue()
     captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
@@ -249,7 +260,7 @@ def _run_cancellable(
                 if name == "stderr":
                     diagnostic_event(
                         "process_stderr", description=description, pid=process.pid,
-                        line=message.rstrip()[:2048],
+                        line=diagnostic_text(message.rstrip(), limit=2048),
                     )
                 if output_line is not None:
                     output_line(message)
@@ -273,6 +284,9 @@ def _run_cancellable(
         diagnostic_event(
             "process_exited", description=description, pid=process.pid,
             return_code=process.returncode, termination=termination,
+            return_code_hex=(
+                f"0x{process.returncode & 0xFFFFFFFF:08X}" if process.returncode is not None else None
+            ),
             process_elapsed_seconds=round(time.monotonic() - started, 3),
             stdout_lines=len(captured["stdout"]), stderr_lines=len(captured["stderr"]),
         )
@@ -313,6 +327,7 @@ def extract_analysis_audio(
     _run_cancellable(command, "Decoding analysis audio", cancelled)
     if not destination.is_file() or destination.stat().st_size <= 44:
         raise AnalysisError("The source video did not produce usable analysis audio")
+    diagnostic_event("analysis_audio_ready", bytes=destination.stat().st_size)
 
 
 def _percentile_sorted(ordered: list[float], fraction: float) -> float:
@@ -494,6 +509,9 @@ class WhisperManager:
                 diagnostic_event("component_cache_verified", component=label)
                 progress(f"Using verified cached {label}.", 1.0)
                 return destination
+            diagnostic_event(
+                "component_cache_invalid", component=label, bytes=destination.stat().st_size,
+            )
             destination.unlink()
         partial = destination.with_name(destination.name + ".partial")
         partial.unlink(missing_ok=True)
@@ -521,6 +539,10 @@ class WhisperManager:
                 ):
                     raise AnalysisError(f"{label} redirected to an unapproved host: {final_url}")
                 content_length = response.headers.get("Content-Length")
+                diagnostic_event(
+                    "component_download_response", component=label,
+                    host=parsed.hostname, content_length=content_length,
+                )
                 if content_length is not None and int(content_length) != expected_bytes:
                     raise AnalysisError(
                         f"{label} reported {content_length} bytes; expected {expected_bytes}."
@@ -615,9 +637,11 @@ class WhisperManager:
                         self.runtime_dir / license_name,
                     )
                 shutil.copy2(self.manifest_path, self.runtime_dir / self.manifest_path.name)
+                diagnostic_event("runtime_cache_verified", files=expected_files)
                 progress("Using verified local Whisper runtime.", 1.0)
                 return self.cli_path
-            except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                diagnostic_exception("runtime_cache_invalid", error)
                 shutil.rmtree(self.runtime_dir, ignore_errors=True)
 
         archive = self._download(
@@ -675,9 +699,16 @@ class WhisperManager:
                 cancelled,
                 timeout=30,
             )
+            diagnostic_event(
+                "runtime_version_reported", output=diagnostic_text(result.stdout, limit=2048),
+            )
             if str(self.runtime["version"]) not in result.stdout + result.stderr:
                 raise AnalysisError("The Whisper runtime version does not match its manifest")
             os.replace(temporary, self.runtime_dir)
+            diagnostic_event(
+                "runtime_installed", files=expected_files, cli=self.cli_path,
+                version=self.runtime["version"],
+            )
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
         progress("Whisper CPU runtime setup complete.", 1.0)
@@ -741,18 +772,25 @@ class WhisperManager:
             "--max-len",
             "120",
         ]
+        diagnostic_event(
+            "whisper_transcription_starting", model=model_key, model_bytes=model.stat().st_size,
+            language=language, threads=hardware.cpu_threads, audio_duration_seconds=audio_duration,
+        )
         percent: int | None = None
         processing_audio = False
         last_report: tuple[int, int | None, bool] | None = None
 
         def on_output(line: str) -> None:
             nonlocal percent, processing_audio
+            was_processing = processing_audio
             match = re.search(r"whisper_print_progress_callback:\s*progress\s*=\s*(\d+)%", line)
             if match:
                 percent = max(percent or 0, min(99, int(match.group(1))))
                 processing_audio = True
             elif "main: processing " in line:
                 processing_audio = True
+            if processing_audio and not was_processing:
+                diagnostic_event("whisper_audio_processing_started")
 
         def report_status(elapsed: float) -> None:
             nonlocal last_report
@@ -778,6 +816,7 @@ class WhisperManager:
         output_path = output_base.with_suffix(".json")
         if not output_path.is_file():
             raise AnalysisError("Whisper did not produce its expected JSON transcript")
+        diagnostic_event("whisper_output_ready", bytes=output_path.stat().st_size)
         value: Any = json.loads(output_path.read_text(encoding="utf-8-sig"))
         if not isinstance(value, dict) or not isinstance(value.get("transcription"), list):
             raise AnalysisError("Whisper produced an unsupported JSON transcript")
@@ -836,6 +875,9 @@ class WhisperManager:
                 )
             )
         progress(f"Whisper produced {len(suggestions)} transcript region(s).", 1.0)
+        diagnostic_event(
+            "whisper_transcript_parsed", regions=len(suggestions), detected_language=detected_language,
+        )
         return suggestions, detected_language
 
 
@@ -915,6 +957,10 @@ def analyze_video(
     temporary_root = Path(tempfile.gettempdir()).resolve()
     temporary_free = shutil.disk_usage(temporary_root).free
     required_temporary_disk = estimated_audio_bytes * 2 + (64 * 1024**2)
+    diagnostic_event(
+        "analysis_temporary_disk", directory=temporary_root, available_bytes=temporary_free,
+        required_bytes=required_temporary_disk,
+    )
     if temporary_free < required_temporary_disk:
         raise AnalysisError(
             f"Video analysis needs approximately {required_temporary_disk / 1024**2:.0f} MiB "
@@ -933,6 +979,10 @@ def analyze_video(
         while not persistent_root.exists() and persistent_root != persistent_root.parent:
             persistent_root = persistent_root.parent
         persistent_free = shutil.disk_usage(persistent_root).free
+        diagnostic_event(
+            "analysis_component_disk", directory=persistent_root,
+            available_bytes=persistent_free, required_bytes=persistent_required,
+        )
         if persistent_free < persistent_required:
             raise AnalysisError(
                 f"Local transcription setup needs approximately {persistent_required / 1024**2:.0f} "

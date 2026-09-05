@@ -605,6 +605,7 @@ def test_whisper_parser_uses_lexical_token_bounds(
         output.setframerate(16_000)
         output.writeframes(array("h", [0] * (16_000 * 12)).tobytes())
     manager = WhisperManager(tmp_path / "data", default_manifest_path())
+    (tmp_path / "model.bin").write_bytes(b"test model")
     monkeypatch.setattr(manager, "ensure_runtime", lambda *_args: tmp_path / "whisper-cli.exe")
     monkeypatch.setattr(manager, "ensure_model", lambda *_args: tmp_path / "model.bin")
 

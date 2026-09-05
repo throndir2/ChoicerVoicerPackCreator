@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 
 from choicer_voicer_pack_creator import __version__
 from choicer_voicer_pack_creator.analysis import AnalysisSuggestion
+from choicer_voicer_pack_creator.diagnostics import diagnostic_event, diagnostic_exception
 from choicer_voicer_pack_creator.exporter import (
     ExportResult,
     PackExporter,
@@ -61,7 +62,11 @@ from choicer_voicer_pack_creator.timeline_audit import (
     TimelineOverlap,
     audit_timeline_overlaps,
 )
-from choicer_voicer_pack_creator.ui.analysis_dialog import AnalysisDialog, open_diagnostic_logs
+from choicer_voicer_pack_creator.ui.analysis_dialog import (
+    AnalysisDialog,
+    open_diagnostic_logs,
+    save_diagnostic_logs,
+)
 from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
 from choicer_voicer_pack_creator.ui.update_controller import UpdateController
@@ -80,16 +85,26 @@ class WaveformWorker(QThread):
         self.duration = duration
 
     def run(self) -> None:
+        diagnostic_event(
+            "waveform_worker_started", request_id=self.request_id,
+            path=self.path, duration_seconds=self.duration,
+        )
         try:
             if self.isInterruptionRequested():
+                diagnostic_event("waveform_worker_canceled", request_id=self.request_id)
                 return
             peaks = self.media.waveform_peaks(
                 Path(self.path), self.duration, cancelled=self.isInterruptionRequested
             )
             if self.isInterruptionRequested():
+                diagnostic_event("waveform_worker_canceled", request_id=self.request_id)
                 return
+            diagnostic_event(
+                "waveform_worker_completed", request_id=self.request_id, peaks=len(peaks),
+            )
             self.completed.emit(self.request_id, self.path, self.duration, peaks)
         except Exception as error:
+            diagnostic_exception("waveform_worker_failed", error, request_id=self.request_id)
             self.failed.emit(self.request_id, self.path, str(error))
 
 
@@ -114,6 +129,7 @@ class ExportWorker(QThread):
             )
             self.completed.emit(result)
         except Exception as error:
+            diagnostic_exception("export_worker_failed", error)
             self.failed.emit(str(error))
 
 
@@ -265,6 +281,10 @@ class MainWindow(QMainWindow):
         self.action_logs = help_menu.addAction("Open Diagnostic Logs...")
         self.action_logs.triggered.connect(
             lambda: open_diagnostic_logs(self, self.analysis_data_root)
+        )
+        self.action_save_logs = help_menu.addAction("Save Diagnostic Bundle...")
+        self.action_save_logs.triggered.connect(
+            lambda: save_diagnostic_logs(self, self.analysis_data_root)
         )
         about = help_menu.addAction("About")
         about.triggered.connect(self.show_about)
@@ -890,6 +910,7 @@ class MainWindow(QMainWindow):
         )
 
     def new_from_video(self) -> None:
+        diagnostic_event("new_video_requested")
         if not self._maybe_save():
             return
         path, _ = QFileDialog.getOpenFileName(
@@ -917,18 +938,22 @@ class MainWindow(QMainWindow):
             video_duration=info.duration,
         )
         self._set_project(project, None, mark_dirty=True)
+        diagnostic_event("video_import_ready", source=source, duration_seconds=info.duration)
         self.statusBar().showMessage(f"Loaded {source.name}. Mark a range and add the first segment.")
         QTimer.singleShot(
             0, lambda: self.open_analysis_dialog(initial_scan=True, auto_start=True)
         )
 
     def new_from_youtube(self) -> None:
+        diagnostic_event("youtube_import_dialog_requested")
         if not self._maybe_save():
             return
         dialog = YouTubeDialog(
-            self.media, str(self.settings.value("lastYouTubeDir", "")), self
+            self.media, str(self.settings.value("lastYouTubeDir", "")), self,
+            data_root=self.analysis_data_root,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted or dialog.download_result is None:
+            diagnostic_event("youtube_import_dialog_dismissed")
             return
         result = dialog.download_result
         self.settings.setValue("lastYouTubeDir", str(result.video_path.parent.parent))
@@ -943,11 +968,17 @@ class MainWindow(QMainWindow):
             import_warnings=list(result.warnings),
         )
         self._set_project(project, None, mark_dirty=True)
+        diagnostic_event(
+            "youtube_import_ready", video=result.video_path, duration_seconds=result.duration,
+            caption_count=len(result.captions), warning_count=len(result.warnings),
+        )
         self.statusBar().showMessage(
             f"Downloaded {result.title}; {len(result.captions)} caption(s) ready for review."
         )
         if result.warnings:
+            diagnostic_event("youtube_import_notes_shown", warnings=result.warnings)
             QMessageBox.warning(self, "YouTube import notes", "\n\n".join(result.warnings))
+        diagnostic_event("youtube_analysis_handoff_scheduled")
         QTimer.singleShot(
             0, lambda: self.open_analysis_dialog(initial_scan=True, auto_start=True)
         )
@@ -955,7 +986,11 @@ class MainWindow(QMainWindow):
     def open_analysis_dialog(
         self, *, initial_scan: bool = False, auto_start: bool = False
     ) -> None:
+        diagnostic_event(
+            "analysis_dialog_requested", initial_scan=initial_scan, auto_start=auto_start,
+        )
         if not self.project.video_path or not Path(self.project.video_path).is_file():
+            diagnostic_event("analysis_dialog_blocked", reason="missing_source_video")
             QMessageBox.information(
                 self,
                 "No source video",
@@ -980,6 +1015,7 @@ class MainWindow(QMainWindow):
         dialog.preview_requested.connect(self._preview_analysis_range)
         dialog.review_changed.connect(self._save_analysis_review)
         dialog.exec()
+        diagnostic_event("analysis_dialog_closed")
 
     @Slot(object)
     def _save_analysis_review(self, value: object) -> None:
@@ -1035,9 +1071,11 @@ class MainWindow(QMainWindow):
             existing_ranges.add(key)
             added.append(segment)
         if not added:
+            diagnostic_event("analysis_suggestions_applied", added=0, requested=len(value))
             self.statusBar().showMessage("No new analysis suggestions were added.")
             return
         self.project.sort_segments()
+        diagnostic_event("analysis_suggestions_applied", added=len(added), requested=len(value))
         self._set_dirty(True)
         self.segments_section.set_collapsed(False)
         self.selected_section.set_collapsed(False)
@@ -1394,6 +1432,7 @@ class MainWindow(QMainWindow):
         )
 
     def _player_error(self, _error: QMediaPlayer.Error, message: str) -> None:
+        diagnostic_event("video_player_error", error_code=_error.name, message=message)
         self._reset_transport_state()
         if message:
             self.statusBar().showMessage(f"Video preview error: {message}")
@@ -2354,6 +2393,7 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        diagnostic_event("window_close_requested", dirty=self.dirty)
         if not self.updater.can_close():
             event.ignore()
             return
@@ -2383,4 +2423,5 @@ class MainWindow(QMainWindow):
             return
         if self._discard_recovery_on_transition:
             self._clear_recovery_snapshot()
+        diagnostic_event("window_close_accepted")
         event.accept()

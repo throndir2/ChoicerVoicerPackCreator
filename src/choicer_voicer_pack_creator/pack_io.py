@@ -5,6 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from choicer_voicer_pack_creator.config_format import read_config
+from choicer_voicer_pack_creator.diagnostics import (
+    DiagnosticProgress,
+    diagnostic_event,
+    diagnostic_exception,
+    diagnostic_operation,
+)
 from choicer_voicer_pack_creator.media import MediaError, MediaTools
 from choicer_voicer_pack_creator.models import PackProject, Segment
 
@@ -53,8 +59,10 @@ class PackImporter:
     def __init__(self, media: MediaTools) -> None:
         self.media = media
 
+    @diagnostic_operation("pack_import")
     def import_folder(self, folder: Path) -> ImportResult:
         root = folder.resolve()
+        diagnostic_event("pack_import_requested", path=root)
         if not root.is_dir():
             raise ValueError(f"Pack folder does not exist: {root}")
         warnings: list[str] = []
@@ -66,6 +74,10 @@ class PackImporter:
         pack_data = pack_config.get("data", {})
         unknown_pack_sections = sorted(set(pack_config) - {"data"})
         unknown_pack_keys = sorted(set(pack_data) - {"title", "icon", "authors", "readme"})
+        diagnostic_event(
+            "pack_import_metadata_read", unknown_section_count=len(unknown_pack_sections),
+            unknown_key_count=len(unknown_pack_keys),
+        )
         if unknown_pack_sections:
             warnings.append(
                 "Unsupported pack metadata sections will not be copied into a canonical export: "
@@ -108,6 +120,7 @@ class PackImporter:
                     and 1 <= video_info.fps <= 120
                 )
             except MediaError as error:
+                diagnostic_exception("pack_import_video_probe_failed", error, path=video)
                 warnings.append(str(error))
         else:
             warnings.append("No dub_video.ogv or dub_video.mp4 was found.")
@@ -126,6 +139,7 @@ class PackImporter:
         try:
             icon = _safe_pack_reference(root, icon_name, "Pack icon")
         except ValueError as error:
+            diagnostic_exception("pack_import_icon_reference_invalid", error)
             warnings.append(str(error))
             icon = root / "icon.png"
         if not icon.is_file():
@@ -143,12 +157,21 @@ class PackImporter:
             ],
             key=_natural_key,
         )
+        diagnostic_event(
+            "pack_import_inventory", candidate_count=len(candidates),
+            has_video=video is not None, has_backing_track=backing is not None,
+        )
         segments: list[Segment] = []
-        for metadata_path in candidates:
+        logged_progress = DiagnosticProgress("pack_import_progress")
+        for index, metadata_path in enumerate(candidates, 1):
+            logged_progress.report(
+                f"Reading clip metadata {index}/{len(candidates)}", (index - 1) / len(candidates),
+            )
             try:
                 config = read_config(metadata_path)
                 data = config.get("data", {})
             except (OSError, ValueError) as error:
+                diagnostic_exception("pack_import_metadata_skipped", error, path=metadata_path)
                 warnings.append(f"Skipped {metadata_path.name}: {error}")
                 continue
             timestamps = _as_float_list(data.get("dub_timestamps"))
@@ -190,6 +213,7 @@ class PackImporter:
                 try:
                     audio_duration = self.media.probe_audio_duration(audio)
                 except MediaError as error:
+                    diagnostic_exception("pack_import_audio_probe_failed", error, path=audio)
                     warnings.append(str(error))
             else:
                 warnings.append(f"No prompt audio found for {metadata_path.name}.")
@@ -198,6 +222,7 @@ class PackImporter:
             try:
                 image = _safe_pack_reference(root, image_value, f"{metadata_path.name} image")
             except ValueError as error:
+                diagnostic_exception("pack_import_image_reference_invalid", error, path=metadata_path)
                 warnings.append(str(error))
                 image = metadata_path.with_suffix(".png")
             if not image.is_file():
@@ -263,4 +288,10 @@ class PackImporter:
             import_warnings=list(warnings),
         )
         project.sort_segments()
+        logged_progress.report("Pack import ready", 1.0)
+        diagnostic_event(
+            "pack_import_ready", path=root, segment_count=len(segments), warning_count=len(warnings),
+            recognized_file_count=len(recognized_files), unrecognized_file_count=len(unrecognized_files),
+            preserve_source_video=preserve_source_video,
+        )
         return ImportResult(project=project, warnings=warnings)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QModelIndex, QSignalBlocker, Qt, QThread, QTimer, QUrl, Signal, Slot
@@ -13,6 +15,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -40,22 +43,63 @@ from choicer_voicer_pack_creator.analysis import (
     analyze_video,
     detect_hardware,
 )
-from choicer_voicer_pack_creator.diagnostics import AnalysisDiagnostics, analysis_log_path
+from choicer_voicer_pack_creator.diagnostics import (
+    AnalysisDiagnostics,
+    analysis_log_path,
+    diagnostic_event,
+    diagnostic_exception,
+    save_diagnostic_bundle,
+)
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import AnalysisDraftRow, AnalysisReview, SourceCaption
 
 
 def open_diagnostic_logs(parent: QWidget, data_root: Path) -> None:
     folder = analysis_log_path(data_root).parent
+    diagnostic_event("diagnostic_folder_requested", folder=folder)
     try:
         folder.mkdir(parents=True, exist_ok=True)
     except OSError as error:
+        diagnostic_exception("diagnostic_folder_failed", error)
         QMessageBox.warning(parent, "Could not open diagnostic logs", str(error))
         return
     if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+        diagnostic_event("diagnostic_folder_failed", reason="desktop_open_failed")
         QMessageBox.warning(
             parent, "Could not open diagnostic logs", f"Open this folder manually:\n{folder}"
         )
+
+
+def save_diagnostic_logs(parent: QWidget, data_root: Path) -> None:
+    filename = f"Choicer-Voicer-Diagnostics-{datetime.now():%Y%m%d-%H%M%S}.zip"
+    path, _ = QFileDialog.getSaveFileName(
+        parent, "Save Diagnostic Bundle (review logs before sharing)",
+        str(Path.home() / filename), "Diagnostic ZIP (*.zip)",
+    )
+    if not path:
+        return
+    destination = Path(path)
+    if destination.suffix.lower() != ".zip":
+        destination = destination.with_name(destination.name + ".zip")
+        if destination.exists() and QMessageBox.question(
+            parent, "Replace diagnostic bundle?", f"Replace {destination}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+    try:
+        save_diagnostic_bundle(data_root, destination)
+    except (OSError, ValueError) as error:
+        diagnostic_exception("diagnostic_bundle_failed", error)
+        QMessageBox.warning(parent, "Could not save diagnostic bundle", str(error))
+        return
+    QMessageBox.information(
+        parent, "Diagnostic bundle saved",
+        f"Saved to:\n{destination}\n\nSend this ZIP with a description of what went wrong. "
+        "It contains recent runs, local file paths and technical errors, but no media, "
+        "project files or normal transcript output. Review it before sharing. "
+        "Nothing has been uploaded.",
+    )
 
 
 class DraftDelegate(QStyledItemDelegate):
@@ -112,10 +156,12 @@ class AnalysisWorker(QThread):
         self.language = language
         self.source_captions = source_captions
         self.pause_threshold = pause_threshold
+        self.worker_id = uuid.uuid4().hex[:12]
 
     def run(self) -> None:
         try:
             with AnalysisDiagnostics(self.data_root) as diagnostics:
+                diagnostic_event("analysis_worker_running", worker_id=self.worker_id)
                 def report(message: str, fraction: float | None) -> None:
                     diagnostics.progress(message, fraction)
                     value = -1 if fraction is None else max(0, min(1000, round(fraction * 1000)))
@@ -141,6 +187,9 @@ class AnalysisWorker(QThread):
         except AnalysisCancelled:
             self.canceled.emit()
         except Exception as error:
+            diagnostic_exception(
+                "analysis_worker_failed", error, worker_id=self.worker_id,
+            )
             self.failed.emit(str(error))
 
 
@@ -184,6 +233,12 @@ class AnalysisDialog(QDialog):
         self.local_source = review.local_source if review else "Whisper"
         self.analysis_result: AnalysisResult | None = None
         self.hardware = detect_hardware()
+        diagnostic_event(
+            "analysis_dialog_opened", auto_start=auto_start, initial_scan=initial_scan,
+            youtube_import=youtube_import, video=self.video,
+            duration_seconds=duration, caption_count=len(self.source_captions),
+            restored_draft=review is not None,
+        )
 
         self.setWindowTitle(
             "Initial Video Analysis" if initial_scan else "Analyze Video & Suggest Segments"
@@ -278,6 +333,10 @@ class AnalysisDialog(QDialog):
         self.logs_button.setAutoDefault(False)
         self.logs_button.clicked.connect(lambda: open_diagnostic_logs(self, self.data_root))
         log_row.addWidget(self.logs_button)
+        self.save_logs_button = QPushButton("Save Diagnostic Bundle...")
+        self.save_logs_button.setAutoDefault(False)
+        self.save_logs_button.clicked.connect(lambda: save_diagnostic_logs(self, self.data_root))
+        log_row.addWidget(self.save_logs_button)
         layout.addLayout(log_row)
 
         progress_row = QHBoxLayout()
@@ -446,6 +505,7 @@ class AnalysisDialog(QDialog):
         elif self.source_choice:
             self.progress_label.setText("Choose YouTube now or wait for the separate Whisper transcript.")
         if auto_start:
+            diagnostic_event("analysis_auto_start_scheduled")
             QTimer.singleShot(0, self.start_scan)
 
     @property
@@ -581,7 +641,8 @@ class AnalysisDialog(QDialog):
         try:
             manager = WhisperManager(self.data_root)
             installed = manager.cli_path.is_file() and manager.model_path(model_key).is_file()
-        except Exception:
+        except Exception as error:
+            diagnostic_exception("whisper_installation_status_failed", error)
             installed = False
         if installed:
             self.setup_label.setText(
@@ -595,6 +656,10 @@ class AnalysisDialog(QDialog):
         )
 
     def start_scan(self) -> None:
+        diagnostic_event(
+            "analysis_scan_requested", already_running=self.worker is not None,
+            closing=self._close_after_cancel,
+        )
         if self.worker is not None or self._close_after_cancel:
             return
         self._commit_draft_editors()
@@ -612,6 +677,7 @@ class AnalysisDialog(QDialog):
                 QMessageBox.StandardButton.Cancel,
             )
             if answer != QMessageBox.StandardButton.Yes:
+                diagnostic_event("analysis_scan_declined", reason="keep_existing_draft")
                 return
         use_whisper = self.source_choice or self.whisper_check.isChecked()
         model_key = str(self.model_combo.currentData())
@@ -619,12 +685,18 @@ class AnalysisDialog(QDialog):
             try:
                 manager = WhisperManager(self.data_root)
             except Exception as error:
+                diagnostic_exception("whisper_setup_unavailable", error)
                 QMessageBox.critical(self, "Whisper setup is unavailable", str(error))
                 return
             model_missing = not manager.model_path(model_key).is_file()
             runtime_missing = not manager.cli_path.is_file()
+            diagnostic_event(
+                "whisper_setup_checked", model=model_key, model_missing=model_missing,
+                runtime_missing=runtime_missing,
+            )
             if model_missing or runtime_missing:
                 download_mib = manager.model_download_bytes(model_key) / 1024**2
+                diagnostic_event("whisper_download_prompt_shown", download_mib=download_mib + 8)
                 answer = QMessageBox.question(
                     self,
                     "Download local transcription components?",
@@ -634,6 +706,9 @@ class AnalysisDialog(QDialog):
                     "Continue?",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                     QMessageBox.StandardButton.Yes,
+                )
+                diagnostic_event(
+                    "whisper_download_consent", accepted=answer == QMessageBox.StandardButton.Yes,
                 )
                 if answer != QMessageBox.StandardButton.Yes:
                     self.progress_label.setText(
@@ -698,6 +773,10 @@ class AnalysisDialog(QDialog):
             pause_threshold=self.pause_spin.value(),
         )
         self.worker = worker
+        diagnostic_event(
+            "analysis_worker_start_requested", worker_id=worker.worker_id,
+            use_whisper=use_whisper, refine=refine, model=worker.model_key, language=worker.language,
+        )
         self._update_scan_button()
         worker.progress.connect(self._progress)
         worker.completed.connect(self._completed)
@@ -725,6 +804,10 @@ class AnalysisDialog(QDialog):
 
     @Slot(object)
     def _completed(self, value: object) -> None:
+        diagnostic_event(
+            "analysis_result_received", canceled=self._scan_canceled,
+            closing=self._close_after_cancel, valid=isinstance(value, AnalysisResult),
+        )
         # A result can already be queued when the user cancels or closes the review.
         if self._scan_canceled or self._close_after_cancel:
             self._canceled()
@@ -826,6 +909,7 @@ class AnalysisDialog(QDialog):
 
     @Slot(str)
     def _failed(self, message: str) -> None:
+        diagnostic_event("analysis_failure_displayed", message=message)
         if self._scan_canceled or self._close_after_cancel:
             self._canceled()
             return
@@ -854,6 +938,7 @@ class AnalysisDialog(QDialog):
 
     @Slot()
     def _worker_finished(self) -> None:
+        diagnostic_event("analysis_worker_finished", closing=self._close_after_cancel)
         if self.sender() is self.worker:
             self.worker = None
         self._set_idle()
@@ -969,6 +1054,7 @@ class AnalysisDialog(QDialog):
             super().reject()
 
     def cancel_scan(self) -> None:
+        diagnostic_event("analysis_cancel_requested", running=self.worker is not None)
         if self.worker is not None:
             self._scan_canceled = True
         if self.worker and self.worker.isRunning():

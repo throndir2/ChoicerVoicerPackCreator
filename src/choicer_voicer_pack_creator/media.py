@@ -6,10 +6,19 @@ import os
 import shutil
 import subprocess
 import sys
+import time
+import uuid
 from array import array
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+from choicer_voicer_pack_creator.diagnostics import (
+    diagnostic_event,
+    diagnostic_exception,
+    diagnostic_operation,
+    diagnostic_text,
+)
 
 ProgressCallback = Callable[[str], None]
 
@@ -54,6 +63,10 @@ class DecodedAudioStats:
 
 class MediaTools:
     def __init__(self, ffmpeg: str | None = None, ffprobe: str | None = None) -> None:
+        diagnostic_event(
+            "media_tools_requested", ffmpeg=ffmpeg, ffprobe=ffprobe,
+            explicit_paths=ffmpeg is not None or ffprobe is not None,
+        )
         if (ffmpeg is None) != (ffprobe is None):
             raise MediaError("Provide both ffmpeg and ffprobe, or neither")
         if ffmpeg and ffprobe:
@@ -61,6 +74,7 @@ class MediaTools:
             self.ffprobe = str(Path(ffprobe).resolve())
         else:
             self.ffmpeg, self.ffprobe = self._find_tool_pair()
+        diagnostic_event("media_tools_selected", ffmpeg=self.ffmpeg, ffprobe=self.ffprobe)
         self._verify_capabilities()
 
     @staticmethod
@@ -90,6 +104,7 @@ class MediaTools:
             ffprobe = directory / f"ffprobe{suffix}"
             if ffmpeg.is_file() and ffprobe.is_file():
                 return str(ffmpeg), str(ffprobe)
+        diagnostic_event("media_tools_not_found", checked_directories=sorted(map(str, checked)))
         raise MediaError(
             "A paired ffmpeg/ffprobe installation was not found. Put both tools on PATH or "
             "beside the application."
@@ -104,11 +119,19 @@ class MediaTools:
             for encoder in ("libtheora", "libvorbis", "libmp3lame")
             if encoder not in encoders
         ]
+        diagnostic_event(
+            "media_encoder_capabilities", required=["libtheora", "libvorbis", "libmp3lame"],
+            missing=missing,
+        )
         if missing:
             raise MediaError(
                 "The selected FFmpeg build lacks required encoders: " + ", ".join(missing)
             )
-        self.run([self.ffprobe, "-version"], "Checking FFprobe")
+        version = self.run([self.ffprobe, "-version"], "Checking FFprobe").stdout
+        diagnostic_event(
+            "media_tools_verified", ffmpeg=self.ffmpeg, ffprobe=self.ffprobe,
+            ffprobe_version=version.splitlines()[0][:512] if version else "",
+        )
 
     @staticmethod
     def _startup_info() -> subprocess.STARTUPINFO | None:  # type: ignore[name-defined]
@@ -118,22 +141,58 @@ class MediaTools:
         startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         return startup
 
-    def run(self, command: Sequence[str], description: str) -> subprocess.CompletedProcess[str]:
-        completed = subprocess.run(
-            [str(item) for item in command],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            startupinfo=self._startup_info(),
-            check=False,
+    @staticmethod
+    def _command_started(command: Sequence[str], description: str) -> tuple[float, str]:
+        command_id = uuid.uuid4().hex[:12]
+        diagnostic_event(
+            "media_command_started", command=[str(item) for item in command], description=description,
+            command_id=command_id,
         )
+        return time.monotonic(), command_id
+
+    @staticmethod
+    def _command_finished(
+        returncode: int, stderr: str | bytes, started: tuple[float, str], *, canceled: bool = False,
+    ) -> None:
+        truncated = len(stderr) > 4096
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "replace")
+        diagnostic_event(
+            "media_command_canceled" if canceled else (
+                "media_command_completed" if returncode == 0 else "media_command_failed"
+            ),
+            returncode=returncode, returncode_hex=f"0x{returncode & 0xFFFFFFFF:08X}",
+            duration_seconds=round(time.monotonic() - started[0], 3), command_id=started[1],
+            stderr=diagnostic_text(stderr, limit=4096), stderr_truncated=truncated,
+        )
+
+    def run(self, command: Sequence[str], description: str) -> subprocess.CompletedProcess[str]:
+        started = self._command_started(command, description)
+        try:
+            completed = subprocess.run(
+                [str(item) for item in command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                startupinfo=self._startup_info(),
+                check=False,
+            )
+        except OSError as error:
+            diagnostic_exception(
+                "media_command_launch_failed", error, command=[str(item) for item in command],
+                duration_seconds=round(time.monotonic() - started[0], 3), command_id=started[1],
+            )
+            raise
+        self._command_finished(completed.returncode, completed.stderr, started)
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip() or "Unknown FFmpeg error"
             raise MediaError(f"{description} failed: {detail}")
         return completed
 
+    @diagnostic_operation("media_probe")
     def probe(self, path: Path) -> MediaInfo:
+        diagnostic_event("media_probe_requested", path=path)
         completed = self.run(
             [
                 self.ffprobe,
@@ -158,7 +217,7 @@ class MediaTools:
         rate = str(video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/1")
         numerator, denominator = (rate.split("/", 1) + ["1"])[:2]
         fps = float(numerator) / max(1.0, float(denominator))
-        return MediaInfo(
+        result = MediaInfo(
             duration=duration,
             width=int(video.get("width", 0)),
             height=int(video.get("height", 0)),
@@ -170,11 +229,20 @@ class MediaTools:
             audio_sample_rate=int(audio.get("sample_rate", 0)) if audio else 0,
             audio_channels=int(audio.get("channels", 0)) if audio else 0,
         )
+        diagnostic_event(
+            "media_probed", path=path, duration=result.duration, width=result.width, height=result.height,
+            fps=result.fps, has_audio=result.has_audio, video_codec=result.video_codec,
+            audio_codec=result.audio_codec, pixel_format=result.pixel_format,
+            audio_sample_rate=result.audio_sample_rate, audio_channels=result.audio_channels,
+        )
+        return result
 
     def probe_audio_duration(self, path: Path) -> float:
         return self.probe_audio(path).duration
 
+    @diagnostic_operation("media_audio_probe")
     def probe_audio(self, path: Path) -> AudioInfo:
+        diagnostic_event("media_audio_probe_requested", path=path)
         completed = self.run(
             [
                 self.ffprobe,
@@ -197,12 +265,17 @@ class MediaTools:
         if value is None:
             raise MediaError(f"Could not determine audio duration for {path.name}")
         stream = streams[0]
-        return AudioInfo(
+        result = AudioInfo(
             duration=float(value),
             codec=str(stream.get("codec_name", "")),
             sample_rate=int(stream.get("sample_rate", 0)),
             channels=int(stream.get("channels", 0)),
         )
+        diagnostic_event(
+            "media_audio_probed", path=path, duration=result.duration, codec=result.codec,
+            sample_rate=result.sample_rate, channels=result.channels,
+        )
+        return result
 
     def decoded_audio_stats(
         self,
@@ -210,29 +283,36 @@ class MediaTools:
         sample_rate: int = 48000,
         quiet_threshold_dbfs: float = -60.0,
     ) -> DecodedAudioStats:
-        completed = subprocess.run(
-            [
-                self.ffmpeg,
-                "-v",
-                "error",
-                "-i",
-                str(path),
-                "-map",
-                "0:a:0",
-                "-ac",
-                "1",
-                "-ar",
-                str(sample_rate),
-                "-f",
-                "s16le",
-                "-c:a",
-                "pcm_s16le",
-                "pipe:1",
-            ],
-            capture_output=True,
-            startupinfo=self._startup_info(),
-            check=False,
-        )
+        command = [
+            self.ffmpeg,
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-map",
+            "0:a:0",
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "-f",
+            "s16le",
+            "-c:a",
+            "pcm_s16le",
+            "pipe:1",
+        ]
+        started = self._command_started(command, "Decoding audio statistics")
+        try:
+            completed = subprocess.run(
+                command, capture_output=True, startupinfo=self._startup_info(), check=False,
+            )
+        except OSError as error:
+            diagnostic_exception(
+                "media_command_launch_failed", error, command=command,
+                duration_seconds=round(time.monotonic() - started[0], 3), command_id=started[1],
+            )
+            raise
+        self._command_finished(completed.returncode, completed.stderr, started)
         if completed.returncode != 0:
             detail = completed.stderr.decode("utf-8", "replace").strip()
             raise MediaError(f"Decoding {path.name} failed: {detail}")
@@ -262,7 +342,9 @@ class MediaTools:
             has_activity=True,
         )
 
+    @diagnostic_operation("media_image_probe")
     def probe_image_dimensions(self, path: Path) -> tuple[int, int]:
+        diagnostic_event("media_image_probe_requested", path=path)
         completed = self.run(
             [
                 self.ffprobe,
@@ -281,7 +363,9 @@ class MediaTools:
         streams = json.loads(completed.stdout).get("streams", [])
         if not streams:
             raise MediaError(f"{path.name} does not contain a decodable image")
-        return int(streams[0].get("width", 0)), int(streams[0].get("height", 0))
+        width, height = int(streams[0].get("width", 0)), int(streams[0].get("height", 0))
+        diagnostic_event("media_image_probed", path=path, width=width, height=height)
+        return width, height
 
     def waveform_peaks(
         self,
@@ -292,6 +376,7 @@ class MediaTools:
         cancelled: Callable[[], bool] | None = None,
     ) -> list[float]:
         if duration <= 0:
+            diagnostic_event("media_waveform_skipped", reason="nonpositive_duration", duration=duration)
             return []
         command = [
             self.ffmpeg,
@@ -309,12 +394,21 @@ class MediaTools:
             "f32le",
             "pipe:1",
         ]
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            startupinfo=self._startup_info(),
-        )
+        started = self._command_started(command, "Extracting waveform")
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                startupinfo=self._startup_info(),
+            )
+        except OSError as error:
+            diagnostic_exception(
+                "media_command_launch_failed", error, command=command,
+                duration_seconds=round(time.monotonic() - started[0], 3), command_id=started[1],
+            )
+            raise
+        diagnostic_event("media_process_started", pid=process.pid, command_id=started[1])
         while True:
             try:
                 stdout, stderr = process.communicate(timeout=0.2)
@@ -322,13 +416,21 @@ class MediaTools:
             except subprocess.TimeoutExpired:
                 if not cancelled or not cancelled():
                     continue
+                diagnostic_event(
+                    "media_process_cancel_requested", pid=process.pid, command_id=started[1],
+                )
                 process.terminate()
                 try:
-                    process.communicate(timeout=2)
+                    _, stderr = process.communicate(timeout=2)
                 except subprocess.TimeoutExpired:
+                    diagnostic_event(
+                        "media_process_kill_requested", pid=process.pid, command_id=started[1],
+                    )
                     process.kill()
-                    process.communicate()
+                    _, stderr = process.communicate()
+                self._command_finished(process.returncode, stderr, started, canceled=True)
                 return []
+        self._command_finished(process.returncode, stderr, started)
         if process.returncode != 0:
             detail = stderr.decode("utf-8", "replace").strip()
             raise MediaError(f"Extracting waveform failed: {detail}")
@@ -339,10 +441,12 @@ class MediaTools:
         if not samples:
             return []
         bucket = max(1, math.ceil(len(samples) / target_peaks))
-        return [
+        peaks = [
             min(1.0, max(abs(value) for value in samples[index : index + bucket]))
             for index in range(0, len(samples), bucket)
         ]
+        diagnostic_event("media_waveform_ready", path=path, peak_count=len(peaks), duration=duration)
+        return peaks
 
     def convert_video(
         self,
@@ -519,33 +623,40 @@ class MediaTools:
         duration = end - start
         if duration <= 0:
             return False
-        completed = subprocess.run(
-            [
-                self.ffmpeg,
-                "-v",
-                "error",
-                "-ss",
-                f"{start:.6f}",
-                "-t",
-                f"{duration:.6f}",
-                "-i",
-                str(source),
-                "-map",
-                "0:a:0",
-                "-ac",
-                "1",
-                "-ar",
-                "8000",
-                "-f",
-                "s16le",
-                "-c:a",
-                "pcm_s16le",
-                "pipe:1",
-            ],
-            capture_output=True,
-            startupinfo=self._startup_info(),
-            check=False,
-        )
+        command = [
+            self.ffmpeg,
+            "-v",
+            "error",
+            "-ss",
+            f"{start:.6f}",
+            "-t",
+            f"{duration:.6f}",
+            "-i",
+            str(source),
+            "-map",
+            "0:a:0",
+            "-ac",
+            "1",
+            "-ar",
+            "8000",
+            "-f",
+            "s16le",
+            "-c:a",
+            "pcm_s16le",
+            "pipe:1",
+        ]
+        started = self._command_started(command, "Checking source audio activity")
+        try:
+            completed = subprocess.run(
+                command, capture_output=True, startupinfo=self._startup_info(), check=False,
+            )
+        except OSError as error:
+            diagnostic_exception(
+                "media_command_launch_failed", error, command=command,
+                duration_seconds=round(time.monotonic() - started[0], 3), command_id=started[1],
+            )
+            raise
+        self._command_finished(completed.returncode, completed.stderr, started)
         if completed.returncode != 0:
             detail = completed.stderr.decode("utf-8", "replace").strip()
             raise MediaError(f"Checking source audio activity failed: {detail}")
