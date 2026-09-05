@@ -67,6 +67,7 @@ from choicer_voicer_pack_creator.ui.analysis_dialog import (
     save_diagnostic_logs,
 )
 from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
+from choicer_voicer_pack_creator.ui.export_dialog import ExportProgressDialog
 from choicer_voicer_pack_creator.ui.subtitles import SubtitleVideoWidget
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
 from choicer_voicer_pack_creator.ui.update_controller import UpdateController
@@ -181,6 +182,7 @@ class MainWindow(QMainWindow):
         self._waveform_workers: list[WaveformWorker] = []
         self._waveform_request_id = 0
         self._export_worker: ExportWorker | None = None
+        self._export_dialog: ExportProgressDialog | None = None
         self._restoring_layout = False
         self._layout_restored = False
         self._range_edit_record: tuple[str, float, float, bool] | None = None
@@ -2225,6 +2227,10 @@ class MainWindow(QMainWindow):
     # ---------- Export and status ----------
 
     def export_pack(self) -> None:
+        if self._export_dialog is not None:
+            self._export_dialog.raise_()
+            self._export_dialog.activateWindow()
+            return
         self._commit_editors()
         if self.project.import_warnings:
             answer = QMessageBox.warning(
@@ -2273,37 +2279,45 @@ class MainWindow(QMainWindow):
         self._set_busy(True, "Starting validated export…")
         worker = ExportWorker(self.exporter, self.project, output_parent)
         self._export_worker = worker
+        dialog = ExportProgressDialog(output_folder, self)
+        self._export_dialog = dialog
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.finished.connect(self._export_dialog_closed)
         worker.progress.connect(self.progress_label.setText)
+        worker.progress.connect(dialog.report_progress)
         worker.completed.connect(self._export_completed)
         worker.failed.connect(self._export_failed)
+        worker.finished.connect(self._export_finished)
         worker.finished.connect(worker.deleteLater)
+        dialog.show()
         worker.start()
 
     @Slot(object)
     def _export_completed(self, value: object) -> None:
-        self._set_busy(False, "Export complete")
-        self._export_worker = None
         result = value
         if not isinstance(result, ExportResult):
             self._export_failed("Exporter returned an unexpected result")
             return
-        message = (
-            f"Validated pack folder:\n{result.pack_path}\n\n"
-            f"Validated ZIP:\n{result.zip_path}\n\n"
-            f"{result.validation['clip_count']} prompts · {result.validation['file_count']} files"
-        )
-        if result.warnings:
-            message += "\n\nCleanup notes:\n" + "\n".join(
-                f"• {warning}" for warning in result.warnings
-            )
+        if self._export_dialog is not None:
+            self._export_dialog.show_result(result)
         self.statusBar().showMessage(f"Exported {result.pack_path.name}")
-        QMessageBox.information(self, "Pack exported", message)
 
     @Slot(str)
     def _export_failed(self, message: str) -> None:
-        self._set_busy(False, "Export failed")
+        if self._export_dialog is not None:
+            self._export_dialog.show_error(message)
+        self.statusBar().showMessage("Export failed")
+
+    @Slot()
+    def _export_finished(self) -> None:
+        if self._export_dialog is not None:
+            self._export_dialog.worker_finished()
+            self._set_busy(False, self._export_dialog.progress_label.text())
         self._export_worker = None
-        QMessageBox.critical(self, "Export failed", message)
+
+    @Slot(int)
+    def _export_dialog_closed(self, _result: int) -> None:
+        self._export_dialog = None
 
     def _set_busy(self, busy: bool, message: str) -> None:
         self.progress_label.setText(message)
@@ -2423,7 +2437,7 @@ class MainWindow(QMainWindow):
         if not self.updater.can_close():
             event.ignore()
             return
-        if self._export_worker and self._export_worker.isRunning():
+        if self._export_worker is not None:
             QMessageBox.information(self, "Export running", "Wait for the current export to finish.")
             event.ignore()
             return
