@@ -202,6 +202,8 @@ def test_segment_body_drag_moves_range_without_changing_duration(qtbot) -> None:
     timeline.set_marks(segment.start, segment.end, segment.id)
     timeline.set_playhead(3)
     timeline.show()
+    seeks: list[float] = []
+    timeline.seek_requested.connect(seeks.append)
 
     center_y = round(timeline._segment_rect(segment).center().y())
     qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 3, center_y))
@@ -211,6 +213,7 @@ def test_segment_body_drag_moves_range_without_changing_duration(qtbot) -> None:
     assert segment.start == pytest.approx(3.5)
     assert segment.end == pytest.approx(5.5)
     assert segment.duration == pytest.approx(2.0)
+    assert seeks == []
 
 
 def test_dragging_empty_waveform_creates_new_range(qtbot) -> None:
@@ -266,25 +269,35 @@ def test_seek_click_does_not_detach_selected_segment_marks(qtbot) -> None:
     timeline.set_selected(segment.id)
     timeline.set_marks(1, 2, segment.id)
     timeline.show()
+    seeks: list[float] = []
+    timeline.seek_requested.connect(seeks.append)
 
     qtbot.mouseClick(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 6, 65))
 
+    assert seeks == [pytest.approx(6)]
     assert timeline.mark_segment_id == segment.id
     assert (timeline.mark_in, timeline.mark_out) == (1, 2)
 
 
-def test_segment_click_selects_then_seeks_to_precise_clicked_point(qtbot) -> None:
+@pytest.mark.parametrize("already_selected", [False, True])
+def test_segment_click_selects_then_seeks_to_start(qtbot, already_selected: bool) -> None:
     timeline = TimelineWidget()
     qtbot.addWidget(timeline)
     timeline.resize(1000, 220)
     timeline.set_duration(10)
-    segment = Segment(2, 4, "Existing", ["Speaker"])
+    segment = Segment(2.125, 4, "Existing", ["Speaker"])
     timeline.set_segments([segment])
+    if already_selected:
+        timeline.set_selected(segment.id)
+    timeline.set_playhead(3)
     timeline.show()
     selected: list[str] = []
     seeks: list[float] = []
     timeline.segment_selected.connect(selected.append)
     timeline.seek_requested.connect(seeks.append)
+    edits: list[tuple[object, ...]] = []
+    timeline.range_edit_started.connect(lambda *values: edits.append(values))
+    timeline.range_edit_finished.connect(lambda *values: edits.append(values))
     center_y = round(timeline._segment_rect(segment).center().y())
 
     qtbot.mouseClick(
@@ -294,7 +307,9 @@ def test_segment_click_selects_then_seeks_to_precise_clicked_point(qtbot) -> Non
     )
 
     assert selected == [segment.id]
-    assert seeks == [pytest.approx(3.25, abs=0.01)]
+    assert seeks == [segment.start]
+    assert edits == []
+    assert (segment.start, segment.end) == (2.125, 4)
 
 
 def test_narrow_segment_keeps_clickable_and_draggable_center(qtbot) -> None:
@@ -319,7 +334,7 @@ def test_narrow_segment_keeps_clickable_and_draggable_center(qtbot) -> None:
         pos=_point(timeline, 20.5, center_y),
     )
     assert selected == [segment.id]
-    assert seeks == [pytest.approx(20.5, abs=0.07)]
+    assert seeks == [segment.start]
 
     qtbot.mousePress(
         timeline,
@@ -358,6 +373,7 @@ def test_minimum_width_segment_center_is_clickable_and_blank_lane_seeks(qtbot) -
         pos=QPoint(round(rect.center().x()), center_y),
     )
     assert selected == [segment.id]
+    assert seeks == [segment.start]
 
     selected.clear()
     seeks.clear()

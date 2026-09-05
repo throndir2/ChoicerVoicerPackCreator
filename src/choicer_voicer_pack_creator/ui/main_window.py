@@ -14,7 +14,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QKeySequence
+from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtWidgets import (
     QApplication,
@@ -254,7 +254,10 @@ class MainWindow(QMainWindow):
         self.action_split.setShortcut(QKeySequence("Ctrl+Shift+S"))
         self.action_split.triggered.connect(self.split_segment)
         self.action_delete = QAction("Delete Segment", self)
-        self.action_delete.setShortcut(QKeySequence("Ctrl+Delete"))
+        self.action_delete.setShortcuts(
+            [QKeySequence(Qt.Key.Key_Backspace), QKeySequence("Ctrl+Delete")]
+        )
+        self.action_delete.setAutoRepeat(False)
         self.action_delete.triggered.connect(self.delete_segment)
         self.action_duplicate = QAction("Duplicate Segment", self)
         self.action_duplicate.setShortcut(QKeySequence("Ctrl+D"))
@@ -329,7 +332,11 @@ class MainWindow(QMainWindow):
 
         transport = QHBoxLayout()
         self.play_button = QPushButton("▶ Play")
+        self.play_button.setToolTip("Play / pause (Space)")
         self.play_button.clicked.connect(self.toggle_playback)
+        self.play_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
+        self.play_shortcut.setAutoRepeat(False)
+        self.play_shortcut.activated.connect(self.toggle_playback)
         transport.addWidget(self.play_button)
         self.stop_button = QPushButton("■")
         self.stop_button.setToolTip("Stop and return to the start")
@@ -506,6 +513,9 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.segment_table.itemSelectionChanged.connect(self._table_selection_changed)
+        self.segment_table.cellClicked.connect(
+            lambda _row, _column: self.select_segment(self.selected_segment_id)
+        )
         self.segment_table.cellDoubleClicked.connect(lambda _row, _column: self.preview_segment())
         segment_layout.addWidget(self.segment_table, 1)
         row_buttons = QHBoxLayout()
