@@ -62,6 +62,10 @@ class YouTubeNetworkError(YouTubeError):
     pass
 
 
+class YouTubeProcessError(RuntimeError):
+    pass
+
+
 class _PublicYoutubeIE(YoutubeIE):
     @staticmethod
     def _is_agegated(player_response: dict[str, Any]) -> bool:
@@ -645,11 +649,16 @@ def _run_youtube_stage(
         except ProcessWorkerCancelled as error:
             raise YouTubeCancelled("YouTube download canceled") from error
         except ProcessWorkerError as error:
-            _check_cancel(cancelled)
+            if error.error_type != "WorkerCleanupTimeout":
+                _check_cancel(cancelled)
             diagnostic_exception(
                 "youtube_stage_failed", error, stage=action, ipv4=request.ipv4,
                 remote_traceback=error.remote_traceback,
             )
+            if error.error_type == "WorkerCleanupTimeout":
+                raise YouTubeProcessError(
+                    f"Could not finish stopping the YouTube worker processes: {error}"
+                ) from error
             network_failure = isinstance(error, ProcessWorkerTimeout) or (
                 error.error_type == "YouTubeNetworkError"
             )

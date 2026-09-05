@@ -612,3 +612,28 @@ def test_download_errors_preserve_underlying_network_classification():
     wrapped = DownloadError("download failed", exc_info=(type(network), network, None))
     assert youtube._is_network_error(wrapped)
     assert not youtube._is_network_error(DownloadError("Video unavailable"))
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_cleanup_failure_is_not_hidden_by_cancellation_or_optional_caption_fallback(
+    tmp_path, downloader, inline_youtube_worker, monkeypatch, cancel,
+):
+    canceled = False
+    attempts = []
+
+    def run(target, args, **kwargs):
+        nonlocal canceled
+        attempts.append(args[1])
+        if args[1] == "captions":
+            canceled = cancel
+            raise youtube.ProcessWorkerError(
+                "Timed out waiting for worker process tree cleanup",
+                error_type="WorkerCleanupTimeout",
+            )
+        return inline_youtube_worker(target, args, **kwargs)
+
+    monkeypatch.setattr(youtube, "run_process_worker", run)
+    with pytest.raises(youtube.YouTubeProcessError, match="Could not finish stopping"):
+        run_download(tmp_path, cancelled=lambda: canceled)
+    assert attempts == ["metadata", "captions"]
+    assert list(tmp_path.iterdir()) == []
