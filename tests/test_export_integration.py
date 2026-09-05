@@ -89,7 +89,28 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
         ],
     )
 
-    result = PackExporter(media).export(project, tmp_path / "output")
+    messages = []
+    result = PackExporter(media).export(project, tmp_path / "output", progress=messages.append)
+    assert messages[0] == "Inspecting source video and audio..."
+    assert any("Converting video" in message for message in messages)
+    assert "Creating pack icon..." in messages
+    for index, speaker in enumerate(("Alice", "Bob"), start=1):
+        assert f"Prompt {index}/2: preparing audio for {speaker}" in messages
+        assert f"Prompt {index}/2: preparing still image..." in messages
+        assert f"Prompt {index}/2: checking audio duration, padding, and audibility..." in messages
+        for phase in ("Validating staged pack", "Revalidating published pack"):
+            assert f"{phase}: fully decoding Ogg video and audio" in messages
+            assert f"{phase}: prompt {index}/2: checking and decoding audio" in messages
+            assert f"{phase}: prompt {index}/2: checking and decoding still image" in messages
+    assert "Hashing staged file 10/10..." in messages
+    assert "Creating ZIP: compressing file 10/10..." in messages
+    assert "Verifying published file 10/10..." in messages
+    assert "Testing staged ZIP integrity and file inventory..." in messages
+    assert "Testing published ZIP integrity and file inventory..." in messages
+    assert messages.index("Hashing staged file 10/10...") < messages.index(
+        "Creating ZIP: compressing file 1/10..."
+    ) < messages.index("Verifying published file 1/10...")
+    assert messages[-1] == "Cleaning up export staging files..."
     assert result.pack_path.is_dir()
     assert result.zip_path and result.zip_path.is_file()
     assert result.validation["status"] == "passed"
@@ -122,13 +143,32 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
     original_image_hash = file_hash(result.pack_path / "001_Alice.png")
     imported.title = "Modified Integration Pack"
     imported.segments[0].caption = "Edited first line"
-    modified = PackExporter(media).export(imported, tmp_path / "modified-output")
+    messages.clear()
+    modified = PackExporter(media).export(
+        imported, tmp_path / "modified-output", create_zip=False, progress=messages.append,
+    )
+    assert any("Preserving existing Ogg video" in message for message in messages)
+    assert "Prompt 1/2: preparing audio for Alice" in messages
+    assert not any("compressing file" in message for message in messages)
+    assert modified.zip_path is None
     assert modified.validation["status"] == "passed"
     assert read_config(modified.pack_path / "001_Alice.txt")["data"]["caption"] == (
         "Edited first line"
     )
     assert file_hash(modified.pack_path / "001_Alice.mp3") == original_audio_hash
     assert file_hash(modified.pack_path / "001_Alice.png") == original_image_hash
+
+    project.combine_segments([segment.id for segment in reversed(project.segments)])
+    combined = PackExporter(media).export(project, tmp_path / "combined-output")
+    assert combined.validation["status"] == "passed"
+    assert combined.validation["clip_count"] == 1
+    assert combined.validation["file_count"] == 7
+    combined_metadata = read_config(combined.pack_path / "001_Alice.txt")["data"]
+    assert combined_metadata["caption"] == "First line Second line"
+    assert combined_metadata["dub_characters"] == ["Alice", "Bob"]
+    assert combined_metadata["dub_timestamps"] == [0.1]
+    combined_duration = media.probe_audio_duration(combined.pack_path / "001_Alice.mp3")
+    assert combined_duration == pytest.approx(1.55 - 0.2 + 0.1 + 0.15, abs=0.05)
 
 
 @pytest.mark.integration

@@ -82,10 +82,21 @@ class PackExporter:
             preserve_source_video=project.preserve_source_video,
             has_backing_track=bool(project.backing_track_path), has_icon=bool(project.icon_path),
         )
+        logged_progress = DiagnosticProgress("pack_export_progress")
+
+        def notify(
+            message: str, *, diagnostic_message: str | None = None, fraction: float | None = None,
+        ) -> None:
+            logged_progress.report(diagnostic_message or message, fraction)
+            if progress:
+                progress(message)
+
+        notify("Inspecting source video and audio...")
         source_video = Path(project.video_path).resolve()
         source_info = self.media.probe(source_video)
         if not source_info.has_audio:
             raise ValueError("The source video has no audio stream, so prompts cannot be created.")
+        notify("Checking project metadata and segment timings...")
         validated_project = PackProject.from_dict(project.to_dict())
         validated_project.video_duration = source_info.duration
         errors = validated_project.validate()
@@ -93,6 +104,7 @@ class PackExporter:
             diagnostic_event("pack_export_project_invalid", error_count=len(errors))
             raise ValueError("Cannot export this project:\n\n" + "\n".join(f"• {item}" for item in errors))
 
+        notify("Checking export destination and protecting source assets...")
         parent = output_parent.resolve()
         parent.mkdir(parents=True, exist_ok=True)
         folder_name = safe_name(project.title)
@@ -119,15 +131,6 @@ class PackExporter:
                 "Choose another export directory or change the pack title. Endangered paths:\n"
                 + preview
             )
-
-        logged_progress = DiagnosticProgress("pack_export_progress")
-
-        def notify(
-            message: str, *, diagnostic_message: str | None = None, fraction: float | None = None,
-        ) -> None:
-            logged_progress.report(diagnostic_message or message, fraction)
-            if progress:
-                progress(message)
 
         with tempfile.TemporaryDirectory(prefix=f".{folder_name}.staging-", dir=parent) as temporary:
             temporary_root = Path(temporary)
@@ -160,8 +163,10 @@ class PackExporter:
                     project.video_fps,
                     notify,
                 )
+            notify("Inspecting exported Ogg video...")
             output_video_info = self.media.probe(output_video)
 
+            notify("Creating pack icon...")
             icon_source = Path(project.icon_path).resolve() if project.icon_path else source_video
             self.media.make_icon(icon_source, stage / "icon.png", is_video=not project.icon_path)
 
@@ -193,9 +198,10 @@ class PackExporter:
             segments = sorted(project.segments, key=lambda item: (item.start, item.end))
             total = len(segments)
             for index, segment in enumerate(segments, start=1):
+                prompt_status = f"Prompt {index}/{total}"
                 notify(
-                    f"Building prompt {index}/{total}: {segment.primary_character}",
-                    diagnostic_message=f"Building prompt {index}/{total}",
+                    f"{prompt_status}: preparing audio for {segment.primary_character}",
+                    diagnostic_message=f"{prompt_status}: preparing audio",
                     fraction=(index - 1) / total,
                 )
                 base = f"{index:03d}_{slug(segment.primary_character)}"
@@ -203,6 +209,7 @@ class PackExporter:
                 image_path = stage / f"{base}.png"
                 timestamp = self._write_audio(project, segment, source_video, audio_path, source_info.duration)
                 if segment.audio_mode == "video":
+                    notify(f"{prompt_status}: checking audio duration, padding, and audibility...")
                     actual_head = min(segment.start, project.head_padding)
                     actual_tail = min(
                         project.tail_padding,
@@ -227,6 +234,7 @@ class PackExporter:
                         raise RuntimeError(
                             f"{audio_path.name} contains no audible source content"
                         )
+                notify(f"{prompt_status}: preparing still image...")
                 self._write_image(
                     segment,
                     source_video,
@@ -234,6 +242,7 @@ class PackExporter:
                     output_video_info.width,
                     output_video_info.height,
                 )
+                notify(f"{prompt_status}: writing caption and character metadata...")
                 (stage / f"{base}.txt").write_bytes(
                     render_clip_metadata(
                         segment.caption.strip(),
@@ -246,19 +255,25 @@ class PackExporter:
 
             notify("Validating staged pack…")
             with diagnostic_operation("pack_export_validation", path=stage, expected_clips=total):
-                validation = self.validator.validate_folder(stage, expected_clips=total)
-            file_hashes = {
-                path.name: sha256(path) for path in sorted(stage.iterdir()) if path.is_file()
-            }
+                validation = self.validator.validate_folder(
+                    stage, expected_clips=total,
+                    progress=lambda message: notify(f"Validating staged pack: {message}"),
+                )
+            files = sorted(path for path in stage.iterdir() if path.is_file())
+            file_hashes = {}
+            for index, path in enumerate(files, start=1):
+                notify(f"Hashing staged file {index}/{len(files)}...")
+                file_hashes[path.name] = sha256(path)
 
             staged_zip: Path | None = None
             if create_zip:
                 notify("Creating and testing ZIP archive…")
                 staged_zip = temporary_root / f"{folder_name}.zip"
                 with zipfile.ZipFile(staged_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-                    for path in sorted(stage.iterdir()):
-                        if path.is_file():
-                            archive.write(path, f"{folder_name}/{path.name}")
+                    for index, path in enumerate(files, start=1):
+                        notify(f"Creating ZIP: compressing file {index}/{len(files)}...")
+                        archive.write(path, f"{folder_name}/{path.name}")
+                notify("Testing staged ZIP integrity and file inventory...")
                 self.validator.validate_zip(staged_zip, folder_name, set(file_hashes))
                 diagnostic_event("pack_export_zip_validated", file_count=len(file_hashes))
 
@@ -271,7 +286,9 @@ class PackExporter:
                 folder_name,
                 file_hashes,
                 total,
+                progress=notify,
             )
+            notify("Cleaning up export staging files...")
             logged_progress.report("Pack export ready", 1.0)
             diagnostic_event(
                 "pack_export_ready", path=target, zip_path=target_zip,
@@ -355,20 +372,29 @@ class PackExporter:
         folder_name: str,
         file_hashes: dict[str, str],
         expected_clips: int,
+        progress: ProgressCallback | None = None,
     ) -> tuple[dict[str, Any], list[str]]:
         diagnostic_event(
             "pack_publish_requested", stage=stage, target=target, zip_path=target_zip,
             file_count=len(file_hashes), expected_clips=expected_clips,
         )
+
+        def notify(message: str) -> None:
+            if progress:
+                progress(message)
+
         token = uuid.uuid4().hex
         backup = target.with_name(f".{target.name}.previous-{token}")
         zip_backup = target_zip.with_name(f".{target_zip.name}.previous-{token}") if target_zip else None
+        if staged_zip:
+            notify("Hashing validated ZIP before publishing...")
         staged_zip_hash = sha256(staged_zip) if staged_zip else None
         pack_backed_up = False
         zip_backed_up = False
         pack_published = False
         zip_published = False
         try:
+            notify("Publishing: retaining existing output as rollback backups...")
             if target.exists():
                 os.replace(target, backup)
                 pack_backed_up = True
@@ -377,23 +403,31 @@ class PackExporter:
                 os.replace(target_zip, zip_backup)
                 zip_backed_up = True
                 diagnostic_event("pack_publish_zip_backup_created", path=zip_backup)
+            notify("Publishing validated pack folder and ZIP...")
             os.replace(stage, target)
             pack_published = True
             if staged_zip and target_zip:
                 os.replace(staged_zip, target_zip)
                 zip_published = True
+            notify("Checking published pack file inventory...")
             actual_names = {path.name for path in target.iterdir() if path.is_file()}
             if actual_names != set(file_hashes):
                 raise RuntimeError("Published pack inventory differs from validated staging")
-            for filename, expected_hash in file_hashes.items():
+            for index, (filename, expected_hash) in enumerate(file_hashes.items(), start=1):
+                notify(f"Verifying published file {index}/{len(file_hashes)}...")
                 if sha256(target / filename) != expected_hash:
                     raise RuntimeError(f"Published file differs from validated staging: {filename}")
-            validation = self.validator.validate_folder(target, expected_clips=expected_clips)
+            validation = self.validator.validate_folder(
+                target, expected_clips=expected_clips,
+                progress=lambda message: notify(f"Revalidating published pack: {message}"),
+            )
             if staged_zip_hash is not None:
+                notify("Verifying published ZIP checksum...")
                 if target_zip is None or not target_zip.is_file():
                     raise RuntimeError("The validated ZIP was not published")
                 if sha256(target_zip) != staged_zip_hash:
                     raise RuntimeError("Published ZIP differs from validated staging")
+                notify("Testing published ZIP integrity and file inventory...")
                 self.validator.validate_zip(target_zip, folder_name, set(file_hashes))
         except Exception as publish_error:
             diagnostic_exception("pack_publish_validation_failed", publish_error, target=target)
@@ -401,6 +435,7 @@ class PackExporter:
                 "pack_rollback_started", pack_published=pack_published, zip_published=zip_published,
                 pack_backed_up=pack_backed_up, zip_backed_up=zip_backed_up,
             )
+            notify("Publishing failed: restoring previous output from rollback backups...")
             rollback_errors: list[str] = []
             if pack_published and target.exists():
                 try:
@@ -436,6 +471,7 @@ class PackExporter:
             raise
 
         cleanup_warnings: list[str] = []
+        notify("Removing previous export backups...")
         try:
             if backup.exists():
                 shutil.rmtree(backup)

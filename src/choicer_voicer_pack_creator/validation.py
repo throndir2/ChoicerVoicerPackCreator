@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,15 @@ class PackValidator:
     def __init__(self, media: MediaTools) -> None:
         self.media = media
 
-    def validate_folder(self, folder: Path, expected_clips: int | None = None) -> dict[str, Any]:
+    def validate_folder(
+        self, folder: Path, expected_clips: int | None = None,
+        *, progress: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        def notify(message: str) -> None:
+            if progress:
+                progress(message)
+
+        notify("checking required files and pack metadata")
         root = folder.resolve()
         required = [
             root / "_pack_info.ini",
@@ -37,6 +46,7 @@ class PackValidator:
         if icon_name != "icon.png":
             raise PackValidationError("_pack_info.ini must reference icon.png")
 
+        notify("checking video codecs and dimensions")
         video = self.media.probe(root / "dub_video.ogv")
         if video.video_codec != "theora" or video.audio_codec != "vorbis":
             raise PackValidationError(
@@ -57,7 +67,9 @@ class PackValidator:
                 "dub_video.ogv must use positive even dimensions, 1–120 fps, yuv420p video, "
                 "and one- or two-channel 44.1/48 kHz Vorbis audio"
             )
+        notify("fully decoding Ogg video and audio")
         self.media.decode(root / "dub_video.ogv")
+        notify("checking and decoding pack icon")
         if (root / "icon.png").read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":
             raise PackValidationError("icon.png does not have a valid PNG signature")
         self.media.decode(root / "icon.png")
@@ -75,6 +87,7 @@ class PackValidator:
             "dub_video.ogv",
             "_backing_track.mp3",
         }
+        notify("checking and decoding backing track")
         backing_info = self.media.probe_audio(root / "_backing_track.mp3")
         if (
             backing_info.codec != "mp3"
@@ -87,7 +100,9 @@ class PackValidator:
         self.media.decode(root / "_backing_track.mp3")
 
         timestamps: list[float] = []
-        for metadata_path in metadata_files:
+        for index, metadata_path in enumerate(metadata_files, start=1):
+            prompt_status = f"prompt {index}/{len(metadata_files)}"
+            notify(f"{prompt_status}: checking metadata, timestamps, and references")
             self._require_canonical_crlf(metadata_path)
             data = read_config(metadata_path).get("data", {})
             caption = data.get("caption")
@@ -120,6 +135,7 @@ class PackValidator:
                 raise PackValidationError(f"{metadata_path.stem} is missing its MP3 or PNG")
             if image_path.read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":
                 raise PackValidationError(f"{image_path.name} does not have a valid PNG signature")
+            notify(f"{prompt_status}: checking and decoding audio")
             audio_info = self.media.probe_audio(audio_path)
             if (
                 audio_info.codec != "mp3"
@@ -139,6 +155,7 @@ class PackValidator:
             if not self.media.decoded_audio_stats(audio_path).has_activity:
                 raise PackValidationError(f"{audio_path.name} contains no audible prompt content")
             self.media.decode(audio_path)
+            notify(f"{prompt_status}: checking and decoding still image")
             self.media.decode(image_path)
             if self.media.probe_image_dimensions(image_path) != (video.width, video.height):
                 raise PackValidationError(
@@ -146,6 +163,7 @@ class PackValidator:
                 )
             expected_names.update({metadata_path.name, audio_path.name, image_path.name})
 
+        notify("checking complete pack file inventory")
         actual_names = {path.name for path in root.iterdir() if path.is_file()}
         if actual_names != expected_names:
             missing_names = sorted(expected_names - actual_names)

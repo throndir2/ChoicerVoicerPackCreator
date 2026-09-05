@@ -15,12 +15,16 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
   as you edit, follow seeking and segment timings, and work with saved projects and imported packs.
   Overlapping lines are shown together; source video and exports are not changed.
 - Keeps the decoded video frame visible when seeking while playback is stopped.
-- Cues playback to a segment's In point when selected or clicked in the list or timeline,
+- Cues playback to a segment's In point when you select or click it in the list or timeline,
   including another click on the selected segment. Scrub the playhead or click the waveform
   to seek to an exact point instead.
+- Automatically selects and scrolls to each active segment during video playback, keeping the
+  Selected Segment editor in sync without interrupting playback. Gaps keep the current selection;
+  overlapping lines follow the most recently started segment. Paused editing and single-segment
+  previews keep their selection.
 - Extracts and displays a zoomable waveform.
 - Marks precise In/Out points in seconds.
-- Adds, previews, splits, duplicates, deletes, and re-times segments.
+- Adds, previews, splits, combines, duplicates, deletes, and re-times segments.
   Press **Backspace** (or **Ctrl+Delete**) to delete the selected segment after confirmation;
   Backspace still works normally when editing text or numbers.
 - Resizes or collapses Pack Details, Segments, and Selected Segment so the segment list can use
@@ -186,6 +190,29 @@ If `py` is unavailable, invoke your installed Python executable directly.
 9. Optionally choose a clean backing track and custom icon.
 10. Save the editable project.
 11. Choose **Export Pack + ZIP** and select an output directory.
+
+Export opens a progress dialog with the current operation, total and current-step elapsed
+time, and a scrollable activity history. It reports video conversion, each prompt's audio
+and image preparation, staged and published media validation, ZIP creation, and publication.
+The activity bar stays indeterminate because these operations do not have a reliable overall
+percentage. Keep the dialog open while export runs; **Close** becomes available only after
+the worker finishes. The dialog then keeps the output locations, cleanup notes, or failure
+details visible until dismissed.
+
+### Combine segments
+
+In the **Segments** list, use **Ctrl-click** to select individual rows or **Shift-click** to select
+a range, then click **Combine** (or **Segments > Combine Selected Segments**, `Ctrl+Shift+M`).
+The selected segments become one segment from the earliest In to the latest Out, including any
+gaps. Their nonempty lines are joined with spaces in timeline order, and their speakers are
+combined without duplicates. Unselected segments are left unchanged.
+
+The combined segment uses source-video audio. Preserved recordings must first be given precise
+source-video In/Out values using **Apply Range** and explicitly switched to regenerated audio.
+A custom still image is retained; if the selection contains different custom stills, the app
+asks before keeping the first one in timeline order. No source media files are deleted.
+Playback keeps a multi-selection intact so you can combine segments while listening.
+Select a single row again to edit or preview an individual segment and resume playback following.
 
 ### Analyze and transcribe a video
 

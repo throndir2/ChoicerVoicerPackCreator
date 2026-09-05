@@ -176,11 +176,19 @@ def test_stopped_seek_retains_requested_video_frame(
         lambda: window.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState,
         timeout=2000,
     )
+    qtbot.waitUntil(lambda: window.selected_segment_id == second.id, timeout=2000)
+    assert window.caption_edit.toPlainText() == "Blue segment"
     assert window.player.position() >= target_ms - 150
     qtbot.waitUntil(
         lambda: window.player.position() >= 3500
         and not window.video_widget.subtitle_overlay.isVisible(),
         timeout=3000,
     )
+    window.seek(first.start)
+    qtbot.waitUntil(lambda: window.selected_segment_id == first.id, timeout=2000)
+    qtbot.waitUntil(lambda: window.selected_segment_id == second.id, timeout=5000)
+    assert window.caption_edit.toPlainText() == second.caption
+    assert window.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+    assert not window.dirty
     window.dirty = False
     window.close()
