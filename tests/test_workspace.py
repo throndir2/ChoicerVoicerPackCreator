@@ -95,7 +95,7 @@ def test_workspace_menu_precedes_tabs_and_project_toolbar(
         toolbar.mapTo(workspace, QPoint(0, 0)).y()
     )
     assert [action.text() for action in menu.actions()] == [
-        "&File", "&Project", "&Segments", "&Tools", "&Help",
+        "&File", "&Project", "&Segments", "&View", "&Tools", "&Help",
     ]
     actions = [action for action in toolbar.actions() if not action.isSeparator()]
     assert actions == [
@@ -368,6 +368,7 @@ def test_command_icons_and_compact_buttons_are_described(workspace):
     for action in editor.file_actions + editor.project_actions + editor.segment_actions + [
         workspace.action_new, workspace.action_open, workspace.action_import,
         workspace.tasks_window.show_action, workspace.action_logs, workspace.updater.check_action,
+        workspace.action_reset_layout,
     ]:
         assert action.toolTip()
         assert action.statusTip()
@@ -1206,22 +1207,24 @@ def test_per_document_recovery_and_workspace_restore(qtbot, tmp_path):
         current.close()
 
 
-def test_workspace_view_keeps_independent_video_timeline_sizes(workspace, qtbot):
+def test_workspace_view_keeps_shared_video_timeline_sizes(workspace, qtbot):
     first = workspace.add_project(PackProject(title="First"), dirty=False)
     qtbot.waitUntil(lambda: first._layout_restored)
     first.playback_splitter.moveSplitter(200, 1)
-    first_view = workspace._view_state(first)
+    first_sizes = first.playback_splitter.sizes()
     second = workspace.add_project(PackProject(title="Second"), dirty=False)
     qtbot.waitUntil(lambda: second._layout_restored)
+    assert second.playback_splitter.sizes() == first_sizes
     second.playback_splitter.moveSplitter(300, 1)
-    second_view = workspace._view_state(second)
-    assert first_view["playback_sizes"] != second_view["playback_sizes"]
+    shared_sizes = second.playback_splitter.sizes()
+    assert first_sizes != shared_sizes
 
-    for editor, view in ((first, first_view), (second, second_view)):
+    for editor in (first, second):
         workspace.tabs.setCurrentWidget(editor)
-        editor.playback_splitter.moveSplitter(96, 1)
-        workspace._restore_view(editor, view)
-        assert editor.playback_splitter.sizes() == view["playback_sizes"]
+        qtbot.waitUntil(lambda editor=editor: editor._layout_restored)
+        workspace._restore_view(editor, {"playback_sizes": first_sizes})
+        assert editor.playback_splitter.sizes() == shared_sizes
+        assert "playback_sizes" not in workspace._view_state(editor)
         assert not editor.dirty
 
 

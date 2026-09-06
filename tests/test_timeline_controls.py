@@ -178,6 +178,7 @@ def test_video_timeline_divider_resizes_both_panes_without_hiding_controls(
 
 
 def test_video_timeline_divider_restores_saved_layout(window, qtbot, tmp_path):
+    window.resize(window.minimumSize())
     window.show()
     qtbot.waitUntil(lambda: window._layout_restored)
     window.playback_splitter.moveSplitter(220, 1)

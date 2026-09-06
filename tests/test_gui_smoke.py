@@ -41,6 +41,17 @@ class UnusedMedia:
 
 
 @pytest.fixture(autouse=True)
+def isolated_default_settings(monkeypatch, tmp_path):
+    from choicer_voicer_pack_creator.ui import main_window
+
+    class TestSettings(QSettings):
+        def __init__(self, *_args):
+            super().__init__(str(tmp_path / "defaults.ini"), QSettings.Format.IniFormat)
+
+    monkeypatch.setattr(main_window, "QSettings", TestSettings)
+
+
+@pytest.fixture(autouse=True)
 def drain_workspace_tasks(qtbot):
     yield
     windows = [
@@ -328,6 +339,7 @@ def test_editor_restores_pane_size_without_restoring_old_divider_width(
     window = MainWindow(UnusedMedia(), settings=settings)  # type: ignore[arg-type]
     qtbot.addWidget(window)
     window.setStyleSheet(APP_STYLESHEET)
+    window.resize(window.minimumSize())
     window.show()
     qtbot.waitUntil(lambda: window._layout_restored)
     window.editor_splitter.setHandleWidth(9)
