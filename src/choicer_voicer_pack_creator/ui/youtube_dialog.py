@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QStandardPaths, QThread, Signal, Slot
+from PySide6.QtCore import QStandardPaths, Qt, Signal, Slot
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QComboBox,
@@ -26,7 +26,12 @@ from choicer_voicer_pack_creator.diagnostics import (
     diagnostic_exception,
 )
 from choicer_voicer_pack_creator.media import MediaTools
-from choicer_voicer_pack_creator.ui.analysis_dialog import save_diagnostic_logs
+from choicer_voicer_pack_creator.ui.analysis_dialog import (
+    register_job_detail,
+    save_diagnostic_logs,
+    show_message,
+)
+from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.youtube import (
     YouTubeCancelled,
     YouTubeDownload,
@@ -35,15 +40,19 @@ from choicer_voicer_pack_creator.youtube import (
 )
 
 
-class YouTubeWorker(QThread):
+class YouTubeWorker(JobWorker):
     progress = Signal(str, int)
     completed = Signal(object)
     failed = Signal(str)
     canceled = Signal()
 
-    def __init__(self, media: MediaTools, url: str, folder: Path, language: str) -> None:
+    def __init__(
+        self, media: MediaTools, url: str, folder: Path, language: str,
+        *, create_folder: bool = False,
+    ) -> None:
         super().__init__()
         self.media, self.url, self.folder, self.language = media, url, folder, language
+        self.create_folder = create_folder
 
     def run(self) -> None:
         diagnostics = DiagnosticProgress("youtube_worker_progress")
@@ -57,6 +66,10 @@ class YouTubeWorker(QThread):
             )
 
         try:
+            if self.create_folder:
+                self.folder.mkdir(parents=True, exist_ok=True)
+            if not self.folder.is_dir():
+                raise ValueError("The media destination must be an existing folder.")
             diagnostic_event("youtube_worker_started", folder=self.folder, language=self.language)
             result = download_youtube(
                 self.media, self.url, self.folder, self.language,
@@ -73,12 +86,20 @@ class YouTubeWorker(QThread):
 
 
 class YouTubeDialog(QDialog):
+    download_started = Signal()
+
     def __init__(
         self, media: MediaTools, folder: str, parent: QWidget | None = None,
         *, data_root: Path | None = None,
+        job_manager=None, project_id: str | None = None, source_snapshot=None,
     ) -> None:
         super().__init__(parent)
         self.media = media
+        self.job_manager = job_manager
+        self.project_id = project_id
+        self.source_snapshot = source_snapshot
+        if job_manager is not None:
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.data_root = data_root or Path(QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.AppLocalDataLocation,
         )) / "analysis"
@@ -151,7 +172,11 @@ class YouTubeDialog(QDialog):
         self.download_button.setObjectName("primary")
         self.download_button.clicked.connect(self.start_download)
         buttons.addButton(self.download_button, QDialogButtonBox.ButtonRole.ActionRole)
-        buttons.rejected.connect(self.reject)
+        buttons.rejected.connect(self.cancel_download)
+        if job_manager is not None:
+            hide_button = QPushButton("Hide")
+            hide_button.clicked.connect(self.hide)
+            buttons.addButton(hide_button, QDialogButtonBox.ButtonRole.ActionRole)
         layout.addWidget(buttons)
 
     def _browse(self) -> None:
@@ -170,13 +195,18 @@ class YouTubeDialog(QDialog):
             if not folder_text:
                 raise ValueError("Choose a folder for the downloaded video.")
             folder = Path(folder_text).resolve()
-            if self.default_folder and folder == Path(self.default_folder).resolve():
-                folder.mkdir(parents=True, exist_ok=True)
-            if not folder.is_dir():
-                raise ValueError("The media destination must be an existing folder.")
+            create_folder = bool(
+                self.default_folder and folder == Path(self.default_folder).resolve()
+            )
+            if self.job_manager is None:
+                if create_folder:
+                    folder.mkdir(parents=True, exist_ok=True)
+                if not folder.is_dir():
+                    raise ValueError("The media destination must be an existing folder.")
         except (OSError, ValueError) as error:
             diagnostic_exception("youtube_input_rejected", error)
-            QMessageBox.warning(self, "Cannot download video", str(error))
+            self.progress_label.setText(str(error))
+            show_message(self, "warning", "Cannot download video", str(error))
             return
         self.folder_edit.setText(str(folder))
         language = self.language_combo.currentData()
@@ -184,8 +214,17 @@ class YouTubeDialog(QDialog):
             self.language_combo.currentIndex()
         ):
             language = self.language_combo.currentText().strip()
-        worker = YouTubeWorker(self.media, url, folder, str(language or "auto"))
+        worker = YouTubeWorker(
+            self.media, url, folder, str(language or "auto"),
+            create_folder=create_folder,
+        )
         self.worker = worker
+        if self.job_manager is not None:
+            worker.configure_job(
+                self.job_manager, self.project_id, "youtube", "Download YouTube video",
+                resource_class="network", write_paths=(folder,),
+                source_snapshot=self.source_snapshot,
+            )
         self.download_result = None
         self._close_after_cancel = False
         self._progress("Fetching YouTube video details...", -1)
@@ -201,7 +240,12 @@ class YouTubeDialog(QDialog):
         worker.finished.connect(self._finished)
         worker.finished.connect(worker.deleteLater)
         diagnostic_event("youtube_worker_start_requested")
+        self.download_started.emit()
         worker.start()
+        register_job_detail(
+            self, worker, retry=self.start_download,
+            available=lambda: self.worker is None and self.download_result is None,
+        )
 
     @Slot(str, int)
     def _progress(self, message: str, value: int) -> None:
@@ -217,6 +261,8 @@ class YouTubeDialog(QDialog):
 
     @Slot(object)
     def _completed(self, result: object) -> None:
+        if self._close_after_cancel:
+            return
         if not isinstance(result, YouTubeDownload):
             self._failed("The downloader returned an invalid result.")
             return
@@ -233,14 +279,18 @@ class YouTubeDialog(QDialog):
     @Slot(str)
     def _failed(self, message: str) -> None:
         diagnostic_event("youtube_failure_displayed", message=message)
-        self.progress_label.setText("Download failed; existing media and project are unchanged.")
+        self.progress_label.setText(
+            f"Download failed: {message}\nExisting media and project are unchanged. "
+            "Use Save Diagnostic Bundle to collect logs for support."
+        )
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Failed")
-        QMessageBox.critical(
-            self, "YouTube download failed",
-            f"{message}\n\nUse Save Diagnostic Bundle to collect logs for support.",
-        )
+        if self.job_manager is None:
+            QMessageBox.critical(
+                self, "YouTube download failed",
+                f"{message}\n\nUse Save Diagnostic Bundle to collect logs for support.",
+            )
 
     @Slot()
     def _finished(self) -> None:
@@ -257,6 +307,12 @@ class YouTubeDialog(QDialog):
                 widget.setEnabled(True)
 
     def reject(self) -> None:
+        if self.job_manager is not None:
+            self.hide()
+            return
+        self.cancel_download()
+
+    def cancel_download(self) -> None:
         if self.worker is not None:
             diagnostic_event("youtube_cancel_requested")
             self._close_after_cancel = True
@@ -268,7 +324,10 @@ class YouTubeDialog(QDialog):
             super().reject()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        if self.worker is not None:
+        if self.job_manager is not None:
+            self.hide()
+            event.ignore()
+        elif self.worker is not None:
             self.reject()
             event.ignore()
         else:

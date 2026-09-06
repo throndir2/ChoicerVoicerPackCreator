@@ -456,6 +456,7 @@ def test_save_bundle_is_available_from_help_analysis_and_youtube(qtbot, tmp_path
     dialog.save_logs_button.click()
     youtube.save_logs_button.click()
     window.action_save_logs.trigger()
+    qtbot.waitUntil(lambda: len(saved) == 3)
     assert saved == [(tmp_path, tmp_path / "support.zip")] * 3
     window.dirty = False
     window.close()

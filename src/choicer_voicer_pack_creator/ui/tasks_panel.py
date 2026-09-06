@@ -41,6 +41,7 @@ class TasksPanel(QDockWidget):
         self._elapsed: dict[str, float] = {}
         self._details: dict[str, QWidget] = {}
         self._retry: dict[str, Callable[[], None]] = {}
+        self._retry_available: dict[str, Callable[[], bool]] = {}
         self._shown_for_task = False
         content = QWidget(self)
         layout = QVBoxLayout(content)
@@ -104,9 +105,21 @@ class TasksPanel(QDockWidget):
         widget.destroyed.connect(lambda: self._details.pop(job_id, None))
         self._selection_changed()
 
-    def register_retry(self, job_id: str, callback: Callable[[], None]) -> None:
+    def register_retry(
+        self, job_id: str, callback: Callable[[], None], *,
+        available: Callable[[], bool],
+    ) -> None:
         self._retry[job_id] = callback
+        self._retry_available[job_id] = available
         self._selection_changed()
+
+    def unregister_retry(self, job_id: str) -> None:
+        self._retry.pop(job_id, None)
+        self._retry_available.pop(job_id, None)
+
+    def _can_retry(self, job_id: str | None) -> bool:
+        guard = self._retry_available.get(job_id)
+        return bool(guard and not self.workspace._closing and guard())
 
     def _changed(self, record: JobRecord) -> None:
         if record.kind in {"recovery", "workspace"} and record.state not in {"failed", "blocked"}:
@@ -203,7 +216,8 @@ class TasksPanel(QDockWidget):
         self.output_button.setEnabled(bool(record and self._output(record)))
         self.detail_button.setEnabled(available and job_id in self._details)
         self.retry_button.setEnabled(bool(
-            available and record.state in {"failed", "cancelled", "blocked"} and job_id in self._retry
+            available and record.state in {"failed", "cancelled", "blocked"}
+            and self._can_retry(job_id)
         ))
         self.details.setPlainText("\n".join(self._logs.get(job_id, [])))
 
@@ -243,5 +257,6 @@ class TasksPanel(QDockWidget):
         if (
             callback is not None and record and self._project_available(record)
             and record.state in {"failed", "cancelled", "blocked"}
+            and self._can_retry(job_id)
         ):
             callback()

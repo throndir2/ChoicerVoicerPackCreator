@@ -213,9 +213,9 @@ or reference prepared local assets. The MCP tools also do not provide OCR or wik
 
 1. Choose **File → New from Video**.
 2. Once the source is ready, start editing immediately. Waveform, backing generation, and local
-   analysis run as independent background tasks. Each missing model asks for download consent;
-   declining one does not stop the other workflows. Review and explicitly use only the suggestions
-   you want to add.
+   analysis run as independent background tasks. A shared nonmodal prompt combines requests for
+   missing runtime/model versions across projects. Declining keeps your media and drafts; other
+   workflows continue. Review and explicitly use only the suggestions you want to add.
 3. Assign a speaker and verify every suggested caption and boundary against the source video.
 4. Scrub the video or click the waveform to find any remaining line.
 5. Set **In** at the beginning of the spoken line and **Out** after its final phoneme.
@@ -247,6 +247,16 @@ stage progress and elapsed time, cancel supported work, reopen review/details, o
 output. CPU, I/O, and network budgets bound concurrent work; jobs sharing output files or inference
 components wait rather than overwrite each other. You can edit or save another project while a
 pack exports, a source opens, or analysis runs.
+
+**Retry** is enabled for failed/canceled analysis, refinement, YouTube imports, exports, and failed
+backing generation when the originating document/source and review are still current. Analysis
+retries retain draft-replacement confirmation; export retries reopen destination and overwrite
+confirmation rather than blindly replaying publication. Successful tasks, retired documents,
+superseded sources/backing choices, and workflows without a safe retry are not replayed.
+
+Setup consent is shared for the session and keyed by exact component checksums. Closing one
+requesting project does not dismiss another project's prompt. Setup/download progress is reported
+within its processing task; it is not a separate permanent global job.
 
 Closing a tab with active work offers **Keep processing**, **Cancel tasks and close**, or
 **Keep open**. Keep processing retains a hidden document and its recovery data; **Show project**
