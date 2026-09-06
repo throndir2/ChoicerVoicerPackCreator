@@ -125,6 +125,8 @@ def test_bound_project_survives_active_switch_and_rejects_unknown_id(automation,
     assert bound.get_project()["project"]["title"] == "First only"
     with pytest.raises(ValueError, match="Unknown project_id"):
         automation.for_project("missing")
+    with pytest.raises(ValueError, match="Unknown project_id"):
+        automation.for_project("")
     with pytest.raises(ValueError, match="Project changed"):
         automation.update_project(ProjectPatch(title="Wrong target"), edited["revision"])
     saved = bound.save_project(edited["revision"], str(tmp_path / "first.cvpack.json"))

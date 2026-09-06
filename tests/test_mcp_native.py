@@ -14,6 +14,7 @@ import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from choicer_voicer_pack_creator.exporter import sha256
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.project_io import ProjectStore
@@ -33,6 +34,7 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
         "sine=frequency=440:sample_rate=48000:duration=30", "-shortest",
         "-c:v", "mpeg4", "-q:v", "5", "-c:a", "aac", str(source),
     ], "Creating original synthetic UI fixture")
+    source_hash = sha256(source)
     paths = {}
     for title in ("A", "B", "C"):
         segments = [
@@ -146,6 +148,13 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
             assert queued["state"] in {"queued", "waiting"}
             await call("cancel_job", job_id=queued["job_id"])
             assert (await terminal(queued["job_id"]))["state"] == "cancelled"
+            with anyio.fail_after(30):
+                while True:
+                    exporting = await call("get_job", job_id=export["job_id"])
+                    assert exporting["active"], exporting
+                    if exporting["state"] == "running" and exporting["message"] != "Starting":
+                        break
+                    await anyio.sleep(0.02)
 
             await tab(c["project_id"])
             await interact("projectTitle", "type", project_id=c["project_id"], text="C edited in UI")
@@ -153,7 +162,7 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
             await interact(
                 "segmentCaption", "type", project_id=c["project_id"], text="Caption typed in visible UI"
             )
-            assert (await call("get_job", job_id=export["job_id"]))["active"], (
+            assert (await call("get_job", job_id=export["job_id"]))["state"] == "running", (
                 "Workload finished too quickly to prove editing during actual processing"
             )
             await screenshot("mcp-during-processing.png")
@@ -189,7 +198,9 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
             await interact("taskDetails", "click")
             await interact("exportDetailsClose", "click")
             assert not (await call("get_job", job_id=export["job_id"]))["cancel_requested"]
+            await interact("projectTitle", "click", project_id=c["project_id"])
             focus_before = (await state())["focus_selector"]
+            assert focus_before == "projectTitle"
 
             exported = await terminal(export["job_id"])
             analyzed = await terminal(scan["job_id"])
@@ -221,7 +232,8 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
             assert cancelled["cancel_requested"]
             cancelled = await terminal(cancel_export["job_id"])
             assert cancelled["state"] == "cancelled", cancelled
-            assert not (tmp_path / "cancelled-export" / "Native A").exists()
+            cancelled_parent = tmp_path / "cancelled-export"
+            assert not cancelled_parent.exists() or not any(cancelled_parent.iterdir())
             assert (await state())["active_project_id"] == c["project_id"]
             await tab(b["project_id"])
             tabs = next(
@@ -254,6 +266,7 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
     assert (profile / "settings.ini").is_file()
     assert ProjectStore.load(paths["C"]).segments[0].caption == "Caption typed in visible UI"
     assert ProjectStore.load(paths["C"]).title == "C edited in UI"
+    assert sha256(source) == source_hash
 
     async def recover():
         async with (

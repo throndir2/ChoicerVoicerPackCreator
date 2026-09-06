@@ -72,8 +72,12 @@ class UIAutomation:
         if selector not in SELECTORS:
             raise ValueError(f"Selector is not allowlisted: {selector}")
         window = self.bridge.window
-        editor = window.editor_for_project(project_id) if project_id else window.active_editor
-        if project_id and editor is not window.active_editor:
+        if project_id is not None and project_id not in {
+            session.id for session in window.project_sessions
+        }:
+            raise ValueError(f"Unknown project_id: {project_id}")
+        editor = window.editor_for_project(project_id) if project_id is not None else window.active_editor
+        if project_id is not None and editor is not window.active_editor:
             raise ValueError("Project is not the visible tab. Select it through projectTabs first.")
         roots = [editor] if selector in EDITOR_SELECTORS and editor is not None else [window]
         for root in roots:
@@ -215,7 +219,7 @@ class UIAutomation:
                 try:
                     if not target.isVisible() or not target.isEnabled():
                         raise ValueError("Target became hidden or disabled before input.")
-                    if project_id and self.bridge.window.active_editor.session.id != project_id:
+                    if project_id is not None and self.bridge.window.active_editor.session.id != project_id:
                         raise ValueError("The active project changed before input.")
                     if editor_id and self.bridge.window.active_editor.session.id != editor_id:
                         raise ValueError("The active project changed before input.")

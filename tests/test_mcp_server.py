@@ -51,6 +51,7 @@ def test_tool_schemas_errors_and_headless_state(tmp_path):
             for name in ("get_ui_state", "get_ui_screenshot", "list_jobs"):
                 assert (await client.call_tool(name, {})).isError
             assert (await client.call_tool("get_project", {"project_id": "missing"})).isError
+            assert (await client.call_tool("get_project", {"project_id": ""})).isError
             assert (await client.call_tool("get_project", {"limit": 0})).isError
             results = []
 

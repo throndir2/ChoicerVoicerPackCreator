@@ -113,7 +113,9 @@ class EditorProjectAccess:
 
     def bind(self, project_id: str | None = None) -> EditorProjectAccess:
         def bind():
-            bound = EditorProjectAccess(self.bridge, project_id or self._editor().session.id)
+            bound = EditorProjectAccess(
+                self.bridge, self._editor().session.id if project_id is None else project_id
+            )
             bound._editor()
             return bound
         return self.bridge.call(bind)

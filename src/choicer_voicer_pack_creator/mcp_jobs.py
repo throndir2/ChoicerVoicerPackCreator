@@ -13,7 +13,7 @@ from choicer_voicer_pack_creator.automation import (
 from choicer_voicer_pack_creator.exporter import safe_name
 
 if TYPE_CHECKING:
-    from choicer_voicer_pack_creator.jobs import JobRecord
+    from choicer_voicer_pack_creator.jobs import JobHandle, JobRecord
     from choicer_voicer_pack_creator.mcp_gui import EditorBridge
 
 
@@ -35,6 +35,12 @@ class LiveJobs:
     def __init__(self, bridge: EditorBridge) -> None:
         self.bridge = bridge
 
+    def _handle(self, job_id: str) -> JobHandle:
+        try:
+            return self.bridge.window.job_manager.handle(job_id)
+        except KeyError:
+            raise ValueError(f"Unknown job_id: {job_id}") from None
+
     def list(self, project_id: str | None = None) -> dict[str, Any]:
         def read():
             manager = self.bridge.window.job_manager
@@ -48,15 +54,15 @@ class LiveJobs:
 
     def get(self, job_id: str) -> dict[str, Any]:
         return self.bridge.call(
-            lambda: describe_job(self.bridge.window.job_manager.handle(job_id).record)
+            lambda: describe_job(self._handle(job_id).record)
         )
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         def cancel():
             manager = self.bridge.window.job_manager
-            manager.handle(job_id)  # Validate identity before asking the scheduler to cancel.
+            handle = self._handle(job_id)
             manager.cancel(job_id)
-            return describe_job(manager.handle(job_id).record)
+            return describe_job(handle.record)
         return self.bridge.call(cancel)
 
     def start(

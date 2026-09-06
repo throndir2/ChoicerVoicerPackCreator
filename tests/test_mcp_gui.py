@@ -224,6 +224,8 @@ def test_bound_live_edit_targets_original_document_after_tab_switch(qtbot, live_
     assert window.editor_for_project(first["project_id"]).title_edit.text() == "First edited"
     with pytest.raises(ValueError, match="Unknown project_id"):
         in_worker(qtbot, lambda: automation.for_project("unknown"))
+    with pytest.raises(ValueError, match="Unknown project_id"):
+        in_worker(qtbot, lambda: automation.for_project(""))
 
 
 def test_mcp_save_does_not_clear_newer_edits_or_steal_tab(
@@ -533,5 +535,5 @@ def test_real_live_mcp_export_cancellation_cleans_staging(qtbot, live_editor, tm
     assert window.active_editor is second
     assert not (output / "Cancel fixture").exists()
     assert not (output / "Cancel fixture.zip").exists()
-    assert not list(output.glob(".cvpc-*"))
+    assert not output.exists() or not any(output.iterdir())
     assert in_worker(qtbot, bound.get_project)["revision"] == opened["revision"]

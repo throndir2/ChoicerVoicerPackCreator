@@ -187,14 +187,14 @@ class HeadlessProjectAccess:
 
     @property
     def current(self) -> ProjectSnapshot:
-        project_id = self._project_id or self._root._active_id
+        project_id = self._root._active_id if self._project_id is None else self._project_id
         if project_id not in self._root._projects:
             raise ValueError(f"Unknown project_id: {project_id}")
         return self._root._projects[project_id]
 
     @current.setter
     def current(self, snapshot: ProjectSnapshot) -> None:
-        project_id = self._project_id or self._root._active_id
+        project_id = self._root._active_id if self._project_id is None else self._project_id
         snapshot.project_id = project_id
         self._root._projects[project_id] = snapshot
 
@@ -202,7 +202,7 @@ class HeadlessProjectAccess:
         with self._root._lock:
             bound = object.__new__(HeadlessProjectAccess)
             bound._root = self._root
-            bound._project_id = project_id or self.current.project_id
+            bound._project_id = self.current.project_id if project_id is None else project_id
             bound.snapshot()
             return bound
 
