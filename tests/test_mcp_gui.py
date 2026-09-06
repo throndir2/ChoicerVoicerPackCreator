@@ -472,6 +472,43 @@ def test_queued_caption_input_rejects_changed_segment_selection(qtbot, live_edit
     assert second.caption == "Second caption"
 
 
+def test_inactive_window_caption_input_rejects_selection_during_activation(qtbot, live_editor):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QWidget
+
+    from choicer_voicer_pack_creator.ui_automation import UIAutomation
+
+    window, bridge, _automation = live_editor
+    hooks = UIAutomation(bridge)
+    editor = window.active_editor
+    first = editor.project.segments[0]
+    second = Segment(3, 4, "Second caption", ["Tester"])
+    editor.project.segments.append(second)
+    editor._refresh_table(first.id)
+    other = QWidget()
+    qtbot.addWidget(other)
+    other.resize(80, 80)
+    other.move(window.mapToGlobal(QPoint(0, 0)))
+    other.show()
+    other.activateWindow()
+    qtbot.waitUntil(lambda: other.isActiveWindow() and not window.isActiveWindow())
+    try:
+        typing = hooks.interact("segmentCaption", "type", text="Only for the first segment")
+        selecting = hooks.interact("segmentsTable", "select", index=1)
+        qtbot.waitUntil(lambda: all(
+            item["state"] in {"completed", "failed"} for item in hooks.state()["actions"]
+        ))
+        records = {item["action_id"]: item for item in hooks.state()["actions"]}
+        assert records[selecting["action_id"]]["state"] == "completed"
+        assert editor.selected_segment_id == second.id
+        assert records[typing["action_id"]]["state"] == "failed"
+        assert "selected segment changed" in records[typing["action_id"]]["error"]
+        assert first.caption == "Original"
+        assert second.caption == "Second caption"
+    finally:
+        other.close()
+
+
 def test_ui_selection_refuses_a_clipped_row_instead_of_claiming_success(qtbot, live_editor):
     from choicer_voicer_pack_creator.ui_automation import UIAutomation
 

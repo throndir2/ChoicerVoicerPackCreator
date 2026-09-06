@@ -130,19 +130,27 @@ class UIAutomation:
             raise ValueError("The target input area is clipped. Enlarge or scroll its panel.")
         return widget.mapFromGlobal(area.mapToGlobal(visible.boundingRect().center()))
 
-    def _click(self, widget: QWidget, point: QPoint | None = None) -> None:
+    def _click(
+        self, widget: QWidget, verify: Callable[[], None], point: QPoint | None = None,
+    ) -> None:
         point = self._input_point(widget) if point is None else point
-        hit = self._prepare_input(widget, point)
+        hit = self._prepare_input(widget, point, verify)
         position = hit.mapFromGlobal(widget.mapToGlobal(point))
-        QTest.mouseClick(hit, Qt.MouseButton.LeftButton, pos=position)
+        verify()
+        QTest.mouseClick(hit, Qt.MouseButton.LeftButton, pos=position, delay=0)
 
-    def _prepare_input(self, widget: QWidget, point: QPoint) -> QWidget:
+    def _prepare_input(
+        self, widget: QWidget, point: QPoint, verify: Callable[[], None],
+    ) -> QWidget:
+        verify()
         hit = self._hit(widget, point)
         window = hit.window()
         if not isinstance(window, QMenu) and not window.isActiveWindow():
             window.activateWindow()
             if not QTest.qWaitForWindowActive(window, 1000):
                 raise ValueError("The application window could not receive focus. Focus it and retry.")
+        # Activation waits dispatch queued actions; the original target may no longer be current.
+        verify()
         return self._hit(widget, point)
 
     @staticmethod
@@ -292,32 +300,41 @@ class UIAutomation:
             record = {"action_id": uuid4().hex, "selector": selector, "state": "queued"}
             self._actions.append(record)
 
+            def verify() -> None:
+                if not target.isVisible() or not target.isEnabled():
+                    raise ValueError("Target became hidden or disabled before input.")
+                if action != "reveal" and isinstance(target, QWidget) and target.visibleRegion().isEmpty():
+                    raise ValueError("Target lost its rendered input area before input.")
+                if project_id is not None and self.bridge.window.active_editor.session.id != project_id:
+                    raise ValueError("The active project changed before input.")
+                if editor_id and self.bridge.window.active_editor.session.id != editor_id:
+                    raise ValueError("The active project changed before input.")
+                if caption_id is not None and editor.selected_segment_id != caption_id:
+                    raise ValueError("The selected segment changed before typing.")
+                if selector in TASK_ACTIONS and (
+                    self.bridge.window.tasks_panel._selected_id() != task_id
+                ):
+                    raise ValueError("The selected task changed before input.")
+                if tab is not None and target.indexOf(tab) < 0:
+                    raise ValueError("The target tab closed before input.")
+                if self._target(selector, project_id) is not target:
+                    raise ValueError("The target widget changed before input.")
+                modal = QApplication.activeModalWidget()
+                if modal is not None and (
+                    not isinstance(target, QWidget)
+                    or (target is not modal and not modal.isAncestorOf(target))
+                ):
+                    raise ValueError("A modal window blocked the target before input.")
+
+            def key_click(value: Qt.Key, modifiers=Qt.KeyboardModifier.NoModifier) -> None:
+                verify()
+                QTest.keyClick(target, value, modifiers, delay=0)
+
             def perform() -> None:
                 record["state"] = "running"
                 try:
-                    if not target.isVisible() or not target.isEnabled():
-                        raise ValueError("Target became hidden or disabled before input.")
-                    if action != "reveal" and isinstance(target, QWidget) and target.visibleRegion().isEmpty():
-                        raise ValueError("Target lost its rendered input area before input.")
-                    if project_id is not None and self.bridge.window.active_editor.session.id != project_id:
-                        raise ValueError("The active project changed before input.")
-                    if editor_id and self.bridge.window.active_editor.session.id != editor_id:
-                        raise ValueError("The active project changed before input.")
-                    if caption_id is not None and editor.selected_segment_id != caption_id:
-                        raise ValueError("The selected segment changed before typing.")
-                    if selector in TASK_ACTIONS and (
-                        self.bridge.window.tasks_panel._selected_id() != task_id
-                    ):
-                        raise ValueError("The selected task changed before input.")
+                    verify()
                     tab_index = target.indexOf(tab) if tab is not None else None
-                    if tab_index is not None and tab_index < 0:
-                        raise ValueError("The target tab closed before input.")
-                    modal = QApplication.activeModalWidget()
-                    if modal is not None and (
-                        not isinstance(target, QWidget)
-                        or (target is not modal and not modal.isAncestorOf(target))
-                    ):
-                        raise ValueError("A modal window blocked the target before input.")
                     # A queued input may enter a nested modal event loop. Never hold an MCP
                     # request waiting for it; subsequent state calls report its real status.
                     if action == "reveal":
@@ -335,29 +352,32 @@ class UIAutomation:
                         menu.popup(self.bridge.window.mapToGlobal(self.bridge.window.rect().center()))
                         if not QTest.qWaitForWindowExposed(menu, 1000):
                             raise ValueError("The action menu did not become visible.")
-                        self._click(menu, menu.actionGeometry(target).center())
+                        self._click(menu, verify, menu.actionGeometry(target).center())
                     elif action == "type":
-                        self._prepare_input(target, self._input_point(target))
+                        self._prepare_input(target, self._input_point(target), verify)
                         target.setFocus()
-                        QTest.keyClick(target, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+                        key_click(Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
                         if all(" " <= char <= "~" for char in text):
                             if text:
-                                QTest.keyClicks(target, text)
+                                for char in text:
+                                    verify()
+                                    QTest.keyClicks(target, char, delay=0)
                             else:
-                                QTest.keyClick(target, Qt.Key.Key_Backspace)
+                                key_click(Qt.Key.Key_Backspace)
                         else:
                             # Qt's keyClicks is ASCII-only; use normal input-method events
                             # for Unicode/newlines, never the clipboard or OS-wide input.
                             from PySide6.QtGui import QInputMethodEvent
                             event = QInputMethodEvent()
                             event.setCommitString(text)
+                            verify()
                             QApplication.sendEvent(target, event)
                         if isinstance(target, QLineEdit):
-                            QTest.keyClick(target, Qt.Key.Key_Tab)
+                            key_click(Qt.Key.Key_Tab)
                     elif action == "key":
-                        self._prepare_input(target, self._input_point(target))
+                        self._prepare_input(target, self._input_point(target), verify)
                         target.setFocus()
-                        QTest.keyClick(target, KEYS[key])
+                        key_click(KEYS[key])
                     elif action == "close_tab":
                         from PySide6.QtWidgets import QTabBar
                         bar = target.tabBar()
@@ -366,10 +386,17 @@ class UIAutomation:
                             button = bar.tabButton(tab_index, QTabBar.ButtonPosition.LeftSide)
                         if button is None:
                             raise ValueError("The tab has no close button.")
-                        self._click(button)
+                        self._click(button, verify)
                     elif action == "select" and isinstance(target, QTabWidget):
                         bar = target.tabBar()
-                        self._click(bar, bar.tabRect(tab_index).center())
+                        point = bar.tabRect(tab_index).center()
+
+                        def verify_tab() -> None:
+                            verify()
+                            if bar.tabAt(point) != target.indexOf(tab):
+                                raise ValueError("The target tab moved before input.")
+
+                        self._click(bar, verify_tab, point)
                         if target.currentWidget() is not tab:
                             raise RuntimeError("The tab click did not select the requested project.")
                     elif action == "select" and isinstance(target, QTableWidget):
@@ -386,20 +413,26 @@ class UIAutomation:
                             raise ValueError(
                                 "The target row is clipped. Enlarge its panel before selecting."
                             )
-                        self._click(target.viewport(), point)
+                        def verify_row() -> None:
+                            verify()
+                            current = target.itemAt(point)
+                            if current is None or current.data(Qt.ItemDataRole.UserRole) != row_id:
+                                raise ValueError("The target row moved before input.")
+
+                        self._click(target.viewport(), verify_row, point)
                         if not any(
                             selected.data(Qt.ItemDataRole.UserRole) == row_id
                             for selected in target.selectedItems()
                         ):
                             raise RuntimeError("The row click did not select the requested item.")
                     elif action == "select" and isinstance(target, QComboBox):
-                        self._prepare_input(target, self._input_point(target))
+                        self._prepare_input(target, self._input_point(target), verify)
                         target.setFocus()
-                        QTest.keyClick(target, Qt.Key.Key_Home)
+                        key_click(Qt.Key.Key_Home)
                         for _ in range(index):
-                            QTest.keyClick(target, Qt.Key.Key_Down)
+                            key_click(Qt.Key.Key_Down)
                     else:
-                        self._click(target)
+                        self._click(target, verify)
                     record["state"] = "completed"
                 except Exception as error:
                     # Input is asynchronous; expose failure through get_ui_state, not stderr-only.
