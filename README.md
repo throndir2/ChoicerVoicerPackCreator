@@ -447,8 +447,15 @@ files on disk can contain unredacted code paths; the bundle redacts these before
 Choose **File → New from YouTube** and paste a video URL. The destination defaults to your
 Windows **Downloads** folder unless a previous location was selected; clearing the field also
 uses Downloads. You can choose a different folder. Only download material you own or have
-permission to use. Each import creates a new
-`YouTube-<video-id>-<unique-id>` folder without replacing existing files. Save your `.cvpack.json`
+permission to use. New videos create a
+`YouTube-<video-id>-<unique-id>` folder. When a matching import already exists in the selected
+location, choose **Use Existing**, **Overwrite**, or **Cancel**. If several copies exist, select
+the folder to use. **Use Existing** is available only for a complete, readable video with audio;
+it skips the video download and fetches the title and selected-language captions again.
+Incomplete downloads must be overwritten. **Overwrite** downloads and checks the replacement
+before replacing source download files, preserves other files in the folder, and restores
+previous media if publication fails. Projects referencing the replaced media may be affected.
+Save your `.cvpack.json`
 beside that folder to keep the project relocatable; downloaded media is not a temporary cache.
 The downloader retrieves the best available video/audio and may merge them into MKV.
 Download percentages combine the selected video and audio transfers. Estimates are labeled and

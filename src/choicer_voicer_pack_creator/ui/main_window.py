@@ -1128,7 +1128,7 @@ class ProjectEditor(QWidget):
         )
         self._set_project(project, None, mark_dirty=True)
         self.statusBar().showMessage(
-            f"Downloaded {result.title}; {len(result.captions)} caption(s) ready for review."
+            f"Imported {result.title}; {len(result.captions)} caption(s) ready for review."
         )
         if result.warnings:
             self.workspace.notice("YouTube import notes", "\n\n".join(result.warnings))

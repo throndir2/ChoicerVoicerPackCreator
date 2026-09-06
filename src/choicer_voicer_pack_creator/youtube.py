@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -36,7 +37,11 @@ from choicer_voicer_pack_creator.diagnostics import (
 )
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import SourceCaption
-from choicer_voicer_pack_creator.operations import OperationCancelled, critical_stage
+from choicer_voicer_pack_creator.operations import (
+    OperationCancelled,
+    SourceSnapshot,
+    critical_stage,
+)
 from choicer_voicer_pack_creator.process_worker import (
     ProcessWorkerCancelled,
     ProcessWorkerError,
@@ -49,6 +54,7 @@ CAPTION_TIMEOUT = 30.0
 TRANSFER_IDLE_TIMEOUT = 120.0
 POSTPROCESS_IDLE_TIMEOUT = 600.0
 PROBE_TIMEOUT = 60.0
+VIDEO_SUFFIXES = {".mp4", ".mkv", ".webm", ".mov"}
 
 
 class YouTubeError(ValueError):
@@ -92,6 +98,117 @@ class YouTubeDownload:
     language: str
     captions: list[SourceCaption]
     warnings: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class ExistingYouTubeImport:
+    folder: Path
+    snapshot: SourceSnapshot
+    video_path: Path | None
+    duration: float
+    reuse_problem: str
+
+
+@dataclass(frozen=True, slots=True)
+class YouTubeImportConflict:
+    imports: tuple[ExistingYouTubeImport, ...]
+
+
+def _import_folder_matches(folder: Path, url: str) -> bool:
+    prefix = f"YouTube-{parse_qs(urlsplit(url).query)['v'][0]}"
+    return folder.name == prefix or folder.name.startswith(prefix + "-")
+
+
+def _source_videos(folder: Path) -> list[Path]:
+    return [
+        path for path in folder.iterdir()
+        if path.is_file() and path.stem == "source" and path.suffix.lower() in VIDEO_SUFFIXES
+    ]
+
+
+def _source_download_files(folder: Path) -> list[Path]:
+    return [
+        path for path in folder.iterdir()
+        if path.is_file() and path.name.startswith("source.") and (
+            path.suffix.lower() in VIDEO_SUFFIXES or ".part" in path.name
+            or path.suffix == ".ytdl"
+        )
+    ]
+
+
+def _existing_imports(
+    media: MediaTools, url: str, destination: Path,
+    progress: ProgressCallback, cancelled: CancelCallback,
+) -> tuple[ExistingYouTubeImport, ...]:
+    folders = (
+        [destination] if _import_folder_matches(destination, url) else
+        sorted(path for path in destination.iterdir() if _import_folder_matches(path, url))
+    )
+    imports = []
+    for folder in folders:
+        _check_cancel(cancelled)
+        if folder.resolve() != folder or not folder.is_dir():
+            raise YouTubeError(f"The existing import location is not a regular folder: {folder}")
+        progress(f"Checking existing YouTube import: {folder.name}", None)
+        snapshot = SourceSnapshot.capture((folder,))
+        videos = _source_videos(folder)
+        video = videos[0] if len(videos) == 1 else None
+        duration = 0.0
+        problem = ""
+        if video is None:
+            problem = "The folder must contain exactly one complete source video."
+        elif video.is_symlink() or video.stat().st_size == 0 or any(
+            path != video for path in _source_download_files(folder)
+        ):
+            problem = "The source video is empty, linked, or has unfinished download files."
+        else:
+            try:
+                request = _YouTubeRequest(folder, url, media.ffmpeg, Path())
+                info = _run_youtube_stage(
+                    request, "probe", (media, video), [], progress, cancelled,
+                )
+                if not math.isfinite(info.duration) or info.duration <= 0 or not info.has_audio:
+                    raise YouTubeError("The source video needs a finite duration and an audio stream.")
+                duration = info.duration
+            except (YouTubeError, OSError) as error:
+                diagnostic_exception("youtube_existing_media_incomplete", error, path=video)
+                problem = f"The existing video could not be validated: {error}"
+        snapshot.verify()
+        imports.append(ExistingYouTubeImport(folder, snapshot, video, duration, problem))
+    return tuple(imports)
+
+
+def _replace_source_video(stage: Path, folder: Path, notes: list[str]) -> None:
+    # Replace only importer-owned source videos, not saved projects or generated backing tracks.
+    backup = folder.parent / f".cvpc-youtube-backup-{uuid.uuid4().hex}"
+    backup.mkdir()
+    moved: list[Path] = []
+    try:
+        for previous in _source_download_files(folder):
+            previous.rename(backup / previous.name)
+            moved.append(previous)
+        stage.rename(folder / stage.name)
+    except OSError as error:
+        diagnostic_exception("youtube_replace_failed", error, folder=folder)
+        failures = []
+        for previous in reversed(moved):
+            try:
+                (backup / previous.name).rename(previous)
+            except OSError as rollback_error:
+                diagnostic_exception("youtube_rollback_failed", rollback_error, path=previous)
+                failures.append(str(rollback_error))
+        if failures:
+            raise YouTubeError(
+                f"Replacement failed ({error}); restoring the previous media also failed. "
+                f"Keep the recovery files at {backup}: {'; '.join(failures)}"
+            ) from error
+        backup.rmdir()
+        raise
+    try:
+        shutil.rmtree(backup)
+    except OSError as error:
+        diagnostic_exception("youtube_backup_cleanup_failed", error, path=backup)
+        notes.append(f"The video was replaced, but old media could not be removed from {backup}: {error}")
 
 
 @diagnostic_operation("youtube_runtime")
@@ -698,7 +815,9 @@ def download_youtube(
     *,
     progress: ProgressCallback,
     cancelled: CancelCallback,
-) -> YouTubeDownload:
+    existing: ExistingYouTubeImport | None = None,
+    overwrite: bool = False,
+) -> YouTubeDownload | YouTubeImportConflict:
     diagnostic_event("youtube_download_requested", destination=destination, language=language)
     url = normalize_youtube_url(url)
     if language != "auto" and not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", language):
@@ -707,6 +826,20 @@ def download_youtube(
     if not destination.is_dir():
         raise YouTubeError("Choose an existing destination folder.")
     _check_cancel(cancelled)
+    if existing is None:
+        imports = _existing_imports(media, url, destination, progress, cancelled)
+        if imports:
+            progress("Choose whether to overwrite or use an existing YouTube import.", None)
+            return YouTubeImportConflict(imports)
+    else:
+        if (
+            (existing.folder != destination and existing.folder.parent != destination)
+            or not _import_folder_matches(existing.folder, url)
+        ):
+            raise YouTubeError("The selected existing import does not match this URL and destination.")
+        existing.snapshot.verify()
+        if not overwrite and (existing.reuse_problem or existing.video_path is None):
+            raise YouTubeError(existing.reuse_problem or "The existing source video is missing.")
     notes: list[str] = []
     logged_progress = DiagnosticProgress("youtube_progress")
     callback = progress
@@ -726,7 +859,8 @@ def download_youtube(
         extractor=_PublicYoutubeIE.__name__, format_selector="bv*+ba/b",
     )
 
-    with tempfile.TemporaryDirectory(prefix=".cvpc-youtube-", dir=destination) as temporary:
+    stage_parent = existing.folder.parent if existing else destination
+    with tempfile.TemporaryDirectory(prefix=".cvpc-youtube-", dir=stage_parent) as temporary:
         stage = Path(temporary)
         diagnostic_event("youtube_staging_created", path=stage)
         request = _YouTubeRequest(stage, url, media.ffmpeg, youtube_runtime_path())
@@ -765,32 +899,44 @@ def download_youtube(
                 "language. Local Whisper will draft captions instead."
             )
         _check_cancel(cancelled)
-        with diagnostic_operation("youtube_media_transfer"):
-            _run_youtube_stage(request, "media", info, notes, progress, cancelled)
-        _check_cancel(cancelled)
-        files = [
-            path for path in stage.iterdir()
-            if path.is_file() and path.stem == "source"
-            and path.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}
-        ]
-        diagnostic_event("youtube_download_inventory", video_file_count=len(files))
-        if len(files) != 1:
-            raise YouTubeError("The download did not produce exactly one complete video file.")
-        video = files[0]
-        media_info = _run_youtube_stage(
-            request, "probe", (media, video), notes, progress, cancelled,
-        )
-        diagnostic_event(
-            "youtube_media_probed", path=video, duration=media_info.duration,
-            has_audio=media_info.has_audio,
-        )
-        if not math.isfinite(media_info.duration) or media_info.duration <= 0 or not media_info.has_audio:
-            raise YouTubeError("The downloaded video needs a finite duration and an audio stream.")
+        if existing is not None and not overwrite:
+            assert existing.video_path is not None
+            video, duration = existing.video_path, existing.duration
+            expected_duration = _positive_size(info.get("duration"))
+            if expected_duration is not None and abs(duration - expected_duration) > max(
+                2.0, expected_duration * 0.01,
+            ):
+                raise YouTubeError(
+                    "The existing video's duration differs from YouTube. Retry and choose Overwrite."
+                )
+            progress("Using existing video; skipping the media download...", None)
+        else:
+            with diagnostic_operation("youtube_media_transfer"):
+                _run_youtube_stage(request, "media", info, notes, progress, cancelled)
+            _check_cancel(cancelled)
+            files = _source_videos(stage)
+            diagnostic_event("youtube_download_inventory", video_file_count=len(files))
+            if len(files) != 1:
+                raise YouTubeError("The download did not produce exactly one complete video file.")
+            video = files[0]
+            media_info = _run_youtube_stage(
+                request, "probe", (media, video), notes, progress, cancelled,
+            )
+            diagnostic_event(
+                "youtube_media_probed", path=video, duration=media_info.duration,
+                has_audio=media_info.has_audio,
+            )
+            if (
+                not math.isfinite(media_info.duration) or media_info.duration <= 0
+                or not media_info.has_audio
+            ):
+                raise YouTubeError("The downloaded video needs a finite duration and an audio stream.")
+            duration = media_info.duration
         captions: list[SourceCaption] = []
         if captions_json is not None and track:
             try:
                 captions = parse_json3(
-                    captions_json, media_info.duration,
+                    captions_json, duration,
                     automatic=track.automatic, language=track.language,
                 )
                 diagnostic_event("youtube_caption_data_parsed", caption_count=len(captions))
@@ -803,14 +949,20 @@ def download_youtube(
                 notes.append(f"Caption data was invalid; Whisper will draft captions instead: {error}")
         progress("Publishing downloaded video...", None)
         _check_cancel(cancelled)
-        folder = destination / f"YouTube-{parse_qs(urlsplit(url).query)['v'][0]}-{uuid.uuid4().hex[:8]}"
-        # Publish only our unique staging directory, never an existing user's media folder.
+        folder = existing.folder if existing else (
+            destination / f"YouTube-{parse_qs(urlsplit(url).query)['v'][0]}-{uuid.uuid4().hex[:8]}"
+        )
         with critical_stage("Publishing downloaded video; cancellation is deferred..."):
             with diagnostic_operation("youtube_publish", source=stage, destination=folder):
-                stage.rename(folder)
+                if existing is None:
+                    stage.rename(folder)
+                else:
+                    existing.snapshot.verify()
+                    if overwrite:
+                        _replace_source_video(video, folder, notes)
             result = YouTubeDownload(
                 folder / video.name, str(info.get("title") or "YouTube video"),
-                media_info.duration, url,
+                duration, url,
                 track.language if track else (language if language != "auto" else ""),
                 captions, notes,
             )

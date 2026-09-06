@@ -13,7 +13,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from choicer_voicer_pack_creator import youtube
-from choicer_voicer_pack_creator.operations import operation_scope
+from choicer_voicer_pack_creator.operations import SourceChangedError, operation_scope
 
 VIDEO_ID = "abcdefghijk"
 URL = f"https://www.youtube.com/watch?v={VIDEO_ID}"
@@ -103,6 +103,7 @@ def downloader(monkeypatch, inline_youtube_worker):
         cancel = False
         live = False
         no_captions = False
+        file_extension = "mp4"
         selected_formats = [VIDEO_FORMAT, AUDIO_FORMAT]
         events = [
             transfer_event("137", 450, total_bytes=900),
@@ -155,7 +156,7 @@ def downloader(monkeypatch, inline_youtube_worker):
                 if len(self.selected_formats) > 1 else {**_info, **self.selected_formats[0]}
             )
             self.before_dl.run(info)
-            path = Path(self.options["outtmpl"].replace("%(ext)s", "mp4"))
+            path = Path(self.options["outtmpl"].replace("%(ext)s", self.file_extension))
             path.write_bytes(b"downloaded-video")
             for event in self.events:
                 self.options["progress_hooks"][0](event)
@@ -168,21 +169,26 @@ def downloader(monkeypatch, inline_youtube_worker):
     return FakeDownloader
 
 
-def run_download(destination: Path, cancelled=lambda: False, progress=lambda *_args: None):
+def run_download(
+    destination: Path, cancelled=lambda: False, progress=lambda *_args: None, **kwargs,
+):
     return youtube.download_youtube(
         FakeMedia(), URL, destination, "auto",
-        progress=progress, cancelled=cancelled,
+        progress=progress, cancelled=cancelled, **kwargs,
     )
 
 
-def test_download_publishes_unique_media_and_preserves_existing_files(
+def test_repeat_download_requires_a_choice_and_preserves_existing_files(
     tmp_path: Path, downloader,
 ) -> None:
     existing = tmp_path / "source.mp4"
     existing.write_bytes(b"user-video")
     first = run_download(tmp_path)
     second = run_download(tmp_path)
-    assert first.video_path != second.video_path
+    assert isinstance(second, youtube.YouTubeImportConflict)
+    assert second.imports[0].video_path == first.video_path
+    assert not second.imports[0].reuse_problem
+    assert len(list(tmp_path.glob("YouTube-*"))) == 1
     assert first.video_path.read_bytes() == b"downloaded-video"
     assert first.captions[0].text == "Hello"
     assert first.title == "../Not a filename"
@@ -197,20 +203,21 @@ def test_download_publishes_unique_media_and_preserves_existing_files(
 def test_progress_combines_selected_streams_and_only_completes_after_publication(
     tmp_path, downloader,
 ):
-    def collect_run(expected_folders):
+    def collect_run(destination):
+        destination.mkdir()
         events = []
 
         def report(message, fraction):
             events.append((message, fraction))
             if fraction == 1:
-                assert len(list(tmp_path.glob("YouTube-*"))) == expected_folders
-                assert not list(tmp_path.glob(".cvpc-youtube-*"))
+                assert len(list(destination.glob("YouTube-*"))) == 1
+                assert not list(destination.glob(".cvpc-youtube-*"))
 
-        run_download(tmp_path, progress=report)
+        run_download(destination, progress=report)
         return events
 
-    events = collect_run(1)
-    assert collect_run(2) == events
+    events = collect_run(tmp_path / "first")
+    assert collect_run(tmp_path / "second") == events
     fractions = [fraction for _, fraction in events if fraction is not None]
     assert fractions == pytest.approx([0.45, 0.9, 0.91, 1.0])
     messages = [message for message, _ in events]
@@ -221,6 +228,214 @@ def test_progress_combines_selected_streams_and_only_completes_after_publication
     for stage in ("Merging", "Checking", "Publishing"):
         assert any(message.startswith(stage) and value is None for message, value in events)
     assert events[-1] == ("YouTube video ready", 1.0)
+
+
+@pytest.mark.parametrize("direct_folder", [False, True])
+def test_reuse_skips_media_transfer_but_refreshes_details_and_captions(
+    tmp_path, downloader, monkeypatch, direct_folder,
+):
+    first = run_download(tmp_path)
+    destination = first.video_path.parent if direct_folder else tmp_path
+    existing = run_download(destination).imports[0]
+    actions = []
+    run_stage = youtube._run_youtube_stage
+
+    def record(request, action, *args):
+        actions.append(action)
+        assert action != "media"
+        return run_stage(request, action, *args)
+
+    monkeypatch.setattr(youtube, "_run_youtube_stage", record)
+    result = run_download(destination, existing=existing)
+    assert result == first
+    assert actions == ["metadata", "captions"]
+    assert not list(tmp_path.glob(".cvpc-youtube-*"))
+    existing.snapshot.verify()
+
+
+def test_conflict_detection_does_not_contact_youtube(tmp_path, downloader, monkeypatch):
+    first = run_download(tmp_path)
+
+    def unexpected_network(*_args, **_kwargs):
+        pytest.fail("Contacted YouTube before the user's choice")
+
+    monkeypatch.setattr(youtube, "YoutubeDL", unexpected_network)
+    result = run_download(tmp_path)
+    assert result.imports[0].video_path == first.video_path
+
+
+@pytest.mark.parametrize("problem", ["missing", "empty", "partial", "multiple", "audio", "probe"])
+def test_incomplete_existing_import_cannot_be_reused(
+    tmp_path, downloader, monkeypatch, problem,
+):
+    first = run_download(tmp_path)
+    folder = first.video_path.parent
+    if problem == "missing":
+        first.video_path.unlink()
+    elif problem == "empty":
+        first.video_path.write_bytes(b"")
+    elif problem == "partial":
+        (folder / "source.f137.mp4.part").write_bytes(b"partial")
+    elif problem == "multiple":
+        (folder / "source.mkv").write_bytes(b"extra")
+    elif problem == "audio":
+        monkeypatch.setattr(
+            FakeMedia, "probe", lambda *_args: SimpleNamespace(duration=10, has_audio=False),
+        )
+    elif problem == "probe":
+        def fail_probe(*_args):
+            raise OSError("Damaged media")
+
+        monkeypatch.setattr(FakeMedia, "probe", fail_probe)
+    existing = run_download(tmp_path).imports[0]
+    assert existing.reuse_problem
+    with pytest.raises(youtube.YouTubeError):
+        run_download(tmp_path, existing=existing)
+    existing.snapshot.verify()
+
+
+def test_overwrite_repairs_incomplete_import_and_preserves_unrelated_files(tmp_path, downloader):
+    first = run_download(tmp_path)
+    folder = first.video_path.parent
+    partial = folder / "source.f137.mp4.part"
+    partial.write_bytes(b"partial")
+    project = folder / "saved.cvpack.json"
+    project.write_text("keep project", encoding="utf-8")
+    backing = folder / "backing"
+    backing.mkdir()
+    (backing / "music.wav").write_bytes(b"keep backing")
+    existing = run_download(tmp_path).imports[0]
+    assert existing.reuse_problem
+    downloader.file_extension = "mkv"
+    result = run_download(tmp_path, existing=existing, overwrite=True)
+    assert result.video_path == folder / "source.mkv"
+    assert result.video_path.read_bytes() == b"downloaded-video"
+    assert not partial.exists()
+    assert not first.video_path.exists()
+    assert project.read_text(encoding="utf-8") == "keep project"
+    assert (backing / "music.wav").read_bytes() == b"keep backing"
+    assert not run_download(tmp_path).imports[0].reuse_problem
+    assert not list(tmp_path.glob(".cvpc-youtube-*"))
+
+
+@pytest.mark.parametrize("failure", ["download", "cancel", "publish"])
+def test_unsuccessful_overwrite_preserves_previous_import(
+    tmp_path, downloader, monkeypatch, failure,
+):
+    first = run_download(tmp_path)
+    existing = run_download(tmp_path).imports[0]
+    if failure == "download":
+        downloader.fail_video = True
+    elif failure == "publish":
+        rename = Path.rename
+
+        def fail_publish(path, target):
+            if (
+                path.name == "source.mp4"
+                and path.parent.name.startswith(".cvpc-youtube-")
+                and not path.parent.name.startswith(".cvpc-youtube-backup-")
+            ):
+                raise OSError("Publication failed")
+            return rename(path, target)
+
+        monkeypatch.setattr(Path, "rename", fail_publish)
+    cancelled = False
+
+    def report(message, fraction):
+        nonlocal cancelled
+        if message.startswith("Publishing") and failure == "cancel":
+            cancelled = True
+
+    with pytest.raises((youtube.YouTubeError, youtube.YouTubeCancelled, OSError)):
+        run_download(
+            tmp_path, existing=existing, overwrite=True,
+            cancelled=lambda: cancelled, progress=report,
+        )
+    assert first.video_path.read_bytes() == b"downloaded-video"
+    assert sorted(path.name for path in tmp_path.iterdir()) == [existing.folder.name]
+    assert sorted(path.name for path in existing.folder.iterdir()) == ["source.mp4"]
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+@pytest.mark.parametrize("when", ["before", "during"])
+def test_existing_import_changed_after_choice_is_not_used_or_overwritten(
+    tmp_path, downloader, overwrite, when,
+):
+    first = run_download(tmp_path)
+    existing = run_download(tmp_path).imports[0]
+
+    def change():
+        first.video_path.write_bytes(b"external change")
+
+    if when == "before":
+        change()
+
+    def report(message, fraction):
+        if when == "during" and message.startswith("Fetching YouTube video details"):
+            change()
+
+    with pytest.raises(SourceChangedError):
+        run_download(tmp_path, existing=existing, overwrite=overwrite, progress=report)
+    assert first.video_path.read_bytes() == b"external change"
+    assert not list(tmp_path.glob(".cvpc-youtube-*"))
+
+
+def test_existing_short_video_is_not_reused(tmp_path, downloader, monkeypatch):
+    run_download(tmp_path)
+    existing = run_download(tmp_path).imports[0]
+    extract_info = downloader.extract_info
+    monkeypatch.setattr(
+        downloader, "extract_info",
+        lambda *args, **kwargs: {**extract_info(*args, **kwargs), "duration": 100},
+    )
+    with pytest.raises(youtube.YouTubeError, match="duration differs"):
+        run_download(tmp_path, existing=existing)
+    existing.snapshot.verify()
+
+
+def test_failed_overwrite_rollback_keeps_recovery_files(tmp_path, downloader, monkeypatch):
+    first = run_download(tmp_path)
+    existing = run_download(tmp_path).imports[0]
+    rename = Path.rename
+
+    def fail_publish_and_restore(path, target):
+        if path.parent.name.startswith(".cvpc-youtube-") and path.name == "source.mp4":
+            raise OSError("Destination locked")
+        return rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", fail_publish_and_restore)
+    with pytest.raises(youtube.YouTubeError, match="Keep the recovery files"):
+        run_download(tmp_path, existing=existing, overwrite=True)
+    backups = list(tmp_path.glob(".cvpc-youtube-backup-*"))
+    assert len(backups) == 1
+    assert (backups[0] / first.video_path.name).read_bytes() == b"downloaded-video"
+    assert len(list(tmp_path.glob(".cvpc-youtube-*"))) == 1
+
+
+def test_reuse_honors_new_caption_language_and_keeps_whisper_fallback(tmp_path, downloader):
+    first = run_download(tmp_path)
+    existing = run_download(tmp_path).imports[0]
+    result = youtube.download_youtube(
+        FakeMedia(), URL, tmp_path, "ja", existing=existing,
+        progress=lambda *_args: None, cancelled=lambda: False,
+    )
+    assert result.video_path == first.video_path
+    assert result.language == "ja"
+    assert result.captions == []
+    assert any("Local Whisper" in note for note in result.warnings)
+    existing.snapshot.verify()
+
+
+def test_all_matching_imports_are_offered_but_other_videos_are_ignored(tmp_path, downloader):
+    first = run_download(tmp_path)
+    for name in (f"YouTube-{VIDEO_ID}-older", f"YouTube-{VIDEO_ID}", "YouTube-other_video"):
+        folder = tmp_path / name
+        folder.mkdir()
+        (folder / "source.mp4").write_bytes(b"downloaded-video")
+    result = run_download(tmp_path)
+    assert {item.folder.name for item in result.imports} == {
+        first.video_path.parent.name, f"YouTube-{VIDEO_ID}-older", f"YouTube-{VIDEO_ID}",
+    }
 
 
 def test_late_cancel_after_download_publication_keeps_committed_result(tmp_path, downloader):
