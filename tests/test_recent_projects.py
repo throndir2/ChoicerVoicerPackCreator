@@ -52,6 +52,22 @@ def test_recent_menu_starts_empty(make_window) -> None:
     assert not window.action_clear_recent.isEnabled()
 
 
+def test_recent_menu_is_disabled_during_busy_operations(make_window, tmp_path: Path) -> None:
+    window = make_window()
+    path = tmp_path / "saved.cvpack.json"
+    ProjectStore.save(PackProject(), path)
+    window.open_path(path)
+    window._set_busy(True, "Working")
+    assert not window.action_open.isEnabled()
+    assert not window.recent_projects_menu.menuAction().isEnabled()
+    window._refresh_recent_projects_menu()
+    assert not window.recent_projects_menu.menuAction().isEnabled()
+    window._set_busy(False, "Ready")
+    assert window.action_open.isEnabled()
+    assert window.recent_projects_menu.menuAction().isEnabled()
+    assert window._recent_project_paths() == [path]
+
+
 def test_open_history_keeps_ten_unique_projects_newest_first(
     make_window, tmp_path: Path, monkeypatch
 ) -> None:

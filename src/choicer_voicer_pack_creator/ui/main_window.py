@@ -2655,6 +2655,7 @@ class MainWindow(QMainWindow):
             self.action_new,
             self.action_youtube,
             self.action_open,
+            self.recent_projects_menu.menuAction(),
             self.action_import,
             self.action_import_zip,
             self.action_save,
