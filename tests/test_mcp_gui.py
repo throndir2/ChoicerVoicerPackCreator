@@ -19,6 +19,7 @@ from choicer_voicer_pack_creator.mcp_gui import EditorBridge, EditorProjectAcces
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
 from choicer_voicer_pack_creator.ui.main_window import MainWindow
+from choicer_voicer_pack_creator.ui.theme import APP_STYLESHEET
 
 
 def in_worker(qtbot, function):
@@ -276,6 +277,29 @@ def test_mcp_save_does_not_clear_newer_edits_or_steal_tab(
     assert saved["project"]["title"] == "Newer draft"
     assert ProjectStore.load(path).title == "Live"
     assert window.active_editor is other
+
+
+@pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
+@pytest.mark.parametrize("title", ["A", "Live"])
+def test_ui_tab_selection_preserves_short_named_projects(qtbot, live_editor, stylesheet, title):
+    from choicer_voicer_pack_creator.ui_automation import UIAutomation
+
+    window, bridge, _automation = live_editor
+    window.setStyleSheet(stylesheet)
+    first = window.active_editor
+    first.title_edit.setText(title)
+    first.dirty = False
+    window.refresh_tabs()
+    second = window.add_project(PackProject(title="Second"), dirty=False)
+    hooks = UIAutomation(bridge)
+    accepted = hooks.interact("projectTabs", "select", index=window.tabs.indexOf(first))
+    qtbot.waitUntil(lambda: hooks.state()["actions"][-1]["state"] in {"completed", "failed"})
+    record = hooks.state()["actions"][-1]
+    assert record["action_id"] == accepted["action_id"]
+    assert record["state"] == "completed", record
+    assert window.active_editor is first
+    assert window.tabs.count() == 2
+    assert window.tabs.indexOf(second) >= 0
 
 
 def test_ui_hooks_use_real_fields_tabs_and_window_image(qtbot, live_editor):

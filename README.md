@@ -110,8 +110,8 @@ It does not require a system FFmpeg installation. Use
 The finished outputs are:
 
 ```text
-dist/v1.1.0/portable-<build-id>/Choicer Voicer Pack Creator/
-dist/v1.1.0/Choicer-Voicer-Pack-Creator-1.1.0-Windows-x64.zip
+dist/v1.2.0/portable-<build-id>/Choicer Voicer Pack Creator/
+dist/v1.2.0/Choicer-Voicer-Pack-Creator-1.2.0-Windows-x64.zip
 ```
 
 The script prints the exact generated application-folder path. Each rebuild uses a new path to avoid
@@ -732,8 +732,8 @@ with another compatible pair.
 .\Build-Portable.ps1
 ```
 
-The Windows application folder is written below `dist/v1.1.0/portable-<build-id>/`, with a
-shareable `Choicer-Voicer-Pack-Creator-1.1.0-Windows-x64.zip` beside it. The first build downloads
+The Windows application folder is written below `dist/v1.2.0/portable-<build-id>/`, with a
+shareable `Choicer-Voicer-Pack-Creator-1.2.0-Windows-x64.zip` beside it. The first build downloads
 about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. The stable sharing ZIP is not
 replaced until both the application folder and a clean ZIP extraction pass packaged smoke tests.
 Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or

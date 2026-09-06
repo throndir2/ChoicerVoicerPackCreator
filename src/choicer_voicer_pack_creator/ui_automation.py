@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QScrollArea,
     QScrollBar,
+    QStyle,
+    QStyleOptionTab,
     QTableWidget,
     QTabWidget,
     QWidget,
@@ -389,12 +391,19 @@ class UIAutomation:
                         self._click(button, verify)
                     elif action == "select" and isinstance(target, QTabWidget):
                         bar = target.tabBar()
-                        point = bar.tabRect(tab_index).center()
+                        option = QStyleOptionTab()
+                        bar.initStyleOption(option, tab_index)
+                        # A short tab's overall center can fall inside its close button.
+                        point = bar.style().subElementRect(
+                            QStyle.SubElement.SE_TabBarTabText, option, bar,
+                        ).center()
 
                         def verify_tab() -> None:
                             verify()
                             if bar.tabAt(point) != target.indexOf(tab):
                                 raise ValueError("The target tab moved before input.")
+                            if self._hit(bar, point) is not bar:
+                                raise ValueError("A tab control obscures the target tab label.")
 
                         self._click(bar, verify_tab, point)
                         if target.currentWidget() is not tab:
