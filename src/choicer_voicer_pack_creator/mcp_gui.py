@@ -17,6 +17,7 @@ from choicer_voicer_pack_creator.automation import (
     save_snapshot,
 )
 from choicer_voicer_pack_creator.mcp_server import create_server
+from choicer_voicer_pack_creator.project_io import ProjectStore
 from choicer_voicer_pack_creator.ui.main_window import MainWindow
 
 T = TypeVar("T")
@@ -40,6 +41,9 @@ class EditorBridge(QObject):
     def call(self, function: Callable[[], T]) -> T:
         if self.closed:
             raise RuntimeError("The live editor has closed.")
+        from PySide6.QtCore import QThread
+        if QThread.currentThread() == self.thread():
+            return function()
         future: Future[T] = Future()
         self.requested.emit(function, future)
         try:
@@ -64,23 +68,12 @@ class EditorBridge(QObject):
         def apply() -> None:
             if QApplication.activeModalWidget() is not None:
                 raise ValueError("Close the editor's modal dialog before making MCP calls.")
-            if self.window._export_worker is not None:
-                raise ValueError("Wait for the editor's current export to finish.")
-            if self.window._backing_dialog is not None:
-                raise ValueError("Close the backing-track workflow before making MCP calls.")
-            self.window._commit_editors()
-            self.window._automation_active = True
-            self.window._set_busy(True, f"MCP: {label}")
             self.window.statusBar().showMessage(f"MCP: {label}")
 
         self.call(apply)
 
     def end(self) -> None:
-        def apply() -> None:
-            self.window._automation_active = False
-            self.window._set_busy(False, "MCP ready")
-
-        self.call(apply)
+        self.call(lambda: self.window.statusBar().showMessage("MCP ready"))
 
     @Slot()
     def _disconnect(self) -> None:
@@ -94,9 +87,6 @@ class EditorBridge(QObject):
             if modal.isVisible():
                 QTimer.singleShot(100, self._disconnect)
                 return
-        if self.window._export_worker is not None:
-            QTimer.singleShot(100, self._disconnect)
-            return
         if not self.window.close():
             QTimer.singleShot(100, self._disconnect)
 
@@ -104,14 +94,71 @@ class EditorBridge(QObject):
 class EditorProjectAccess:
     live = True
 
-    def __init__(self, bridge: EditorBridge) -> None:
+    def __init__(self, bridge: EditorBridge, project_id: str | None = None) -> None:
         self.bridge = bridge
+        self.project_id = project_id
+
+    def _editor(self):
+        window = self.bridge.window
+        if self.project_id is not None:
+            return window.editor_for_project(self.project_id)
+        if window.active_editor is None:
+            raise ValueError("No active project. Create or open a project first.")
+        return window.active_editor
+
+    def bind(self, project_id: str | None = None) -> EditorProjectAccess:
+        def bind():
+            bound = EditorProjectAccess(self.bridge, project_id or self._editor().session.id)
+            bound._editor()
+            return bound
+        return self.bridge.call(bind)
+
+    def list_projects(self):
+        def read():
+            window = self.bridge.window
+            snapshots = [
+                EditorProjectAccess(self.bridge, project_id)._snapshot()
+                for project_id in window.editors
+            ]
+            return {
+                "active_project_id": window.active_editor.session.id if window.active_editor else None,
+                "projects": [
+                    {"project_id": item.project_id, "title": item.project.title,
+                     "project_path": str(item.path) if item.path else None,
+                     "dirty": item.dirty, "revision": item.revision}
+                    for item in snapshots
+                ],
+            }
+        return self.bridge.call(read)
+
+    def activate(self, project_id: str) -> ProjectSnapshot:
+        def activate():
+            self.bridge.window.focus_project(project_id)
+            return EditorProjectAccess(self.bridge, project_id)._snapshot()
+        return self.bridge.call(activate)
+
+    def create(self, snapshot: ProjectSnapshot) -> ProjectSnapshot:
+        def create():
+            window = self.bridge.window
+            if snapshot.path is not None:
+                for editor in window.editors.values():
+                    if editor.project_path == snapshot.path:
+                        return self.activate(editor.session.id)
+            editor = window.add_project(snapshot.project, snapshot.path, snapshot.dirty)
+            editor._saved_project_hash = snapshot.saved_hash
+            if snapshot.dirty:
+                editor._write_recovery_snapshot()
+            if snapshot.path is not None:
+                editor._remember_recent_project(snapshot.path)
+            return EditorProjectAccess(self.bridge, editor.session.id)._snapshot()
+        return self.bridge.call(create)
 
     def _snapshot(self) -> ProjectSnapshot:
-        window = self.bridge.window
+        window = self._editor()
         window._commit_editors()
         return ProjectSnapshot(
-            window.project, window.project_path, window.dirty, window._saved_project_hash
+            window.project, window.project_path, window.dirty, window._saved_project_hash,
+            window.session.id,
         ).copy()
 
     def snapshot(self) -> ProjectSnapshot:
@@ -120,10 +167,9 @@ class EditorProjectAccess:
     def replace(self, snapshot: ProjectSnapshot, expected_revision: str) -> None:
         def apply() -> None:
             require_revision(self._snapshot(), expected_revision)
-            window = self.bridge.window
-            preserve_view = window.project_path == snapshot.path
+            window = self._editor()
             window._set_project(
-                snapshot.project, snapshot.path, snapshot.dirty, preserve_view=preserve_view
+                snapshot.project, snapshot.path, snapshot.dirty, preserve_view=True
             )
             window._saved_project_hash = snapshot.saved_hash
             # Use the same recovery journal as manual edits.
@@ -135,22 +181,54 @@ class EditorProjectAccess:
         self.bridge.call(apply)
 
     def save(self, destination: Path, expected_revision: str, overwrite: bool) -> ProjectSnapshot:
-        def apply() -> ProjectSnapshot:
+        future: Future[ProjectSnapshot] = Future()
+
+        def submit() -> None:
             snapshot = self._snapshot()
             require_revision(snapshot, expected_revision)
-            saved = save_snapshot(snapshot, destination, overwrite)
             window = self.bridge.window
-            window.project_path = saved.path
-            window._saved_project_hash = saved.saved_hash
-            window._clear_recovery_snapshot()
-            window._set_dirty(False)
-            return saved
+            editor = self._editor()
+            for other in window.editors.values():
+                if other is not editor and other.project_path == destination:
+                    raise ValueError("Destination belongs to another open project.")
+            revision = editor.session.revision
 
-        return self.bridge.call(apply)
+            def operation(ctx):
+                with ctx.critical_stage("Saving editable project"):
+                    return save_snapshot(snapshot, destination, overwrite)
+
+            handle = window.job_manager.submit(
+                snapshot.project_id, "save", f"MCP save: {snapshot.project.title}", operation,
+                resource_class="io", resource_keys=(f"document-save:{snapshot.project_id}",),
+                write_paths=(destination, ProjectStore.previous_path(destination)),
+                source_snapshot={"project_id": snapshot.project_id, "revision": expected_revision},
+            )
+
+            def completed(saved: ProjectSnapshot) -> None:
+                try:
+                    window.complete_project_save(
+                        snapshot.project_id, destination, revision, saved.saved_hash
+                    )
+                    future.set_result(self._snapshot())
+                except Exception as error:
+                    future.set_exception(error)
+
+            def finished() -> None:
+                if not future.done():
+                    record = handle.record
+                    future.set_exception(RuntimeError(
+                        f"Save {record.state}: {record.error or record.message}"
+                    ))
+
+            handle.completed.connect(completed)
+            handle.finished.connect(finished)
+
+        self.bridge.call(submit)
+        return future.result()
 
     def show(self, segment_id: str | None, timestamp: float | None) -> None:
         def apply() -> None:
-            window = self.bridge.window
+            window = self._editor()
             if segment_id is not None and window.project.segment_by_id(segment_id) is None:
                 raise ValueError(f"Unknown segment id: {segment_id}")
             if timestamp is not None and not 0 <= timestamp <= window.project.video_duration:
@@ -159,16 +237,23 @@ class EditorProjectAccess:
                 window.select_segment(segment_id)
             if timestamp is not None:
                 window.seek(timestamp)
-            window.show()
-            window.raise_()
+            self.bridge.window.focus_project(window.session.id)
+            self.bridge.window.show()
+            self.bridge.window.raise_()
 
         self.bridge.call(apply)
 
 
-def start_live_server(window: MainWindow) -> EditorBridge:
+def start_live_server(window: MainWindow, *, ui_test_hooks: bool = False) -> EditorBridge:
+    from choicer_voicer_pack_creator.mcp_jobs import LiveJobs
+    from choicer_voicer_pack_creator.ui_automation import UIAutomation
+
     bridge = EditorBridge(window)
     automation = PackAutomation(EditorProjectAccess(bridge), window.analysis_data_root, window.media)
-    server = create_server(automation, bridge.begin, bridge.end)
+    server = create_server(
+        automation, bridge.begin, bridge.end,
+        jobs=LiveJobs(bridge), ui=UIAutomation(bridge) if ui_test_hooks else None,
+    )
 
     def run() -> None:
         try:

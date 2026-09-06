@@ -29,13 +29,14 @@ def test_tool_schemas_errors_and_headless_state(tmp_path):
     async def exercise():
         async with create_connected_server_and_client_session(server) as client:
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-            assert len(tools) == 16
+            assert len(tools) == 26
             assert tools["get_project"].annotations.readOnlyHint
             assert "expected_revision" in tools["edit_segments"].inputSchema["required"]
             assert tools["update_project"].inputSchema["$defs"]["ProjectPatch"]["additionalProperties"] is False
             help_result = await client.call_tool("get_help", {})
             assert not help_result.isError
             assert help_result.structuredContent["mode"] == "headless"
+            assert not help_result.structuredContent["ui_test_hooks"]
             resources = await client.list_resources()
             assert str(resources.resources[0].uri) == "choicer-voicer://help"
             assert (await client.read_resource("choicer-voicer://help")).contents
@@ -47,6 +48,9 @@ def test_tool_schemas_errors_and_headless_state(tmp_path):
             unchanged = (await client.call_tool("get_project", {})).structuredContent
             assert before == unchanged
             assert (await client.call_tool("show_in_editor", {})).isError
+            for name in ("get_ui_state", "get_ui_screenshot", "list_jobs"):
+                assert (await client.call_tool(name, {})).isError
+            assert (await client.call_tool("get_project", {"project_id": "missing"})).isError
             assert (await client.call_tool("get_project", {"limit": 0})).isError
             results = []
 
@@ -82,18 +86,9 @@ def synthetic_video(tmp_path):
 @pytest.mark.parametrize("live", [False, True], ids=["headless", "live-editor"])
 def test_real_stdio_client_creates_reviews_exports_and_reimports_pack(tmp_path, synthetic_video, live):
     app_data = tmp_path / "app-data"
-    arguments = ["-m", "choicer_voicer_pack_creator", "--mcp", "--headless"]
-    if live:
-        arguments = [
-            "-c",
-            "import sys; from PySide6.QtCore import QSettings, QStandardPaths; "
-            "QStandardPaths.writableLocation = staticmethod(lambda _: sys.argv[1]); "
-            "QSettings.setDefaultFormat(QSettings.IniFormat); "
-            "QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, sys.argv[1]); "
-            "from choicer_voicer_pack_creator.app import main; "
-            "raise SystemExit(main(['test', '--mcp']))",
-            str(app_data),
-        ]
+    arguments = ["-m", "choicer_voicer_pack_creator", "--mcp", "--data-root", str(app_data)]
+    if not live:
+        arguments.append("--headless")
     parameters = StdioServerParameters(
         command=sys.executable,
         args=arguments,
@@ -174,7 +169,7 @@ def test_real_stdio_client_creates_reviews_exports_and_reimports_pack(tmp_path, 
     anyio.run(exercise)
     assert ProjectStore.load(tmp_path / "fixture.cvpack.json").segments[0].caption == "Synthetic tone"
     if live:
-        assert (app_data / "recovery-v2.json").is_file()
+        assert list(app_data.rglob("*.json"))
 
 
 def test_headless_cli_exits_on_stdin_eof_without_gui(tmp_path):
@@ -189,16 +184,8 @@ def test_headless_cli_exits_on_stdin_eof_without_gui(tmp_path):
 
 def test_live_cli_exits_on_stdin_eof(tmp_path):
     result = subprocess.run(
-        [
-            sys.executable, "-c",
-            "import sys; from PySide6.QtCore import QSettings, QStandardPaths; "
-            "QStandardPaths.writableLocation = staticmethod(lambda _: sys.argv[1]); "
-            "QSettings.setDefaultFormat(QSettings.IniFormat); "
-            "QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, sys.argv[1]); "
-            "from choicer_voicer_pack_creator.app import main; "
-            "raise SystemExit(main(['test', '--mcp']))",
-            str(tmp_path),
-        ],
+        [sys.executable, "-m", "choicer_voicer_pack_creator", "--mcp",
+         "--data-root", str(tmp_path)],
         input="", text=True, capture_output=True, timeout=20,
     )
     assert result.returncode == 0, result.stderr

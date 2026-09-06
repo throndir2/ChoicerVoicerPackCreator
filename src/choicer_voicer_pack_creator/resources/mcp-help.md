@@ -30,14 +30,17 @@ Prefer the absolute executable path in client settings.
 
 ## Live or headless?
 
-**Live is the default.** The client launches a visible editor and edits its current
-project. `show_in_editor` can select a segment or seek to a timestamp for human
+**Live is the default.** The client launches a visible multi-project editor.
+`list_projects` returns stable document IDs and the active ID. Pass `project_id`
+to project tools to target a specific document; omitted IDs capture the active
+document at request start, not completion. `activate_project` selects a document.
+`show_in_editor` can select a segment or seek to a timestamp for human
 review. It does not silently attach to an editor that was already running.
 The single-instance lock rejects a second visible editor: save and close the old
 window, then reconnect.
 
 **Headless is opt-in** with `--headless`. It creates no QApplication or window
-and has its own in-memory project, independent of the GUI. It reads and writes
+and has its own in-memory documents, independent of the GUI. It reads and writes
 the same `.cvpack.json` format. `show_in_editor` is live-only. Do not edit the
 same project file from separate processes. **Unsaved headless work is lost when
 the client stops the process.**
@@ -47,8 +50,9 @@ the client stops the process.**
 - Call `get_help`, then `get_project` to inspect the current project, dirty state,
   path, revision, and paginated segments. Read every relevant page.
 - Use `new_project` with an absolute local `video_path`, a `title`, and `authors`,
-  or use `open_project` / `import_pack`. These operations refuse to discard dirty
-  work unless `discard_dirty` is explicitly authorized.
+  or use `open_project` / `import_pack`. These create new documents without losing
+  other drafts. Opening an already-open path focuses it without reloading.
+  `discard_dirty` remains accepted for compatibility but is no longer needed.
 - Optionally call `analyze_video` for deterministic activity suggestions.
   Whisper transcription is off by default and requires explicit
   `allow_download=true`, even when cached components may only need repair.
@@ -74,10 +78,50 @@ the client stops the process.**
   changes to the active saved project are rejected rather than overwritten.
   `validate_pack` can check a folder and optional ZIP afterward.
 
-Project/media operations are serialized and run to completion even when their
-client request is canceled. Analysis and export can take minutes. Use a generous
-client timeout, let the in-flight operation finish, and inspect project state
-and outputs before retrying a canceled or timed-out request.
+Live processing uses the same bounded scheduler as the visible Tasks panel.
+`start_export(output_parent, expected_revision, project_id?, overwrite=false)`
+and `start_analysis(expected_revision, project_id?, ...)` return a `job_id`
+immediately, NOT finished output. `list_jobs(project_id?)`, `get_job(job_id)`,
+and `cancel_job(job_id)` inspect/request cancellation. Records include project
+identity, source snapshot revision, state, progress, result and error.
+Only `succeeded` means completed results; queued/waiting/running/cancelling are
+not success. Wait for terminal cleanup after cancellation; an atomic publication
+may finish successfully. Closing task details is not cancellation.
+
+Jobs use immutable input snapshots and never overwrite newer drafts or steal
+the active tab. Analysis suggests evidence but never adds segments automatically.
+Processing A does not globally block editing/saving B. Revisions guard edits
+and include document identity. Legacy export/analysis calls wait for the same
+live jobs; cancel their job explicitly, not merely the MCP request.
+Headless supports waiting processing calls, not live Tasks tools. Use a generous
+timeout and inspect outputs before retrying.
+
+## Opt-in real UI tools
+
+Launch live MCP with `--ui-test-hooks` to enable `get_ui_state`,
+`get_ui_screenshot`, and `ui_interact`. Without opt-in, or in headless mode, these
+tools report an explicit error. For isolated runs add `--data-root` followed by
+an absolute new profile directory (settings/recovery/cache/lock/IPC stay there).
+Use `QT_QPA_PLATFORM=windows` for native Windows validation, not offscreen.
+
+`get_ui_state` reports actual platform/visibility, active document, owned modal
+windows, allowlisted widget state and recent input results.
+`get_ui_screenshot` returns the application's rendered window as PNG MCP image
+content, never the desktop. `get_frame` is SOURCE MEDIA, not a UI screenshot.
+These images and UI text may be sent to the client's model provider.
+
+`ui_interact(selector, action, project_id?, text?, index?, key?)` queues real
+application-local Qt input: click/type/key/select. Type replaces editable text;
+select uses a zero-based tab/table/combobox index. Poll `get_ui_state.actions`
+for the returned action_id; queued acceptance is not completed interaction.
+Select a project's real tab before sending its project-scoped field input.
+Selectors include projectTabs, projectTitle, segmentCaption, segmentsTable,
+saveProject/exportProject/analyzeProject, tasksDock/tasksTable/taskLog,
+taskProjectFilter/taskShowProject/taskCancel/taskRetry/taskOpenOutput/taskDetails.
+Keys are Enter/Escape/Tab/Backspace/Space/Delete. Disabled, hidden, unknown or
+modal-blocked targets fail. Dismiss native file dialogs manually; use semantic
+tools for authorized paths. No arbitrary evaluation/member calls, clipboard,
+desktop capture or global input is exposed. Semantic calls alone do not validate UI.
 
 Tool discovery in your client shows the current argument schemas and defaults.
 `get_help` reports the app version, live/headless mode, and guide text. The guide
@@ -144,6 +188,6 @@ OCR or wiki/dialogue search.
 - For source runs, select the environment where this project and its MCP SDK
   dependency are installed.
 - For revision conflicts, get the project again and reconcile edits. For dirty
-  project errors, save first or explicitly choose to discard.
+  export errors, save the target document first.
 - A process waiting on stdio is normal. Do not launch it by double-clicking and
   expect a chat prompt; let an MCP client manage it.
