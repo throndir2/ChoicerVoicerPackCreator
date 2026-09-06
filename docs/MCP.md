@@ -250,12 +250,16 @@ Repeatable native Windows validation (requires FFmpeg/FFprobe and an interactive
 $env:QT_QPA_PLATFORM = "windows"
 $env:CVPC_MCP_ARTIFACT_DIR = "C:\Temp\cvpc-mcp-artifacts"
 .\.venv\Scripts\python.exe -m pytest tests\test_mcp_native.py -q
+# Native bridge/input regressions, including queued selection during window activation:
+.\.venv\Scripts\python.exe -m pytest tests\test_mcp_gui.py -q
 ```
 
 This launches the normal CLI with a fresh production `--data-root`, connects with the official
 MCP SDK over stdio, and uses only generated synthetic media. It records during/after application
 screenshots and does not silently fall back to offscreen Qt. Offscreen/unit runs remain useful
 regression coverage but are not native visible UI evidence.
+Actual window-activation and hit-routed field tests explicitly skip unsupported offscreen/minimal
+backends; they must run without skips on the native Windows acceptance run.
 
 ### Example: draft, review, save, export
 

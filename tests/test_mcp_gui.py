@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QSettings, QThread
-from PySide6.QtWidgets import QDialog
+from PySide6.QtWidgets import QApplication, QDialog
 
 from choicer_voicer_pack_creator.automation import PackAutomation, ProjectPatch, SegmentPatch
 from choicer_voicer_pack_creator.mcp_gui import EditorBridge, EditorProjectAccess
@@ -273,6 +273,8 @@ def test_mcp_save_does_not_clear_newer_edits_or_steal_tab(
 def test_ui_hooks_use_real_fields_tabs_and_window_image(qtbot, live_editor):
     from choicer_voicer_pack_creator.ui_automation import UIAutomation
 
+    if QApplication.platformName() in {"offscreen", "minimal"}:
+        pytest.skip("Hit-routed visible UI input requires a real window-system platform.")
     window, bridge, automation = live_editor
     hooks = UIAutomation(bridge)
     first = window.active_editor
@@ -478,6 +480,8 @@ def test_inactive_window_caption_input_rejects_selection_during_activation(qtbot
 
     from choicer_voicer_pack_creator.ui_automation import UIAutomation
 
+    if QApplication.platformName() in {"offscreen", "minimal"}:
+        pytest.skip("Native activation and queued hit-routed input require a real window system.")
     window, bridge, _automation = live_editor
     hooks = UIAutomation(bridge)
     editor = window.active_editor
@@ -499,7 +503,7 @@ def test_inactive_window_caption_input_rejects_selection_during_activation(qtbot
             item["state"] in {"completed", "failed"} for item in hooks.state()["actions"]
         ))
         records = {item["action_id"]: item for item in hooks.state()["actions"]}
-        assert records[selecting["action_id"]]["state"] == "completed"
+        assert records[selecting["action_id"]]["state"] == "completed", records
         assert editor.selected_segment_id == second.id
         assert records[typing["action_id"]]["state"] == "failed"
         assert "selected segment changed" in records[typing["action_id"]]["error"]
