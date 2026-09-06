@@ -85,6 +85,22 @@ def test_live_tools_edit_real_widgets_and_preserve_human_edits(qtbot, live_edito
     assert window.project_path == Path(saved["project_path"])
     assert window.recovery_store.load() is None
     assert ProjectStore.load(window.project_path).title == "Human title"
+    assert window._recent_project_paths() == [window.project_path]
+
+
+def test_live_project_open_updates_recent_projects_but_edits_do_not(qtbot, live_editor, tmp_path):
+    window, _bridge, automation = live_editor
+    path = tmp_path / "opened.cvpack.json"
+    ProjectStore.save(PackProject(title="Opened", authors=["Tester"]), path)
+    opened = in_worker(qtbot, lambda: automation.open_project(str(path)))
+    assert window.project_path == path
+    assert window._recent_project_paths() == [path]
+    window.action_clear_recent.trigger()
+    in_worker(qtbot, lambda: automation.update_project(
+        ProjectPatch(title="Edited"), opened["revision"]
+    ))
+    assert window.project.title == "Edited"
+    assert window._recent_project_paths() == []
 
 
 def test_live_operation_busy_state_and_modal_rejection(qtbot, live_editor):
@@ -92,10 +108,12 @@ def test_live_operation_busy_state_and_modal_rejection(qtbot, live_editor):
     in_worker(qtbot, lambda: bridge.begin("Test operation"))
     assert window._automation_active
     assert not window.action_export.isEnabled()
+    assert not window.recent_projects_menu.menuAction().isEnabled()
     assert not window.editor_splitter.isEnabled()
     assert not window.close()
     in_worker(qtbot, bridge.end)
     assert window.action_export.isEnabled()
+    assert window.recent_projects_menu.menuAction().isEnabled()
     dialog = QDialog(window)
     dialog.setModal(True)
     dialog.show()
