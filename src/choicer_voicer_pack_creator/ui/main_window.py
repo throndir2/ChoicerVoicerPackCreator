@@ -94,6 +94,11 @@ from choicer_voicer_pack_creator.ui.commands import action_button, command_icon,
 from choicer_voicer_pack_creator.ui.export_dialog import ExportProgressDialog
 from choicer_voicer_pack_creator.ui.export_options_dialog import ExportOptions, ExportOptionsDialog
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
+from choicer_voicer_pack_creator.ui.layout_state import (
+    DEFAULT_WINDOW_SIZE,
+    EditorLayout,
+    read_layout_bytes,
+)
 from choicer_voicer_pack_creator.ui.processing import (
     PROCESSING_KINDS,
     ProcessingModel,
@@ -243,6 +248,7 @@ class ProjectEditor(QWidget):
         self._source_request = 0
         self._restoring_layout = False
         self._layout_restored = False
+        self._layout_generation = 0
         self._range_edit_record: tuple[str, float, float, bool] | None = None
         self._discard_recovery_on_transition = False
         self._recovery_timer = QTimer(self)
@@ -268,6 +274,9 @@ class ProjectEditor(QWidget):
         self._connect_player()
         self._set_project(self.project, self.project_path, mark_dirty=session.dirty)
         self._document_layout.addWidget(self._status_bar)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
         QTimer.singleShot(0, self._restore_layout_state)
 
     def statusBar(self) -> QStatusBar:  # noqa: N802
@@ -835,89 +844,35 @@ class ProjectEditor(QWidget):
         layout.addWidget(action_button(clear_action, container, compact=True))
         return label, container
 
-    def _setting_is_true(self, key: str) -> bool:
-        value = self.settings.value(key, False)
-        if isinstance(value, bool):
-            return value
-        return str(value).strip().casefold() in {"1", "true", "yes", "on"}
-
     def _restore_layout_state(self) -> None:
-        if self._layout_restored:
+        if self._layout_restored or not self.isVisible():
             return
         self._restoring_layout = True
+        self._layout_generation += 1
         try:
-            collapse_keys = (
-                "layout/packDetailsCollapsedV1",
-                "layout/segmentsCollapsedV1",
-                "layout/selectedSegmentCollapsedV1",
-            )
-            height_keys = (
-                "layout/packDetailsExpandedHeightV1",
-                "layout/segmentsExpandedHeightV1",
-                "layout/selectedSegmentExpandedHeightV1",
-            )
-            for section, key, height_key in zip(
-                self.inspector_sections, collapse_keys, height_keys, strict=True
-            ):
-                try:
-                    saved_height = int(
-                        self.settings.value(height_key, section.last_expanded_height)
-                    )
-                except (TypeError, ValueError):
-                    saved_height = section.last_expanded_height
-                section.set_collapsed(self._setting_is_true(key))
-                section.set_last_expanded_height(min(10_000, saved_height))
-
-            editor_state = self.settings.value("layout/editorSplitterV1")
-            if editor_state is None or not self.editor_splitter.restoreState(editor_state):
-                self.editor_splitter.setSizes([1030, 470])
-            # Saved splitter states also restore the old handle width.
-            self.editor_splitter.setHandleWidth(1)
-
-            inspector_state = self.settings.value("layout/inspectorSplitterV1")
-            if inspector_state is None or not self.inspector_splitter.restoreState(
-                inspector_state
-            ):
-                self.inspector_splitter.setSizes([285, 355, 235])
+            self.workspace._editor_layout.apply(self)
         finally:
             self._restoring_layout = False
             self._layout_restored = True
 
     def _schedule_layout_save(self, *_args: object) -> None:
-        if not self._restoring_layout:
+        if not self._restoring_layout and self._layout_restored:
             self._layout_save_timer.start()
 
     def _save_layout_state(self) -> None:
-        if self._restoring_layout:
+        self._layout_save_timer.stop()
+        if self._restoring_layout or not self._layout_restored:
             return
-        self.settings.setValue("layout/editorSplitterV1", self.editor_splitter.saveState())
-        self.settings.setValue(
-            "layout/inspectorSplitterV1", self.inspector_splitter.saveState()
-        )
-        collapse_keys = (
-            "layout/packDetailsCollapsedV1",
-            "layout/segmentsCollapsedV1",
-            "layout/selectedSegmentCollapsedV1",
-        )
-        height_keys = (
-            "layout/packDetailsExpandedHeightV1",
-            "layout/segmentsExpandedHeightV1",
-            "layout/selectedSegmentExpandedHeightV1",
-        )
-        sizes = self.inspector_splitter.sizes()
-        for index, (section, key, height_key) in enumerate(
-            zip(self.inspector_sections, collapse_keys, height_keys, strict=True)
-        ):
-            if not section.is_collapsed and index < len(sizes):
-                section.set_last_expanded_height(sizes[index])
-            self.settings.setValue(key, section.is_collapsed)
-            self.settings.setValue(height_key, section.last_expanded_height)
-        self.settings.sync()
+        self.workspace._save_editor_layout(self)
 
     def _section_collapsed_changed(self, index: int, collapsed: bool) -> None:
+        if self._restoring_layout:
+            return
+        generation = self._layout_generation
         QTimer.singleShot(
             0,
-            lambda: self._rebalance_inspector_sections(index, collapsed),
+            lambda: self._rebalance_inspector_sections(index, collapsed)
+            if generation == self._layout_generation else None,
         )
         self._schedule_layout_save()
 
@@ -2987,6 +2942,13 @@ class MainWindow(QMainWindow):
         self.settings = settings or QSettings(
             "ChoicerVoicerCommunity", "ChoicerVoicerPackCreator"
         )
+        self._editor_layout = EditorLayout.load(self.settings)
+        self._window_layout_ready = False
+        self._layout_write_failed = False
+        self._window_layout_timer = QTimer(self)
+        self._window_layout_timer.setSingleShot(True)
+        self._window_layout_timer.setInterval(250)
+        self._window_layout_timer.timeout.connect(self._save_window_layout)
         self.recovery_store = recovery_store
         self.analysis_data_root = (
             analysis_data_root.resolve() if analysis_data_root else
@@ -3013,8 +2975,11 @@ class MainWindow(QMainWindow):
         self.tabs.tabCloseRequested.connect(self.close_project_tab)
         self.setCentralWidget(self.tabs)
         self.setWindowTitle("Choicer Voicer Pack Creator")
-        self.resize(1500, 950)
+        self.resize(*DEFAULT_WINDOW_SIZE)
         self.setMinimumSize(1050, 680)
+        geometry = read_layout_bytes(self.settings, "layout/windowGeometryV1")
+        if geometry is not None and not self.restoreGeometry(geometry):
+            diagnostic_event("layout_setting_invalid", key="layout/windowGeometryV1")
         self._decisions: list[QMessageBox] = []
         self._closing = False
         self._close_approved = False
@@ -3038,6 +3003,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self.open_path(initial_path))
         if recovery_store:
             QTimer.singleShot(0, self.restore_workspace)
+        self._window_layout_ready = True
 
     def __getattr__(self, name: str):
         editor = self.__dict__.get("_active_editor")
@@ -3076,6 +3042,71 @@ class MainWindow(QMainWindow):
     def statusBar(self) -> QStatusBar:  # noqa: N802
         return self.active_editor.statusBar()
 
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._schedule_window_layout_save()
+
+    def moveEvent(self, event) -> None:  # noqa: N802
+        super().moveEvent(event)
+        self._schedule_window_layout_save()
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._schedule_window_layout_save()
+
+    def _schedule_window_layout_save(self) -> None:
+        if self.__dict__.get("_window_layout_ready", False) and not self._close_approved:
+            self._window_layout_timer.start()
+
+    def _save_editor_layout(self, editor: ProjectEditor) -> None:
+        self._editor_layout = EditorLayout.capture(editor)
+        for other in self.editors.values():
+            if other is not editor:
+                other._layout_save_timer.stop()
+                other._layout_restored = False
+        self._persist_layout()
+
+    def _save_window_layout(self) -> None:
+        self._window_layout_timer.stop()
+        editor = self._active_editor
+        if editor is not None and editor._layout_restored:
+            editor._save_layout_state()
+        else:
+            self._persist_layout()
+
+    def _persist_layout(self) -> None:
+        self._editor_layout.save(self.settings)
+        self.settings.setValue("layout/windowGeometryV1", self.saveGeometry())
+        self.settings.sync()
+        failed = self.settings.status() != QSettings.Status.NoError
+        if failed and not self._layout_write_failed:
+            diagnostic_event("layout_save_failed", location=self.settings.fileName())
+            self.notice(
+                "Could not save UI layout",
+                "The layout is still available in this session, but could not be saved "
+                "for the next restart. Project files are not affected.\n\n"
+                f"Settings location: {self.settings.fileName()}",
+            )
+        self._layout_write_failed = failed
+
+    def reset_ui_layout(self) -> None:
+        self._editor_layout = EditorLayout()
+        for editor in self.editors.values():
+            editor._layout_save_timer.stop()
+            editor._layout_generation += 1
+            editor._layout_restored = False
+        self.showNormal()
+        available = self.screen().availableGeometry()
+        frame_size = self.frameGeometry().size() - self.size()
+        self.resize(QSize(*DEFAULT_WINDOW_SIZE).boundedTo(available.size() - frame_size))
+        self.move(self.pos() + available.center() - self.frameGeometry().center())
+        self._window_layout_timer.stop()
+        self._persist_layout()
+        if self._active_editor is not None:
+            QTimer.singleShot(0, self.active_editor._restore_layout_state)
+            self.statusBar().showMessage("UI layout reset for all project tabs.")
+
     def _build_workspace_actions(self) -> None:
         menu_bar = self.menuBar()
         menu_bar.setObjectName("workspaceMenuBar")
@@ -3083,11 +3114,12 @@ class MainWindow(QMainWindow):
         self.file_menu = menu_bar.addMenu("&File")
         self.project_menu = menu_bar.addMenu("&Project")
         self.segments_menu = menu_bar.addMenu("&Segments")
+        self.view_menu = menu_bar.addMenu("&View")
         self.tools_menu = menu_bar.addMenu("&Tools")
         self.help_menu = menu_bar.addMenu("&Help")
         for menu in (
             self.file_menu, self.project_menu, self.segments_menu,
-            self.tools_menu, self.help_menu,
+            self.view_menu, self.tools_menu, self.help_menu,
         ):
             menu.setToolTipsVisible(True)
 
@@ -3125,6 +3157,9 @@ class MainWindow(QMainWindow):
         self.file_menu.addSeparator()
         self.file_menu.addAction(self.action_exit)
 
+        self.action_reset_layout = QAction("Reset UI Layout", self)
+        self.action_reset_layout.triggered.connect(self.reset_ui_layout)
+        self.view_menu.addAction(self.action_reset_layout)
         self.tools_menu.addAction(self.tasks_window.show_action)
         self.action_mcp_help = QAction("LLM / MCP Help", self)
         self.action_mcp_help.triggered.connect(lambda: self.active_editor.show_mcp_help())
@@ -3154,6 +3189,7 @@ class MainWindow(QMainWindow):
             (self.action_clear_recent, "close", "Clear the application-wide recent-project list without deleting files."),
             (self.action_close_project, "close", "Close the active project tab; unsaved work and running tasks are protected."),
             (self.action_exit, "close", "Exit the application after handling unsaved projects and running tasks."),
+            (self.action_reset_layout, "restore", "Restore the default window size and pane layout for all tabs without changing projects."),
             (self.tasks_window.show_action, "tasks", "View and manage background tasks across all projects."),
             (self.action_mcp_help, "help", "Open assistant connection instructions and the MCP safety guide."),
             (self.updater.check_action, "restore", "Check GitHub for application updates."),
@@ -3344,6 +3380,8 @@ class MainWindow(QMainWindow):
         previous = self._active_editor
         current = self.tabs.widget(index)
         if previous is not None and previous is not current:
+            previous._save_layout_state()
+            previous._layout_restored = False
             previous._commit_editors()
             previous._cancel_stopped_seek(restore_audio=True)
             previous.player.pause()
@@ -3666,8 +3704,6 @@ class MainWindow(QMainWindow):
             "position": editor.current_position(),
             "mark_in": editor.mark_in_spin.value(), "mark_out": editor.mark_out_spin.value(),
             "zoom": editor.zoom_slider.value(),
-            "editor_sizes": editor.editor_splitter.sizes(),
-            "inspector_sizes": editor.inspector_splitter.sizes(),
         }
 
     @staticmethod
@@ -3679,12 +3715,6 @@ class MainWindow(QMainWindow):
         editor.mark_out_spin.setValue(float(view.get("mark_out", 3)))
         editor.zoom_slider.setValue(int(view.get("zoom", 10)))
         editor.player.setPosition(round(float(view.get("position", 0)) * 1000))
-        for key, splitter in (
-            ("editor_sizes", editor.editor_splitter),
-            ("inspector_sizes", editor.inspector_splitter),
-        ):
-            if isinstance(view.get(key), list):
-                splitter.setSizes(view[key])
 
     def save_workspace_state(self, on_saved: Callable[[], None] | None = None) -> None:
         if self.workspace_store is None or self.recovery_store is None:
@@ -3927,10 +3957,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self._close_approved:
+            self._save_window_layout()
             self.setup_consent.cancel_all()
             self.tasks_window.close()
             for editor in self.editors.values():
-                editor._save_layout_state()
+                editor._layout_save_timer.stop()
                 editor._reset_transport_state()
                 editor.player.stop()
                 editor.prompt_player.stop()
@@ -4023,8 +4054,9 @@ class MainWindow(QMainWindow):
         if not self.updater.install_on_close():
             self._closing = False
             return
+        self._save_window_layout()
         for editor in self.editors.values():
-            editor._save_layout_state()
+            editor._layout_save_timer.stop()
             editor._reset_transport_state()
             editor.player.stop()
             editor.prompt_player.stop()

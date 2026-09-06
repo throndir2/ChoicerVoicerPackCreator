@@ -95,7 +95,7 @@ def test_workspace_menu_precedes_tabs_and_project_toolbar(
         toolbar.mapTo(workspace, QPoint(0, 0)).y()
     )
     assert [action.text() for action in menu.actions()] == [
-        "&File", "&Project", "&Segments", "&Tools", "&Help",
+        "&File", "&Project", "&Segments", "&View", "&Tools", "&Help",
     ]
     actions = [action for action in toolbar.actions() if not action.isSeparator()]
     assert actions == [
@@ -249,6 +249,7 @@ def test_command_icons_and_compact_buttons_are_described(workspace):
     for action in editor.file_actions + editor.project_actions + editor.segment_actions + [
         workspace.action_new, workspace.action_open, workspace.action_import,
         workspace.tasks_window.show_action, workspace.action_logs, workspace.updater.check_action,
+        workspace.action_reset_layout,
     ]:
         assert action.toolTip()
         assert action.statusTip()
