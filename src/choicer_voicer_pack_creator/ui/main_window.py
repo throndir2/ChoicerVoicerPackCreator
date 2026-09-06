@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import getpass
+import os
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -9,7 +11,6 @@ from PySide6.QtCore import (
     QSignalBlocker,
     QStandardPaths,
     Qt,
-    QThread,
     QTimer,
     QUrl,
     Signal,
@@ -18,10 +19,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtWidgets import (
-    QApplication,
     QCheckBox,
     QComboBox,
-    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -31,6 +30,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenuBar,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -39,8 +39,10 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QSplitter,
+    QStatusBar,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -56,10 +58,13 @@ from choicer_voicer_pack_creator.exporter import (
     safe_name,
     sha256,
 )
+from choicer_voicer_pack_creator.jobs import JobManager
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import AnalysisReview, PackProject, Segment
+from choicer_voicer_pack_creator.operations import OperationCancelled
 from choicer_voicer_pack_creator.pack_io import PackImporter
-from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
+from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore, WorkspaceStore
+from choicer_voicer_pack_creator.project_session import ProjectSession, canonical_project_path
 from choicer_voicer_pack_creator.timeline_audit import (
     TimelineOverlap,
     audit_timeline_overlaps,
@@ -72,13 +77,15 @@ from choicer_voicer_pack_creator.ui.analysis_dialog import (
 from choicer_voicer_pack_creator.ui.backing_dialog import BackingDialog
 from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
 from choicer_voicer_pack_creator.ui.export_dialog import ExportProgressDialog
+from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.ui.subtitles import SubtitleVideoWidget
+from choicer_voicer_pack_creator.ui.tasks_panel import TasksPanel
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
 from choicer_voicer_pack_creator.ui.update_controller import UpdateController
 from choicer_voicer_pack_creator.ui.youtube_dialog import YouTubeDialog
 
 
-class WaveformWorker(QThread):
+class WaveformWorker(JobWorker):
     completed = Signal(int, str, float, list)
     failed = Signal(int, str, str)
 
@@ -113,10 +120,11 @@ class WaveformWorker(QThread):
             self.failed.emit(self.request_id, self.path, str(error))
 
 
-class ExportWorker(QThread):
+class ExportWorker(JobWorker):
     progress = Signal(object)
     completed = Signal(object)
     failed = Signal(str)
+    canceled = Signal()
 
     def __init__(self, exporter: PackExporter, project: PackProject, destination: Path) -> None:
         super().__init__()
@@ -132,13 +140,17 @@ class ExportWorker(QThread):
                 create_zip=True,
                 progress=self.progress.emit,
             )
+            if not isinstance(result, ExportResult):
+                raise TypeError("Exporter returned an unexpected result")
             self.completed.emit(result)
+        except OperationCancelled:
+            self.canceled.emit()
         except Exception as error:
             diagnostic_exception("export_worker_failed", error)
             self.failed.emit(str(error))
 
 
-class MainWindow(QMainWindow):
+class ProjectEditor(QWidget):
     def __init__(
         self,
         media: MediaTools,
@@ -147,8 +159,17 @@ class MainWindow(QMainWindow):
         settings: QSettings | None = None,
         recovery_store: RecoveryStore | None = None,
         analysis_data_root: Path | None = None,
+        workspace: MainWindow,
+        session: ProjectSession,
     ) -> None:
-        super().__init__()
+        super().__init__(workspace)
+        self.workspace = workspace
+        self.session = session
+        self._document_layout = QVBoxLayout(self)
+        self._document_layout.setContentsMargins(0, 0, 0, 0)
+        self._menu_bar = QMenuBar(self)
+        self._document_layout.addWidget(self._menu_bar)
+        self._status_bar = QStatusBar(self)
         self.media = media
         self.importer = PackImporter(media)
         self.exporter = PackExporter(media)
@@ -166,11 +187,9 @@ class MainWindow(QMainWindow):
             )
             / "analysis"
         )
-        self.project = PackProject(authors=[getpass.getuser()])
-        self.project_path: Path | None = None
+        self.project = session.project
+        self.project_path = session.path
         self._saved_project_hash: str | None = None
-        self._automation_active = False
-        self._automation_disconnected = False
         self.selected_segment_id = ""
         self.dirty = False
         self._syncing = False
@@ -184,6 +203,8 @@ class MainWindow(QMainWindow):
         self._export_worker: ExportWorker | None = None
         self._export_dialog: ExportProgressDialog | None = None
         self._backing_dialog: BackingDialog | None = None
+        self._analysis_dialog: AnalysisDialog | None = None
+        self._source_request = 0
         self._restoring_layout = False
         self._layout_restored = False
         self._range_edit_record: tuple[str, float, float, bool] | None = None
@@ -205,19 +226,66 @@ class MainWindow(QMainWindow):
         self._stopped_seek_debounce_timer.setInterval(35)
         self._stopped_seek_debounce_timer.timeout.connect(self._start_stopped_seek_decode)
 
-        self.setWindowTitle("Choicer Voicer Pack Creator")
-        self.resize(1500, 900)
-        self.setMinimumSize(1050, 680)
         self._build_actions()
         self._build_ui()
         self._connect_player()
-        self._set_project(self.project, None, mark_dirty=False)
+        self._set_project(self.project, self.project_path, mark_dirty=session.dirty)
+        self._document_layout.addWidget(self._status_bar)
         QTimer.singleShot(0, self._restore_layout_state)
 
         if initial_path:
             QTimer.singleShot(0, lambda: self._open_initial_path(initial_path))
-        elif self.recovery_store:
-            QTimer.singleShot(0, self._offer_recovery)
+
+    def menuBar(self) -> QMenuBar:  # noqa: N802
+        return self._menu_bar
+
+    def statusBar(self) -> QStatusBar:  # noqa: N802
+        return self._status_bar
+
+    def addToolBar(self, toolbar: QToolBar) -> None:  # noqa: N802
+        self._document_layout.addWidget(toolbar)
+
+    def setCentralWidget(self, widget: QWidget) -> None:  # noqa: N802
+        self._document_layout.addWidget(widget, 1)
+
+    @property
+    def project(self) -> PackProject:
+        return self.session.project
+
+    @project.setter
+    def project(self, value: PackProject) -> None:
+        self.session.project = value
+
+    @property
+    def project_path(self) -> Path | None:
+        return self.session.path
+
+    @project_path.setter
+    def project_path(self, value: Path | None) -> None:
+        self.session.path = value
+
+    @property
+    def dirty(self) -> bool:
+        return self.session.dirty
+
+    @dirty.setter
+    def dirty(self, value: bool) -> None:
+        if value:
+            self.session.revision += 1
+        else:
+            self.session.saved_revision = self.session.revision
+
+    @property
+    def updater(self) -> UpdateController:
+        return self.workspace.updater
+
+    @property
+    def _automation_active(self) -> bool:
+        return self.workspace._automation_active
+
+    @property
+    def _automation_disconnected(self) -> bool:
+        return self.workspace._automation_disconnected
 
     # ---------- UI construction ----------
 
@@ -238,6 +306,7 @@ class MainWindow(QMainWindow):
         self.action_import_zip = QAction("Import Pack ZIP...", self)
         self.action_import_zip.triggered.connect(self.import_pack_zip)
         self.action_save = QAction("Save Project", self)
+        self.action_save.setObjectName("saveProject")
         self.action_save.setShortcut(QKeySequence.StandardKey.Save)
         self.action_save.triggered.connect(self.save_project)
         self.action_save_as = QAction("Save Project As…", self)
@@ -246,11 +315,13 @@ class MainWindow(QMainWindow):
         self.action_restore_previous = QAction("Restore Previous Save…", self)
         self.action_restore_previous.triggered.connect(self.restore_previous_save)
         self.action_export = QAction("Export Pack + ZIP…", self)
+        self.action_export.setObjectName("exportProject")
         self.action_export.setShortcut(QKeySequence("Ctrl+E"))
         self.action_export.triggered.connect(self.export_pack)
         self.action_exit = QAction("Exit", self)
-        self.action_exit.triggered.connect(self.close)
+        self.action_exit.triggered.connect(self.workspace.close)
         self.action_analyze = QAction("Analyze Video && Suggest Segments…", self)
+        self.action_analyze.setObjectName("analyzeProject")
         self.action_analyze.setShortcut(QKeySequence("Ctrl+Shift+R"))
         self.action_analyze.triggered.connect(lambda: self.open_analysis_dialog())
         self.action_backing = QAction("Generate Backing Track...", self)
@@ -283,7 +354,8 @@ class MainWindow(QMainWindow):
         self.recent_projects_menu = file_menu.addMenu("Open &Recent")
         self.recent_projects_menu.setToolTipsVisible(True)
         self.recent_projects_menu.aboutToShow.connect(self._refresh_recent_projects_menu)
-        self._refresh_recent_projects_menu()
+        for editor in self.workspace.editors.values():
+            editor._refresh_recent_projects_menu()
         file_menu.addActions([self.action_import, self.action_import_zip])
         file_menu.addSeparator()
         file_menu.addActions([self.action_save, self.action_save_as, self.action_restore_previous])
@@ -301,10 +373,17 @@ class MainWindow(QMainWindow):
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self.action_analyze)
         tools_menu.addAction(self.action_backing)
+        tools_menu.addAction(self.workspace.tasks_panel.toggleViewAction())
         help_menu = self.menuBar().addMenu("&Help")
+        self.help_menu = help_menu
         self.action_mcp_help = help_menu.addAction("LLM / MCP Help")
         self.action_mcp_help.triggered.connect(self.show_mcp_help)
-        self.updater = UpdateController(self, help_menu)
+        if hasattr(self.workspace, "updater"):
+            help_menu.addActions([
+                self.updater.check_action, self.updater.auto_action,
+                self.updater.prerelease_action,
+            ])
+            help_menu.addSeparator()
         self.action_logs = help_menu.addAction("Open Diagnostic Logs...")
         self.action_logs.triggered.connect(
             lambda: open_diagnostic_logs(self, self.analysis_data_root)
@@ -459,6 +538,7 @@ class MainWindow(QMainWindow):
         project_content = QWidget(self.project_section)
         project_form = QFormLayout(project_content)
         self.title_edit = QLineEdit()
+        self.title_edit.setObjectName("projectTitle")
         self.title_edit.editingFinished.connect(self._pack_details_changed)
         self.title_edit.textEdited.connect(self._pack_details_changed)
         project_form.addRow("Title", self.title_edit)
@@ -527,6 +607,7 @@ class MainWindow(QMainWindow):
         segment_layout = QVBoxLayout(segment_content)
         segment_layout.setContentsMargins(0, 0, 0, 0)
         self.segment_table = QTableWidget(0, 6)
+        self.segment_table.setObjectName("segmentsTable")
         self.segment_table.setHorizontalHeaderLabels(
             ["#", "In", "Out", "Speaker(s)", "Line", "Audio"]
         )
@@ -581,6 +662,7 @@ class MainWindow(QMainWindow):
         self.speakers_edit.textEdited.connect(self._selected_speakers_typed)
         editor_form.addRow("Speaker(s)", self.speakers_edit)
         self.caption_edit = QPlainTextEdit()
+        self.caption_edit.setObjectName("segmentCaption")
         self.caption_edit.setPlaceholderText("The exact line the player should perform…")
         self.caption_edit.setMaximumHeight(78)
         self.caption_edit.textChanged.connect(self._selected_caption_changed)
@@ -891,26 +973,39 @@ class MainWindow(QMainWindow):
         self.recent_projects_menu.addAction(self.action_clear_recent)
 
     def _open_recent_project(self, path: Path) -> None:
-        if self._maybe_save():
-            self.open_path(path)
+        self.workspace.open_path(path)
 
     def _write_recovery_snapshot(self) -> None:
         if not self.recovery_store or not self.dirty:
             return
-        try:
-            self.recovery_store.save(self.project, self.project_path)
-        except Exception as error:
-            self.statusBar().showMessage(f"Could not update recovery snapshot: {error}")
+        snapshot, path, store = self.session.snapshot(), self.project_path, self.recovery_store
+        job = self.workspace.job_manager.submit(
+            self.session.id, "recovery", "Saving recovery",
+            lambda _ctx: store.save(snapshot, path), resource_class="io",
+            resource_keys=(f"document-save:{self.session.id}",),
+            write_paths=(store.path, store.previous_path),
+            read_paths=(path,) if path else (),
+            source_snapshot={"revision": self.session.revision},
+        )
+        job.failed.connect(lambda message: self.statusBar().showMessage(
+            f"Could not update recovery snapshot: {message}"
+        ))
 
     def _clear_recovery_snapshot(self) -> None:
         self._recovery_timer.stop()
         self._discard_recovery_on_transition = False
         if not self.recovery_store:
             return
-        try:
-            self.recovery_store.clear()
-        except OSError as error:
-            self.statusBar().showMessage(f"Could not remove recovery snapshot: {error}")
+        store = self.recovery_store
+        job = self.workspace.job_manager.submit(
+            self.session.id, "recovery", "Clearing saved recovery",
+            lambda _ctx: store.clear(), resource_class="io",
+            resource_keys=(f"document-save:{self.session.id}",),
+            write_paths=(store.path, store.previous_path),
+        )
+        job.failed.connect(lambda message: self.statusBar().showMessage(
+            f"Could not remove recovery snapshot: {message}"
+        ))
 
     def _open_initial_path(self, initial_path: Path) -> None:
         self.open_path(initial_path)
@@ -978,42 +1073,12 @@ class MainWindow(QMainWindow):
                 "Save this project first. A recoverable previous version is created on the next Save.",
             )
             return
-        if not self._maybe_save():
-            return
-        previous = ProjectStore.previous_path(self.project_path)
-        if not previous.is_file():
-            QMessageBox.information(
-                self,
-                "No previous save",
-                "No previous saved version exists yet. Saving over this project once will create one.",
-            )
-            return
-        answer = QMessageBox.question(
-            self,
-            "Restore previous save?",
-            "Load the previous saved version as unsaved edits? The current saved project will "
-            "remain untouched until you choose Save. Use Save As afterward to preserve both versions.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            project = ProjectStore.load(previous)
-        except Exception as error:
-            QMessageBox.critical(self, "Could not restore previous save", str(error))
-            return
-        self._set_project(project, self.project_path, mark_dirty=True)
-        if project.segments:
-            self.select_segment(project.segments[0].id)
-        self.statusBar().showMessage(
-            "Previous save loaded as unsaved edits. Use Save or Save As when ready."
-        )
+        self.workspace.offer_previous_save(self, self.project_path)
 
     def new_from_video(self) -> None:
-        diagnostic_event("new_video_requested")
-        if not self._maybe_save():
-            return
+        self.workspace.new_from_video()
+
+    def _choose_new_video(self) -> Path | None:
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Choose source video",
@@ -1021,38 +1086,15 @@ class MainWindow(QMainWindow):
             "Video files (*.mp4 *.mkv *.mov *.webm *.ogv *.avi);;All files (*)",
         )
         if not path:
-            return
-        source = Path(path).resolve()
-        try:
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            info = self.media.probe(source)
-        except Exception as error:
-            QMessageBox.critical(self, "Could not open video", str(error))
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
-        self.settings.setValue("lastVideoDir", str(source.parent))
-        project = PackProject(
-            title=source.stem,
-            authors=[getpass.getuser()],
-            video_path=str(source),
-            video_duration=info.duration,
-        )
-        self._set_project(project, None, mark_dirty=True)
-        diagnostic_event("video_import_ready", source=source, duration_seconds=info.duration)
-        self.statusBar().showMessage(f"Loaded {source.name}. Mark a range and add the first segment.")
-        QTimer.singleShot(0, lambda: self._finish_new_import(project))
+            return None
+        return Path(path).resolve()
 
     def new_from_youtube(self) -> None:
         diagnostic_event("youtube_import_dialog_requested")
-        if not self._maybe_save():
-            return
-        dialog = YouTubeDialog(
-            self.media, str(self.settings.value("lastYouTubeDir", "")), self,
-            data_root=self.analysis_data_root,
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.download_result is None:
-            diagnostic_event("youtube_import_dialog_dismissed")
+        self.workspace.new_from_youtube()
+
+    def _youtube_ready(self, dialog: YouTubeDialog) -> None:
+        if dialog.download_result is None:
             return
         result = dialog.download_result
         self.settings.setValue("lastYouTubeDir", str(result.video_path.parent.parent))
@@ -1067,27 +1109,36 @@ class MainWindow(QMainWindow):
             import_warnings=list(result.warnings),
         )
         self._set_project(project, None, mark_dirty=True)
-        diagnostic_event(
-            "youtube_import_ready", video=result.video_path, duration_seconds=result.duration,
-            caption_count=len(result.captions), warning_count=len(result.warnings),
-        )
         self.statusBar().showMessage(
             f"Downloaded {result.title}; {len(result.captions)} caption(s) ready for review."
         )
         if result.warnings:
-            diagnostic_event("youtube_import_notes_shown", warnings=result.warnings)
-            QMessageBox.warning(self, "YouTube import notes", "\n\n".join(result.warnings))
-        diagnostic_event("youtube_analysis_handoff_scheduled")
+            self.workspace.notice("YouTube import notes", "\n\n".join(result.warnings))
         QTimer.singleShot(0, lambda: self._finish_new_import(project))
+
+    def _start_youtube_import(self) -> None:
+        dialog = YouTubeDialog(
+            self.media, str(self.settings.value("lastYouTubeDir", "")), self,
+            data_root=self.analysis_data_root,
+            job_manager=self.workspace.job_manager, project_id=self.session.id,
+            source_snapshot={"source_revision": self.session.source_revision},
+        )
+        self._youtube_dialog = dialog
+        token = self.session.source_token()
+        dialog.accepted.connect(
+            lambda: self._youtube_ready(dialog) if token == self.session.source_token() else None
+        )
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.show()
 
     def _finish_new_import(self, project: PackProject) -> None:
         if self.project is not project:
             diagnostic_event("new_import_handoff_skipped", reason="project_changed")
             return
-        if not project.backing_track_path:
-            self.generate_backing_track()
         if self.project is project:
             self.open_analysis_dialog(initial_scan=True, auto_start=True)
+        if not project.backing_track_path:
+            self.generate_backing_track()
 
     def open_analysis_dialog(
         self, *, initial_scan: bool = False, auto_start: bool = False
@@ -1103,6 +1154,11 @@ class MainWindow(QMainWindow):
                 "Load or relink a source video before running local analysis.",
             )
             return
+        if self._analysis_dialog is not None:
+            self._analysis_dialog.show()
+            self._analysis_dialog.raise_()
+            return
+        token = self.session.source_token()
         dialog = AnalysisDialog(
             self.media,
             Path(self.project.video_path),
@@ -1116,12 +1172,24 @@ class MainWindow(QMainWindow):
             auto_start=auto_start,
             youtube_import=bool(self.project.source_url),
             review=self.project.analysis_review,
+            job_manager=self.workspace.job_manager, project_id=self.session.id,
+            source_snapshot={"source_revision": self.session.source_revision},
         )
-        dialog.suggestions_accepted.connect(self._add_analysis_suggestions)
-        dialog.preview_requested.connect(self._preview_analysis_range)
-        dialog.review_changed.connect(self._save_analysis_review)
-        dialog.exec()
-        diagnostic_event("analysis_dialog_closed")
+        self._analysis_dialog = dialog
+        dialog.suggestions_accepted.connect(
+            lambda value: self._add_analysis_suggestions(value)
+            if token == self.session.source_token() and self._analysis_dialog is dialog else None
+        )
+        dialog.preview_requested.connect(
+            lambda start, end: self._preview_analysis_range(start, end)
+            if token == self.session.source_token() and self._analysis_dialog is dialog else None
+        )
+        dialog.review_changed.connect(
+            lambda value: self._save_analysis_review(value)
+            if token == self.session.source_token() and self._analysis_dialog is dialog else None
+        )
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.show()
 
     @Slot(object)
     def _save_analysis_review(self, value: object) -> None:
@@ -1130,10 +1198,12 @@ class MainWindow(QMainWindow):
             return
         if value != self.project.analysis_review:
             self.project.analysis_review = value
+            self.session.draft_revision += 1
             self._set_dirty(True)
 
     @Slot(float, float)
     def _preview_analysis_range(self, start: float, end: float) -> None:
+        self.workspace.pause_other_previews(self)
         self.prompt_player.stop()
         self._cancel_stopped_seek(restore_audio=True)
         self._preview_end = end
@@ -1193,8 +1263,6 @@ class MainWindow(QMainWindow):
         )
 
     def open_project(self) -> None:
-        if not self._maybe_save():
-            return
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Pack Creator project",
@@ -1202,56 +1270,12 @@ class MainWindow(QMainWindow):
             "Pack Creator projects (*.cvpack.json *.json)",
         )
         if path:
-            self.open_path(Path(path))
+            self.workspace.open_path(Path(path))
 
     def open_path(self, path: Path) -> None:
-        try:
-            if path.is_dir() or path.suffix.casefold() == ".zip":
-                result = (
-                    self.importer.import_folder(path) if path.is_dir()
-                    else self.importer.import_zip(
-                        path, self.analysis_data_root.parent / "imported-packs",
-                    )
-                )
-                self._set_project(result.project, None, mark_dirty=True)
-                self._show_import_warnings(result.warnings)
-                self._show_pack_recovery_hint()
-            else:
-                project = ProjectStore.load(path)
-                self._set_project(project, path.resolve(), mark_dirty=False)
-                self.settings.setValue("lastProjectDir", str(path.resolve().parent))
-                self._remember_recent_project(path)
-        except Exception as error:
-            previous = (
-                ProjectStore.previous_path(path)
-                if not path.is_dir() and path.suffix.casefold() != ".zip" else None
-            )
-            if previous and previous.is_file():
-                answer = QMessageBox.question(
-                    self,
-                    "Current project could not be opened",
-                    f"{error}\n\nA previous saved version is available. Load it as unsaved "
-                    "recovery data? The current file will not be overwritten unless Save is chosen.",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                    QMessageBox.StandardButton.Yes,
-                )
-                if answer == QMessageBox.StandardButton.Yes:
-                    try:
-                        recovered = ProjectStore.load(previous)
-                        self._set_project(recovered, path.resolve(), mark_dirty=True)
-                        self.statusBar().showMessage(
-                            "Loaded the previous save as unsaved edits. Use Save As to preserve both files."
-                        )
-                        return
-                    except Exception as previous_error:
-                        error = RuntimeError(
-                            f"Current project: {error}\n\nPrevious save: {previous_error}"
-                        )
-            QMessageBox.critical(self, "Could not open project", str(error))
+        self.workspace.open_path(path)
 
     def import_pack(self) -> None:
-        if not self._maybe_save():
-            return
         folder = QFileDialog.getExistingDirectory(
             self,
             "Choose an existing Choicer Voicer pack folder",
@@ -1259,22 +1283,10 @@ class MainWindow(QMainWindow):
         )
         if not folder:
             return
-        try:
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            result = self.importer.import_folder(Path(folder))
-        except Exception as error:
-            QMessageBox.critical(self, "Could not import pack", str(error))
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
         self.settings.setValue("lastPackDir", str(Path(folder).parent))
-        self._set_project(result.project, None, mark_dirty=True)
-        self._show_import_warnings(result.warnings)
-        self._show_pack_recovery_hint()
+        self.workspace.open_path(Path(folder))
 
     def import_pack_zip(self) -> None:
-        if not self._maybe_save():
-            return
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Import an existing Choicer Voicer pack ZIP",
@@ -1284,11 +1296,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         self.settings.setValue("lastPackDir", str(Path(path).parent))
-        try:
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            self.open_path(Path(path))
-        finally:
-            QApplication.restoreOverrideCursor()
+        self.workspace.open_path(Path(path))
 
     def _show_pack_recovery_hint(self) -> None:
         self.statusBar().showMessage(
@@ -1297,53 +1305,7 @@ class MainWindow(QMainWindow):
         )
 
     def save_project(self, save_as: bool = False) -> bool:
-        self._commit_editors()
-        original_project_path = self.project_path
-        destination = self.project_path
-        if destination is None or save_as:
-            path, _ = QFileDialog.getSaveFileName(
-                self,
-                "Save Pack Creator project",
-                str(
-                    Path(self.settings.value("lastProjectDir", str(Path.home())))
-                    / f"{self.project.title}.cvpack.json"
-                ),
-                "Pack Creator projects (*.cvpack.json)",
-            )
-            if not path:
-                return False
-            destination = Path(path)
-            if not destination.name.casefold().endswith(".cvpack.json"):
-                destination = destination.with_name(destination.name + ".cvpack.json")
-        replacing_existing = destination.is_file()
-        try:
-            ProjectStore.save(self.project, destination)
-        except Exception as error:
-            QMessageBox.critical(self, "Could not save project", str(error))
-            return False
-        self.project_path = destination.resolve()
-        self._saved_project_hash = sha256(self.project_path)
-        self.settings.setValue("lastProjectDir", str(self.project_path.parent))
-        self._clear_recovery_snapshot()
-        self._set_dirty(False)
-        saved_as_distinct_copy = (
-            save_as
-            and original_project_path is not None
-            and original_project_path.resolve() != self.project_path
-        )
-        if saved_as_distinct_copy:
-            suffix = " A previous target version was also retained." if replacing_existing else ""
-            self.statusBar().showMessage(
-                f"Saved a new project copy to {self.project_path}; the original was not changed.{suffix}"
-            )
-        elif replacing_existing:
-            self.statusBar().showMessage(
-                f"Saved project to {self.project_path} · previous save retained for recovery"
-            )
-        else:
-            self.statusBar().showMessage(f"Saved project to {self.project_path}")
-        self._remember_recent_project(self.project_path)
-        return True
+        return self.workspace.save_editor(self, save_as=save_as)
 
     def _set_project(
         self,
@@ -1359,17 +1321,27 @@ class MainWindow(QMainWindow):
             self.project.video_path == project.video_path
             and self.project.video_duration == project.video_duration
         )
+        if project.backing_track_path != self.project.backing_track_path:
+            self.session.backing_revision += 1
+        if project.analysis_review != self.project.analysis_review:
+            self.session.draft_revision += 1
+            if self._analysis_dialog is not None:
+                self._analysis_dialog.hide()
+                self._analysis_dialog = None
         if not preserve_view:
+            self.session.source_revision += 1
+            if self._analysis_dialog is not None:
+                self._analysis_dialog.hide()
+                self._analysis_dialog = None
             self._cancel_waveform_workers()
             if hasattr(self, "player"):
                 self._reset_transport_state()
                 self.player.stop()
         self.project = project
         self.project.sort_segments()
+        if self.project_path != project_path:
+            self._saved_project_hash = None
         self.project_path = project_path
-        self._saved_project_hash = (
-            sha256(project_path) if project_path and project_path.is_file() else None
-        )
         if not preserve_view or project.segment_by_id(self.selected_segment_id) is None:
             self.selected_segment_id = ""
         self._syncing = True
@@ -1419,6 +1391,11 @@ class MainWindow(QMainWindow):
         self._waveform_request_id += 1
         request_id = self._waveform_request_id
         worker = WaveformWorker(self.media, request_id, path, duration)
+        worker.configure_job(
+            self.workspace.job_manager, self.session.id, "waveform", "Reading waveform",
+            read_paths=(Path(path),),
+            source_snapshot={"source_revision": self.session.source_revision, "path": path},
+        )
         self._waveform_workers.append(worker)
         worker.completed.connect(self._waveform_ready)
         worker.failed.connect(self._waveform_failed)
@@ -1459,6 +1436,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(message)
 
     def toggle_playback(self) -> None:
+        self.workspace.pause_other_previews(self)
         self.prompt_player.stop()
         if self._stopped_seek_active:
             self._cancel_stopped_seek(restore_audio=True)
@@ -2281,14 +2259,25 @@ class MainWindow(QMainWindow):
         if not path:
             return
         source = Path(path).resolve()
-        try:
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            info = self.media.probe(source)
-        except Exception as error:
-            QMessageBox.critical(self, "Could not open video", str(error))
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
+        self._source_request += 1
+        request = self._source_request
+        job = self.workspace.job_manager.submit(
+            self.session.id, "probe", f"Checking {source.name}",
+            lambda _ctx: self.media.probe(source), resource_class="io",
+            read_paths=(source,),
+        )
+        job.completed.connect(
+            lambda info: self._apply_source_video(source, info)
+            if request == self._source_request else None
+        )
+        job.failed.connect(lambda message: self.workspace.notice("Could not open video", message))
+
+    def _apply_source_video(self, source: Path, info) -> None:
+        self.session.source_revision += 1
+        if self._analysis_dialog is not None:
+            self._analysis_dialog.hide()
+            self._analysis_dialog = None
+        self.workspace.cancel_source_jobs(self.session.id)
         self._reset_transport_state()
         self.player.stop()
         self.prompt_player.stop()
@@ -2328,8 +2317,7 @@ class MainWindow(QMainWindow):
         self._refresh_validation_label()
         invalid = [item for item in self.project.segments if item.end > info.duration + 0.05]
         if invalid:
-            QMessageBox.warning(
-                self,
+            self.workspace.notice(
                 "Segments exceed replacement video",
                 f"{len(invalid)} segment(s) extend past the new video. Retiming is required before export.",
             )
@@ -2345,6 +2333,12 @@ class MainWindow(QMainWindow):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
+        self._source_request += 1
+        self.session.source_revision += 1
+        self.workspace.cancel_source_jobs(self.session.id)
+        if self._analysis_dialog is not None:
+            self._analysis_dialog.hide()
+            self._analysis_dialog = None
         self._reset_transport_state()
         self.player.stop()
         self._cancel_waveform_workers()
@@ -2373,11 +2367,13 @@ class MainWindow(QMainWindow):
             "Audio files (*.mp3 *.wav *.ogg *.flac *.m4a);;All files (*)",
         )
         if path:
+            self.session.backing_revision += 1
             self.project.backing_track_path = str(Path(path).resolve())
             self._refresh_backing_controls()
             self._set_dirty(True)
 
     def clear_backing_track(self) -> None:
+        self.session.backing_revision += 1
         self.project.backing_track_path = ""
         self._refresh_backing_controls()
         self._set_dirty(True)
@@ -2388,11 +2384,10 @@ class MainWindow(QMainWindow):
         self.backing_path_label.setToolTip(path or "Generate backing to keep music under recordings.")
         self.generate_backing_button.setText("Regenerate backing..." if path else "Generate backing...")
 
-    def generate_backing_track(self) -> bool:
-        if self._backing_dialog is not None or self._export_worker is not None:
-            QMessageBox.information(
-                self, "Media operation running", "Wait for the current media operation to finish.",
-            )
+    def generate_backing_track(self, *, after_success: Callable[[], None] | None = None) -> bool:
+        if self._backing_dialog is not None:
+            self._backing_dialog.show()
+            self._backing_dialog.raise_()
             return False
         self._commit_editors()
         project = self.project
@@ -2416,39 +2411,39 @@ class MainWindow(QMainWindow):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return False
-        self.player.pause()
-        try:
-            dialog = BackingDialog(
-                self.media, source.resolve(), self.analysis_data_root.parent / "backing", self,
-            )
-            self._backing_dialog = dialog
-            accepted = dialog.exec() == QDialog.DialogCode.Accepted
-            result = dialog.backing_path
-        except Exception as error:
-            diagnostic_exception("backing_generation_failed", error)
-            QMessageBox.critical(self, "Could not generate backing", str(error))
-            return False
-        finally:
-            self._backing_dialog = None
-        if not accepted or result is None:
-            self.statusBar().showMessage(
-                "Backing was not changed. Your dialogue is safe; generate backing later from Tools."
-            )
-            return False
-        if self.project is not project or Path(project.video_path).resolve() != source.resolve():
-            diagnostic_event("backing_result_not_applied", reason="source_or_project_changed")
-            QMessageBox.warning(
-                self, "Project changed",
-                f"The source project changed during generation. Backing was saved at {result}, "
-                "but was not attached to the new project.",
-            )
-            return False
-        project.backing_track_path = str(result)
-        self._refresh_backing_controls()
-        self._set_dirty(True)
-        self.statusBar().showMessage(
-            "Backing generated; dialogue and prompts preserved. Save the project, then re-export."
+        token = (self.session.source_token(), self.session.backing_revision, project.backing_track_path)
+        dialog = BackingDialog(
+            self.media, source.resolve(), self.analysis_data_root.parent / "backing", self,
+            job_manager=self.workspace.job_manager, project_id=self.session.id,
+            source_snapshot={"source_revision": self.session.source_revision},
         )
+        self._backing_dialog = dialog
+
+        def apply_result() -> None:
+            result = dialog.backing_path
+            current = (
+                self.session.source_token(), self.session.backing_revision,
+                self.project.backing_track_path,
+            )
+            if result is None:
+                return
+            if token != current:
+                self.statusBar().showMessage(
+                    f"Backing saved at {result}; your newer source/backing choice was kept."
+                )
+                return
+            self.project.backing_track_path = str(result)
+            self.session.backing_revision += 1
+            self._refresh_backing_controls()
+            self._set_dirty(True)
+            self.statusBar().showMessage("Backing generated; dialogue and prompts preserved.")
+            if after_success is not None:
+                QTimer.singleShot(0, after_success)
+
+        dialog.accepted.connect(apply_result)
+        dialog.finished.connect(lambda _result: setattr(self, "_backing_dialog", None))
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.show()
         return True
 
     def choose_icon(self) -> None:
@@ -2582,19 +2577,32 @@ class MainWindow(QMainWindow):
         self.settings.setValue("lastExportDir", destination)
         self._set_busy(True, "Starting validated export…")
         worker = ExportWorker(self.exporter, self.project, output_parent)
+        assets = [
+            Path(value) for value in (
+                self.project.video_path, self.project.backing_track_path, self.project.icon_path,
+                *(segment.audio_path for segment in self.project.segments),
+                *(segment.image_path for segment in self.project.segments),
+            ) if value
+        ]
+        worker.configure_job(
+            self.workspace.job_manager, self.session.id, "export", "Export pack and ZIP",
+            read_paths=assets, write_paths=(output_folder, output_zip),
+            source_snapshot={"revision": self.session.revision},
+        )
         self._export_worker = worker
-        dialog = ExportProgressDialog(output_folder, self)
+        dialog = ExportProgressDialog(output_folder, self, background=True)
         self._export_dialog = dialog
-        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.finished.connect(self._export_dialog_closed)
         worker.progress.connect(self._export_progress)
         worker.progress.connect(dialog.report_progress)
         worker.completed.connect(self._export_completed)
         worker.failed.connect(self._export_failed)
+        worker.canceled.connect(self._export_cancelled)
         worker.finished.connect(self._export_finished)
         worker.finished.connect(worker.deleteLater)
         dialog.show()
         worker.start()
+        self.workspace.tasks_panel.register_detail(worker.job_handle.id, dialog)
 
     @Slot(object)
     def _export_progress(self, update: ExportProgress) -> None:
@@ -2616,7 +2624,8 @@ class MainWindow(QMainWindow):
         box.setDefaultButton(generate)
         box.exec()
         if box.clickedButton() is generate:
-            return self.generate_backing_track()
+            self.generate_backing_track(after_success=self.export_pack)
+            return False
         return box.clickedButton() is silent
 
     @Slot(object)
@@ -2636,6 +2645,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Export failed")
 
     @Slot()
+    def _export_cancelled(self) -> None:
+        if self._export_dialog is not None:
+            self._export_dialog.show_error("Export cancelled. Existing published output was preserved.")
+            self._export_dialog.setWindowTitle("Export cancelled")
+            self._export_dialog.progress_label.setText("Export cancelled")
+        self.statusBar().showMessage("Export cancelled")
+
+    @Slot()
     def _export_finished(self) -> None:
         if self._export_dialog is not None:
             self._export_dialog.worker_finished()
@@ -2644,34 +2661,15 @@ class MainWindow(QMainWindow):
 
     @Slot(int)
     def _export_dialog_closed(self, _result: int) -> None:
-        self._export_dialog = None
+        if self._export_worker is None:
+            self._export_dialog = None
 
     def _set_busy(self, busy: bool, message: str) -> None:
         self.progress_label.setText(message)
         self.progress_bar.setRange(0, 0 if busy else 1)
         self.progress_bar.setValue(0 if busy else 1)
         self.progress_bar.setVisible(busy)
-        for action in (
-            self.action_new,
-            self.action_youtube,
-            self.action_open,
-            self.recent_projects_menu.menuAction(),
-            self.action_import,
-            self.action_import_zip,
-            self.action_save,
-            self.action_save_as,
-            self.action_restore_previous,
-            self.action_analyze,
-            self.action_backing,
-            self.action_export,
-            self.action_add,
-            self.action_split,
-            self.action_combine,
-            self.action_delete,
-            self.action_duplicate,
-        ):
-            action.setEnabled(not busy)
-        self.editor_splitter.setEnabled(not busy)
+        self.action_export.setEnabled(not busy)
         self._update_combine_action()
 
     def _refresh_validation_label(self) -> None:
@@ -2714,6 +2712,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(
             f"{'*' if dirty else ''}{name} — Choicer Voicer Pack Creator"
         )
+        self.workspace.refresh_tabs()
 
     def _maybe_save(self) -> bool:
         if self._automation_disconnected:
@@ -2814,3 +2813,750 @@ class MainWindow(QMainWindow):
             self._clear_recovery_snapshot()
         diagnostic_event("window_close_accepted")
         event.accept()
+
+
+class MainWindow(QMainWindow):
+    """Application services and a tabbed collection of reusable document editors."""
+
+    editor_type = ProjectEditor
+
+    def __init__(
+        self,
+        media: MediaTools,
+        initial_path: Path | None = None,
+        *,
+        settings: QSettings | None = None,
+        recovery_store: RecoveryStore | None = None,
+        analysis_data_root: Path | None = None,
+    ) -> None:
+        super().__init__()
+        self._active_editor: ProjectEditor | None = None
+        self._automation_active = False
+        self._automation_disconnected = False
+        self.media = media
+        self.settings = settings or QSettings(
+            "ChoicerVoicerCommunity", "ChoicerVoicerPackCreator"
+        )
+        self.recovery_store = recovery_store
+        self.analysis_data_root = (
+            analysis_data_root.resolve() if analysis_data_root else
+            Path(QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.AppLocalDataLocation
+            )) / "analysis"
+        )
+        self.editors: dict[str, ProjectEditor] = {}
+        self.job_manager = JobManager(self, limits={
+            "cpu": 2 if (os.cpu_count() or 1) >= 4 else 1, "io": 2, "network": 2,
+        })
+        self._opening_paths: dict[str, str] = {}
+        self._save_targets: dict[str, str] = {}
+        self._save_jobs: dict[str, set[str]] = {}
+        self._restore_started = False
+        self.workspace_store = (
+            WorkspaceStore(recovery_store.path.parent / "workspace-v1.json")
+            if recovery_store else None
+        )
+        self.tabs = QTabWidget(self)
+        self.tabs.setObjectName("projectTabs")
+        self.tabs.setTabsClosable(True)
+        self.tabs.setMovable(True)
+        self.tabs.currentChanged.connect(self._tab_changed)
+        self.tabs.tabCloseRequested.connect(self.close_project_tab)
+        self.setCentralWidget(self.tabs)
+        self.setWindowTitle("Choicer Voicer Pack Creator")
+        self.resize(1500, 950)
+        self.setMinimumSize(1050, 680)
+        self._decisions: list[QMessageBox] = []
+        self._closing = False
+        self._close_approved = False
+        self._closed_ids: set[str] = set()
+        self._exit_discarded: set[str] = set()
+        self.tasks_panel = TasksPanel(self.job_manager, self)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.tasks_panel)
+        self.tasks_panel.hide()
+        editor = self.add_project(PackProject(authors=[getpass.getuser()]), dirty=False)
+        self._initial_editor_id = editor.session.id
+        self.updater = UpdateController(self, editor.help_menu)
+        if initial_path:
+            QTimer.singleShot(0, lambda: self.open_path(initial_path))
+        if recovery_store:
+            QTimer.singleShot(0, self.restore_workspace)
+
+    def __getattr__(self, name: str):
+        editor = self.__dict__.get("_active_editor")
+        if editor is not None:
+            return getattr(editor, name)
+        raise AttributeError(name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        # Compatibility for existing editor integrations; async code always keeps its editor.
+        editor = self.__dict__.get("_active_editor")
+        if (
+            editor is not None and name not in self.__dict__
+            and name not in {"updater", "job_manager", "tasks_panel"}
+            and not hasattr(type(self), name) and hasattr(editor, name)
+        ):
+            setattr(editor, name, value)
+        else:
+            super().__setattr__(name, value)
+
+    @property
+    def active_editor(self) -> ProjectEditor:
+        if self._active_editor is None:
+            raise RuntimeError("The workspace has no active project")
+        return self._active_editor
+
+    @property
+    def project_sessions(self) -> list[ProjectSession]:
+        return [editor.session for editor in self.editors.values()]
+
+    def editor_for_project(self, project_id: str) -> ProjectEditor:
+        return self.editors[project_id]
+
+    def menuBar(self) -> QMenuBar:  # noqa: N802
+        return self.active_editor.menuBar()
+
+    def statusBar(self) -> QStatusBar:  # noqa: N802
+        return self.active_editor.statusBar()
+
+    def add_project(
+        self, project: PackProject, path: Path | None = None, *,
+        dirty: bool = True, session_id: str | None = None, focus: bool = True,
+    ) -> ProjectEditor:
+        if path is not None:
+            for existing in self.editors.values():
+                if existing.project_path is not None and (
+                    canonical_project_path(existing.project_path) == canonical_project_path(path)
+                ):
+                    self.focus_project(existing.session.id)
+                    return existing
+        session = ProjectSession(project, path=path)
+        if session_id is not None:
+            session.id = session_id
+        editor = self.editor_type(
+            self.media, settings=self.settings,
+            recovery_store=self.recovery_store.for_session(session.id) if self.recovery_store else None,
+            analysis_data_root=self.analysis_data_root, workspace=self, session=session,
+        )
+        self.editors[session.id] = editor
+        index = self.tabs.addTab(editor, project.title)
+        editor._set_dirty(dirty)
+        if focus:
+            self.tabs.setCurrentIndex(index)
+        initial_id = self.__dict__.get("_initial_editor_id")
+        initial = self.editors.get(initial_id)
+        if (
+            initial is not None and initial is not editor and not initial.dirty
+            and initial.project_path is None and not initial.project.video_path
+            and not initial.project.segments and initial.project.title == "Untitled Dub Pack"
+            and not self.job_manager.active_jobs(initial_id)
+        ):
+            self.tabs.removeTab(self.tabs.indexOf(initial))
+            self.editors.pop(initial_id)
+            initial.deleteLater()
+            self._initial_editor_id = None
+        self.refresh_tabs()
+        return editor
+
+    def focus_project(self, project_id: str) -> None:
+        editor = self.editor_for_project(project_id)
+        self._closed_ids.discard(project_id)
+        if self.tabs.indexOf(editor) < 0:
+            editor.session.hidden = False
+            self.tabs.addTab(editor, editor.project.title)
+        self.tabs.setCurrentWidget(editor)
+
+    def _tab_changed(self, index: int) -> None:
+        previous = self._active_editor
+        current = self.tabs.widget(index)
+        if previous is not None and previous is not current:
+            previous._commit_editors()
+            previous._cancel_stopped_seek(restore_audio=True)
+            previous.player.pause()
+            previous.prompt_player.stop()
+        self._active_editor = current if isinstance(current, ProjectEditor) else None
+        if "tasks_panel" in self.__dict__:
+            self.tasks_panel.project_id = current.session.id if self._active_editor else None
+            self.tasks_panel.refresh()
+        self.refresh_tabs()
+
+    def refresh_tabs(self) -> None:
+        for editor in self.editors.values():
+            index = self.tabs.indexOf(editor)
+            if index >= 0:
+                label = editor.project.title or "Untitled Dub Pack"
+                active = self.job_manager.active_jobs(editor.session.id)
+                suffix = " [working]" if active else ""
+                if editor.session.attention:
+                    suffix += " [!]"
+                self.tabs.setTabText(index, f"{'* ' if editor.dirty else ''}{label}{suffix}")
+                self.tabs.setTabToolTip(index, str(editor.project_path or "Unsaved project"))
+        if self._active_editor is not None:
+            self.setWindowTitle(self._active_editor.windowTitle())
+
+    def open_path(self, path: Path) -> None:
+        path = path.resolve()
+        key = canonical_project_path(path)
+        if key in self._opening_paths:
+            self.focus_project(self._opening_paths[key])
+            return
+        for editor in self.editors.values():
+            if editor.project_path is not None and (
+                canonical_project_path(editor.project_path) == canonical_project_path(path)
+            ):
+                self.focus_project(editor.session.id)
+                editor._remember_recent_project(editor.project_path)
+                return
+        editor = self.add_project(PackProject(title=path.stem), dirty=False)
+        self._opening_paths[key] = editor.session.id
+        editor.editor_splitter.setEnabled(False)
+
+        def load(_context):
+            if path.is_dir():
+                result = editor.importer.import_folder(path)
+                return result.project, None, True, result.warnings, None
+            if path.suffix.casefold() == ".zip":
+                result = editor.importer.import_zip(
+                    path, self.analysis_data_root.parent / "imported-packs"
+                )
+                return result.project, None, True, result.warnings, None
+            return ProjectStore.load(path), path, False, [], sha256(path)
+
+        def complete(value):
+            project, project_path, dirty, warnings, saved_hash = value
+            editor._set_project(project, project_path, mark_dirty=dirty)
+            editor._saved_project_hash = saved_hash
+            if project_path is not None:
+                editor._remember_recent_project(project_path)
+            self.settings.setValue("lastProjectDir", str(path.parent))
+            if warnings:
+                editor.session.attention = "\n".join(warnings)
+                editor.statusBar().showMessage(editor.session.attention)
+
+        def failed(message: str) -> None:
+            editor.session.attention = message
+            self.notice("Could not open project", message)
+            if path.suffix.casefold() == ".json":
+                self.offer_previous_save(editor, path, message)
+
+        job = self.job_manager.submit(
+            editor.session.id, "open", f"Opening {path.name}", load,
+            resource_class="io", read_paths=(path,),
+        )
+        job.completed.connect(complete)
+        job.failed.connect(failed)
+        job.finished.connect(lambda: self._opening_paths.pop(key, None))
+        job.finished.connect(lambda: editor.editor_splitter.setEnabled(True))
+
+    def new_from_video(self, source: Path | None = None, *, auto_process: bool = True) -> None:
+        source = source or self.active_editor._choose_new_video()
+        if source is None:
+            return
+        source = source.resolve()
+        self.settings.setValue("lastVideoDir", str(source.parent))
+        editor = self.add_project(PackProject(
+            title=source.stem, authors=[getpass.getuser()],
+        ), dirty=False)
+        editor.editor_splitter.setEnabled(False)
+        token = editor.session.source_token()
+
+        def ready(info):
+            if token != editor.session.source_token():
+                return
+            editor._set_project(PackProject(
+                title=source.stem, authors=[getpass.getuser()],
+                video_path=str(source), video_duration=info.duration,
+            ), None, mark_dirty=True)
+            if auto_process:
+                QTimer.singleShot(0, lambda: editor._finish_new_import(editor.project))
+
+        job = self.job_manager.submit(
+            editor.session.id, "probe", f"Checking {source.name}",
+            lambda _ctx: self.media.probe(source), resource_class="io", read_paths=(source,),
+        )
+        job.completed.connect(ready)
+        job.failed.connect(lambda message: self.notice("Could not open video", message))
+        job.finished.connect(lambda: editor.editor_splitter.setEnabled(True))
+
+    def new_from_youtube(self) -> None:
+        editor = self.add_project(PackProject(title="YouTube import"), dirty=False)
+        editor._start_youtube_import()
+
+    def pause_other_previews(self, active: ProjectEditor) -> None:
+        for editor in self.editors.values():
+            if editor is not active:
+                editor._cancel_stopped_seek(restore_audio=True)
+                editor.player.pause()
+                editor.prompt_player.stop()
+
+    def cancel_source_jobs(self, project_id: str) -> None:
+        for job in self.job_manager.active_jobs(project_id):
+            if job.kind in {"waveform", "analysis", "refinement", "backing"}:
+                self.job_manager.cancel(job.id)
+
+    def notice(self, title: str, message: str) -> None:
+        box = QMessageBox(QMessageBox.Icon.Warning, title, message, parent=self)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        self._show_decision(box)
+
+    def _show_decision(self, box: QMessageBox) -> None:
+        self._decisions.append(box)
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        box.finished.connect(lambda _result: self._decisions.remove(box))
+        box.finished.connect(box.deleteLater)
+        box.show()
+
+    def save_editor(
+        self, editor: ProjectEditor, *, save_as: bool = False,
+        destination: Path | None = None, on_saved: Callable[[], None] | None = None,
+    ) -> bool:
+        editor._commit_editors()
+        destination = destination or (None if save_as else editor.project_path)
+        if destination is None:
+            filename, _ = QFileDialog.getSaveFileName(
+                self, "Save Pack Creator project",
+                str(Path(self.settings.value("lastProjectDir", str(Path.home())))
+                    / f"{editor.project.title}.cvpack.json"),
+                "Pack Creator projects (*.cvpack.json)",
+            )
+            if not filename:
+                return False
+            destination = Path(filename)
+            if not destination.name.casefold().endswith(".cvpack.json"):
+                destination = destination.with_name(destination.name + ".cvpack.json")
+        destination = destination.resolve()
+        key = canonical_project_path(destination)
+        owner = self._save_targets.get(key)
+        if owner is None:
+            owner = next((
+                other.session.id for other in self.editors.values()
+                if other is not editor and other.project_path is not None
+                and canonical_project_path(other.project_path) == key
+            ), None)
+        if owner is not None and owner != editor.session.id:
+            self.notice("Project is already open", "Choose another save path or use the existing tab.")
+            return False
+        self._save_targets[key] = editor.session.id
+        snapshot, revision = editor.session.snapshot(), editor.session.revision
+
+        def save(_context):
+            ProjectStore.save(snapshot, destination)
+            return sha256(destination)
+
+        def saved(saved_hash):
+            self.complete_project_save(editor.session.id, destination, revision, saved_hash)
+            if on_saved is not None:
+                on_saved()
+
+        job = self.job_manager.submit(
+            editor.session.id, "save", f"Saving {snapshot.title}", save,
+            resource_class="io", write_paths=(destination, ProjectStore.previous_path(destination)),
+            resource_keys=(f"document-save:{editor.session.id}",),
+            source_snapshot={"revision": revision},
+        )
+        job.completed.connect(saved)
+        def failed(message):
+            self._closing = False
+            self.updater.cancel_close_update()
+            self.notice("Could not save project", message)
+
+        def finished():
+            pending = self._save_jobs[key]
+            pending.discard(job.id)
+            if not pending:
+                self._save_jobs.pop(key)
+                self._save_targets.pop(key, None)
+        self._save_jobs.setdefault(key, set()).add(job.id)
+        job.failed.connect(failed)
+        job.finished.connect(finished)
+        return True
+
+    def complete_project_save(
+        self, project_id: str, destination: Path, revision: int, saved_hash: str,
+    ) -> None:
+        editor = self.editor_for_project(project_id)
+        editor.project_path = destination
+        editor._saved_project_hash = saved_hash
+        editor.session.saved_revision = revision
+        self.settings.setValue("lastProjectDir", str(destination.parent))
+        editor._remember_recent_project(destination)
+        if not editor.dirty:
+            editor._clear_recovery_snapshot()
+        else:
+            editor._write_recovery_snapshot()
+        editor.statusBar().showMessage(f"Saved revision {revision} to {destination}")
+        self.refresh_tabs()
+
+    def offer_previous_save(self, editor: ProjectEditor, path: Path, message: str = "") -> None:
+        previous = ProjectStore.previous_path(path)
+        job = self.job_manager.submit(
+            editor.session.id, "recovery", "Checking previous save",
+            lambda _ctx: ProjectStore.load(previous), resource_class="io", read_paths=(previous,),
+        )
+
+        def offer(project):
+            box = QMessageBox(
+                QMessageBox.Icon.Question, "Open previous save?",
+                f"{message}\n\nOpen the previous save in a separate unsaved tab? "
+                "Neither the current tab nor the saved file will be replaced.", parent=self,
+            )
+            box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+            box.finished.connect(
+                lambda result: self.add_project(project, dirty=True)
+                if result == QMessageBox.StandardButton.Yes else None
+            )
+            self._show_decision(box)
+        job.completed.connect(offer)
+        job.failed.connect(lambda error: editor.statusBar().showMessage(
+            f"No readable previous save: {error}"
+        ))
+
+    def _view_state(self, editor: ProjectEditor) -> dict:
+        return {
+            "selected_segment_id": editor.selected_segment_id,
+            "position": editor.current_position(),
+            "mark_in": editor.mark_in_spin.value(), "mark_out": editor.mark_out_spin.value(),
+            "zoom": editor.zoom_slider.value(),
+            "editor_sizes": editor.editor_splitter.sizes(),
+            "inspector_sizes": editor.inspector_splitter.sizes(),
+        }
+
+    @staticmethod
+    def _restore_view(editor: ProjectEditor, view: dict) -> None:
+        selected = view.get("selected_segment_id")
+        if selected and any(segment.id == selected for segment in editor.project.segments):
+            editor.select_segment(selected)
+        editor.mark_in_spin.setValue(float(view.get("mark_in", 0)))
+        editor.mark_out_spin.setValue(float(view.get("mark_out", 3)))
+        editor.zoom_slider.setValue(int(view.get("zoom", 10)))
+        editor.player.setPosition(round(float(view.get("position", 0)) * 1000))
+        for key, splitter in (
+            ("editor_sizes", editor.editor_splitter),
+            ("inspector_sizes", editor.inspector_splitter),
+        ):
+            if isinstance(view.get(key), list):
+                splitter.setSizes(view[key])
+
+    def save_workspace_state(self, on_saved: Callable[[], None] | None = None) -> None:
+        if self.workspace_store is None or self.recovery_store is None:
+            if on_saved is not None:
+                on_saved()
+            return
+        documents, snapshots = [], []
+        for editor in self.editors.values():
+            if editor.session.id in self._closed_ids:
+                continue
+            editor._commit_editors()
+            documents.append({
+                "id": editor.session.id,
+                "path": str(editor.project_path) if editor.project_path else "",
+                "hidden": editor.session.hidden, "view": self._view_state(editor),
+            })
+            if (
+                (editor.dirty or editor.project_path is None)
+                and editor.session.id not in self._exit_discarded
+            ):
+                snapshots.append((editor.recovery_store, editor.session.snapshot(), editor.project_path))
+        active_id = self._active_editor.session.id if self._active_editor else None
+        store = self.workspace_store
+        keys = tuple(f"document-save:{editor.session.id}" for editor in self.editors.values())
+
+        def persist(_context):
+            for recovery, snapshot, path in snapshots:
+                recovery.save(snapshot, path)
+            store.save(documents, active_id)
+
+        job = self.job_manager.submit(
+            None, "workspace", "Saving workspace", persist, resource_class="io",
+            resource_keys=keys + ("workspace-state",),
+            write_paths=(store.path, self.recovery_store.path.parent / "recovery"),
+        )
+        if on_saved is not None:
+            job.completed.connect(lambda _result: on_saved())
+        def failed(message):
+            self._closing = False
+            self.notice("Could not save workspace", message)
+        job.failed.connect(failed)
+
+    def restore_workspace(self) -> None:
+        if self._restore_started or self.workspace_store is None or self.recovery_store is None:
+            return
+        self._restore_started = True
+        store, root = self.workspace_store, self.recovery_store
+
+        def load(_context):
+            notices = []
+            try:
+                manifest = store.load()
+            except (OSError, ValueError, TypeError) as error:
+                notices.append(f"Workspace list could not be restored: {error}")
+                manifest = {"documents": [], "active_id": None}
+            documents = {item["id"]: item for item in manifest["documents"]}
+            recoveries = dict(root.session_records(notices))
+            restored = []
+            for identity in dict.fromkeys([*documents, *recoveries]):
+                item = documents.get(identity, {})
+                record = recoveries.get(identity)
+                if record is not None:
+                    changed = root.saved_project_changed(record)
+                    restored.append((
+                        identity, record.project,
+                        None if changed else record.project_path, True, item,
+                    ))
+                    if changed:
+                        notices.append(
+                            f"{record.project.title}: the saved file changed; recovery opened "
+                            "as a separate unsaved project. The newer saved file was not replaced."
+                        )
+                elif item.get("path"):
+                    path = Path(item["path"])
+                    try:
+                        restored.append((identity, ProjectStore.load(path), path, False, item))
+                    except (OSError, ValueError) as error:
+                        notices.append(f"Could not restore {path}: {error}")
+            try:
+                legacy = root.load()
+            except (OSError, ValueError, TypeError) as error:
+                notices.append(f"Legacy recovery was retained but could not be read: {error}")
+                legacy = None
+            return restored, notices, legacy, manifest.get("active_id")
+
+        def ready(value):
+            restored, notices, legacy, active_id = value
+            for identity, project, path, dirty, item in restored:
+                if identity in self.editors:
+                    continue
+                if path is not None:
+                    key = canonical_project_path(path)
+                    existing = key in self._opening_paths or any(
+                        editor.project_path is not None
+                        and canonical_project_path(editor.project_path) == key
+                        for editor in self.editors.values()
+                    )
+                    if existing:
+                        if not dirty:
+                            continue
+                        path = None
+                        notices.append(
+                            f"{project.title}: recovered edits opened as a separate unsaved tab "
+                            "because the saved project is already open."
+                        )
+                editor = self.add_project(
+                    project, path, dirty=dirty, session_id=identity, focus=False,
+                )
+                if item.get("hidden"):
+                    editor.session.hidden = True
+                    self.tabs.removeTab(self.tabs.indexOf(editor))
+                QTimer.singleShot(0, lambda editor=editor, item=item: self._restore_view(
+                    editor, item.get("view", {})
+                ))
+            if legacy is not None:
+                box = QMessageBox(
+                    QMessageBox.Icon.Question, "Recover previous workspace?",
+                    "A legacy automatic recovery snapshot was found. Open it in a separate tab? "
+                    "The snapshot will remain on disk until its new recovery copy is saved.", parent=self,
+                )
+                box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+
+                def migrate(result):
+                    if result != QMessageBox.StandardButton.Yes:
+                        return
+                    editor = self.add_project(legacy.project, dirty=True)
+                    snapshot, target = editor.session.snapshot(), editor.recovery_store
+
+                    def copy(_ctx):
+                        target.save(snapshot, None)
+                        root.clear()
+                    job = self.job_manager.submit(
+                        editor.session.id, "recovery", "Migrating recovered project", copy,
+                        resource_class="io", resource_keys=(f"document-save:{editor.session.id}",),
+                        write_paths=(root.path, target.path),
+                    )
+                    job.failed.connect(lambda error: self.notice("Recovery migration failed", error))
+                box.finished.connect(migrate)
+                self._show_decision(box)
+            if active_id in self.editors and not self.editors[active_id].session.hidden:
+                self.focus_project(active_id)
+            if notices:
+                self.notice("Workspace recovery notes", "\n\n".join(notices))
+            self.refresh_tabs()
+
+        job = self.job_manager.submit(
+            None, "workspace", "Restoring workspace", load, resource_class="io",
+            resource_keys=("workspace-state",),
+            read_paths=(store.path, root.path, root.path.parent / "recovery"),
+        )
+        job.completed.connect(ready)
+        job.failed.connect(lambda message: self.notice("Could not restore workspace", message))
+
+    def _hide_editor(self, editor: ProjectEditor, *, retain: bool) -> None:
+        editor._commit_editors()
+        editor._save_layout_state()
+        editor._cancel_stopped_seek(restore_audio=True)
+        editor.player.pause()
+        editor.prompt_player.stop()
+        if retain:
+            editor._write_recovery_snapshot()
+        else:
+            self._closed_ids.add(editor.session.id)
+        self.tabs.removeTab(self.tabs.indexOf(editor))
+        editor.session.hidden = True
+        if not self.tabs.count():
+            self.add_project(PackProject(authors=[getpass.getuser()]), dirty=False)
+        self.save_workspace_state()
+
+    def _decide_dirty(
+        self, editor: ProjectEditor, proceed: Callable[[], None], cancel: Callable[[], None],
+    ) -> None:
+        editor._commit_editors()
+        if not editor.dirty or editor.session.id in self._exit_discarded:
+            proceed()
+            return
+        box = QMessageBox(
+            QMessageBox.Icon.Question, f"Unsaved changes - {editor.project.title}",
+            "Save this project's changes before closing?", parent=self,
+        )
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel
+        )
+
+        def decided(result):
+            if result == QMessageBox.StandardButton.Discard:
+                self._exit_discarded.add(editor.session.id)
+                editor._clear_recovery_snapshot()
+                proceed()
+            elif result == QMessageBox.StandardButton.Save:
+                if not self.save_editor(editor, on_saved=lambda: self._decide_dirty(
+                    editor, proceed, cancel
+                )):
+                    cancel()
+            else:
+                cancel()
+        box.finished.connect(decided)
+        self._show_decision(box)
+
+    def close_project_tab(self, index: int) -> None:
+        editor = self.tabs.widget(index)
+        if not isinstance(editor, ProjectEditor):
+            return
+        jobs = [
+            job for job in self.job_manager.active_jobs(editor.session.id)
+            if job.kind not in {"save", "recovery"}
+        ]
+        if jobs:
+            box = QMessageBox(
+                QMessageBox.Icon.Question, "Close a project with running tasks?",
+                f"{editor.project.title} has {len(jobs)} queued or running task(s). "
+                "Keep processing retains the project and recovery data. "
+                "Tasks do not survive exiting the application.", parent=self,
+            )
+            keep = box.addButton("Keep processing", QMessageBox.ButtonRole.AcceptRole)
+            stop = box.addButton("Cancel tasks and close", QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton("Keep open", QMessageBox.ButtonRole.RejectRole)
+
+            def decide(_result):
+                if box.clickedButton() is keep:
+                    self._hide_editor(editor, retain=True)
+                elif box.clickedButton() is stop:
+                    for job in jobs:
+                        self.job_manager.cancel(job.id)
+                    self._decide_dirty(
+                        editor, lambda: self._hide_editor(editor, retain=False), lambda: None
+                    )
+            box.finished.connect(decide)
+            self._show_decision(box)
+            return
+        self._decide_dirty(
+            editor, lambda: self._hide_editor(editor, retain=False), lambda: None
+        )
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if self._close_approved:
+            for editor in self.editors.values():
+                editor._save_layout_state()
+                editor._reset_transport_state()
+                editor.player.stop()
+                editor.prompt_player.stop()
+                editor._recovery_timer.stop()
+            self.job_manager.shutdown(cancel=True, wait=False)
+            event.accept()
+            return
+        event.ignore()
+        if self._automation_active:
+            return
+        if self._closing:
+            return
+        if self._automation_disconnected:
+            self._closing = True
+            for job in self.job_manager.active_jobs():
+                if job.kind not in {"save", "recovery", "workspace"}:
+                    self.job_manager.cancel(job.id)
+            for editor in self.editors.values():
+                editor._recovery_timer.stop()
+                editor._write_recovery_snapshot()
+            self.save_workspace_state(self._finish_close)
+            return
+        if not self.updater.can_close():
+            return
+        active = [job for job in self.job_manager.active_jobs() if job.kind not in {
+            "save", "recovery", "workspace"
+        }]
+        if active:
+            box = QMessageBox(
+                QMessageBox.Icon.Question, "Tasks are still running",
+                f"{len(active)} task(s) are queued or running across the workspace. "
+                "Cancel them and exit once they stop? Processing cannot continue after exit.",
+                parent=self,
+            )
+            box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+            self._closing = True
+
+            def stop(result):
+                self._closing = False
+                if result == QMessageBox.StandardButton.Yes:
+                    for job in active:
+                        self.job_manager.cancel(job.id)
+                    self._wait_to_close()
+            box.finished.connect(stop)
+            self._show_decision(box)
+            return
+        self._closing = True
+        editors = [
+            editor for editor in self.editors.values() if editor.session.id not in self._closed_ids
+        ]
+
+        def cancel():
+            self._closing = False
+            self._exit_discarded.clear()
+            self.updater.cancel_close_update()
+
+        def next_editor():
+            if editors:
+                self._decide_dirty(editors.pop(0), next_editor, cancel)
+            else:
+                for editor in self.editors.values():
+                    editor._recovery_timer.stop()
+                self.save_workspace_state(self._finish_close)
+        next_editor()
+        if self._close_approved:
+            event.accept()
+
+    def _wait_to_close(self) -> None:
+        if self.job_manager.active_jobs():
+            QTimer.singleShot(50, self._wait_to_close)
+        else:
+            self.close()
+
+    def _finish_close(self) -> None:
+        if self.job_manager.active_jobs():
+            QTimer.singleShot(50, self._finish_close)
+            return
+        if not self.updater.install_on_close():
+            self._closing = False
+            return
+        for editor in self.editors.values():
+            editor._save_layout_state()
+        self._close_approved = True
+        self._closing = False
+        QTimer.singleShot(0, self.close)

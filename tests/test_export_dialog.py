@@ -155,7 +155,9 @@ def test_main_window_opens_popup_and_retires_worker_only_after_finished(
         qtbot.waitUntil(lambda: dialog.progress_label.text().startswith("Prompt 1/1"))
         assert dialog.isVisible()
         assert not window.action_export.isEnabled()
-        assert not window.editor_splitter.isEnabled()
+        assert window.editor_splitter.isEnabled()
+        assert window.action_save.isEnabled()
+        assert dialog.windowModality() == Qt.WindowModality.NonModal
         assert calls[0] is not window.project
         assert calls[0].to_dict() == window.project.to_dict()
         window.export_pack()
@@ -164,9 +166,9 @@ def test_main_window_opens_popup_and_retires_worker_only_after_finished(
         qtbot.waitUntil(lambda: dialog.progress_bar.maximum() == 1)
         assert window._export_worker is not None
         assert not window.action_export.isEnabled()
-        assert not dialog.close_button.isEnabled()
+        assert dialog.close_button.isEnabled()
         dialog.close()
-        assert dialog.isVisible()
+        assert not dialog.isVisible()
         if outcome == "success":
             assert str(tmp_path / "Pack.zip") in dialog.details.toPlainText()
             assert window.statusBar().currentMessage() == "Exported Pack"
@@ -181,10 +183,11 @@ def test_main_window_opens_popup_and_retires_worker_only_after_finished(
         allow_result.set()
         allow_finish.set()
         qtbot.waitUntil(lambda: window._export_worker is None)
-        assert dialog.isVisible()
+        assert not dialog.isVisible()
         assert dialog.close_button.isEnabled()
         assert window.action_export.isEnabled()
         assert window.editor_splitter.isEnabled()
+        dialog.show()
         qtbot.mouseClick(dialog.close_button, Qt.MouseButton.LeftButton)
         assert window._export_dialog is None
         window.dirty = False
