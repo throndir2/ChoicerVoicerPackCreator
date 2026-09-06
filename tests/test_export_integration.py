@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -44,7 +45,7 @@ def test_caption_handles_retain_source_audio_outside_subtitle_window(tmp_path: P
 
 
 @pytest.mark.integration
-def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
+def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> None:
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         pytest.skip("FFmpeg is not available")
     media = MediaTools()
@@ -90,7 +91,10 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
     )
 
     updates = []
-    result = PackExporter(media).export(project, tmp_path / "output", progress=updates.append)
+    cache_root = tmp_path / "receipts"
+    result = PackExporter(media, cache_root=cache_root).export(
+        project, tmp_path / "output", progress=updates.append,
+    )
     messages = [update.message for update in updates]
     assert messages[0] == "Inspecting source video and audio..."
     assert any("Converting full video" in message for message in messages)
@@ -118,16 +122,24 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
             assert f"{phase}: prompt {index}/2: checking and decoding audio" in messages
             assert f"{phase}: prompt {index}/2: checking and decoding still image" in messages
     assert "Hashing staged file 10/10..." in messages
-    assert "Creating ZIP: compressing file 10/10..." in messages
+    assert "Creating ZIP: adding file 10/10..." in messages
     assert "Verifying published file 10/10..." in messages
     assert "Testing staged ZIP integrity and file inventory..." in messages
     assert "Testing published ZIP integrity and file inventory..." in messages
     assert messages.index("Hashing staged file 10/10...") < messages.index(
-        "Creating ZIP: compressing file 1/10..."
+        "Creating ZIP: adding file 1/10..."
     ) < messages.index("Verifying published file 1/10...")
     assert messages[-1] == "Cleaning up export staging files..."
     assert result.pack_path.is_dir()
     assert result.zip_path and result.zip_path.is_file()
+    with zipfile.ZipFile(result.zip_path) as archive:
+        for entry in archive.infolist():
+            suffix = Path(entry.filename).suffix
+            assert entry.compress_type == (
+                zipfile.ZIP_STORED if suffix in {".ogv", ".mp3", ".png"}
+                else zipfile.ZIP_DEFLATED
+            )
+            assert archive.read(entry) == (result.pack_path / Path(entry.filename).name).read_bytes()
     assert result.validation["status"] == "passed"
     assert result.validation["clip_count"] == 2
     assert result.validation["file_count"] == 10
@@ -136,6 +148,15 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
     metadata = read_config(result.pack_path / "001_Alice.txt")["data"]
     assert metadata["dub_timestamps"] == [0.1]
     assert metadata["caption"] == "First line"
+
+    with monkeypatch.context() as patch:
+        def unexpected_conversion(*args, **kwargs):
+            raise AssertionError("Unchanged video should be reused across exporter instances")
+
+        patch.setattr(media, "convert_video", unexpected_conversion)
+        repeated = PackExporter(media, cache_root=cache_root).export(project, tmp_path / "output")
+    assert repeated.validation == result.validation
+    assert repeated.file_hashes == result.file_hashes
 
     original_duration = media.probe_audio_duration(result.pack_path / "001_Alice.mp3")
     project.title = "Retimed Integration Pack"
@@ -167,7 +188,7 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
     messages = [update.message for update in updates]
     assert any("Preserving existing Ogg video" in message for message in messages)
     assert any("Preparing prompt audio\nPrompt 1/2 - Alice" in message for message in messages)
-    assert not any("compressing file" in message for message in messages)
+    assert not any("Creating ZIP" in message for message in messages)
     plan = next(update.plan for update in updates if update.plan)
     assert not any(step.kind in {"video-encode", "zip", "zip-check"} for step in plan)
     assert list(dict.fromkeys(update.step for update in updates if update.step)) == [
@@ -206,6 +227,32 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
     assert combined_metadata["dub_timestamps"] == [0.1]
     combined_duration = media.probe_audio_duration(combined.pack_path / "001_Alice.mp3")
     assert combined_duration == pytest.approx(1.55 - 0.2 + 0.1 + 0.15, abs=0.05)
+
+
+@pytest.mark.integration
+def test_default_export_encodes_480p_and_higher_quality_remains_opt_in(tmp_path: Path) -> None:
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg is not available")
+    media = MediaTools()
+    source = tmp_path / "source.mp4"
+    media.run([
+        media.ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
+        "testsrc2=s=960x540:r=30:d=1.5", "-f", "lavfi", "-i",
+        "sine=frequency=440:sample_rate=48000:duration=1.5",
+        "-shortest", "-c:v", "mpeg4", "-c:a", "aac", str(source),
+    ], "Creating export quality fixture")
+    project = PackProject(
+        title="Quality", authors=["Tester"], video_path=str(source),
+        segments=[Segment(0.3, 1.0, "Synthetic line", ["Tester"])],
+    )
+    exporter = PackExporter(media, cache_root=tmp_path / "receipts")
+    fast = exporter.export(project, tmp_path / "output", create_zip=False)
+    assert fast.validation["video"]["height"] == 480
+    assert fast.validation["video"]["fps"] == 30
+    project.video_height = 540
+    high = exporter.export(project, tmp_path / "output", create_zip=False)
+    assert high.validation["video"]["height"] == 540
+    assert fast.file_hashes["dub_video.ogv"] != high.file_hashes["dub_video.ogv"]
 
 
 @pytest.mark.integration

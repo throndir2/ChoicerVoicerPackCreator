@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 AudioMode = Literal["video", "file"]
+DEFAULT_VIDEO_HEIGHT = 480
+DEFAULT_VIDEO_FPS = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,8 +235,8 @@ class PackProject:
     segments: list[Segment] = field(default_factory=list)
     head_padding: float = 0.15
     tail_padding: float = 0.25
-    video_height: int = 720
-    video_fps: int = 30
+    video_height: int = DEFAULT_VIDEO_HEIGHT
+    video_fps: int = DEFAULT_VIDEO_FPS
     source_pack_path: str = ""
     preserve_source_video: bool = False
     import_warnings: list[str] = field(default_factory=list)
@@ -428,8 +430,8 @@ class PackProject:
             icon_path=str(value.get("icon_path", "")),
             head_padding=float(value.get("head_padding", 0.15)),
             tail_padding=float(value.get("tail_padding", 0.25)),
-            video_height=int(value.get("video_height", 720)),
-            video_fps=int(value.get("video_fps", 30)),
+            video_height=int(value.get("video_height", DEFAULT_VIDEO_HEIGHT)),
+            video_fps=int(value.get("video_fps", DEFAULT_VIDEO_FPS)),
             source_pack_path=str(value.get("source_pack_path", "")),
             preserve_source_video=bool(value.get("preserve_source_video", False)),
             import_warnings=[str(item) for item in import_warnings if str(item).strip()],

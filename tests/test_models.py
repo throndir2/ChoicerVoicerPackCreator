@@ -14,6 +14,22 @@ from choicer_voicer_pack_creator.models import (
 )
 
 
+def test_new_projects_default_to_fast_video_profile() -> None:
+    project = PackProject()
+    assert (project.video_height, project.video_fps) == (480, 30)
+    data = project.to_dict()
+    del data["video_height"]
+    del data["video_fps"]
+    restored = PackProject.from_dict(data)
+    assert (restored.video_height, restored.video_fps) == (480, 30)
+
+
+def test_saved_higher_quality_profile_is_preserved() -> None:
+    project = PackProject(video_height=1080, video_fps=60)
+    restored = PackProject.from_dict(project.to_dict())
+    assert (restored.video_height, restored.video_fps) == (1080, 60)
+
+
 def test_project_sorts_segments_and_preserves_speaker_order(tmp_path: Path) -> None:
     video = tmp_path / "source.mp4"
     video.write_bytes(b"video")

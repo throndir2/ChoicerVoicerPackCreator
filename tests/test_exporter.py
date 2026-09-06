@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from choicer_voicer_pack_creator.exporter import safe_name
+from choicer_voicer_pack_creator.exporter import PackExporter, safe_name
+from choicer_voicer_pack_creator.models import Segment
 
 
 @pytest.mark.parametrize(
@@ -54,3 +55,25 @@ def test_safe_name_produces_writable_names_without_losing_valid_text(
 
 def test_safe_name_preserves_custom_fallback() -> None:
     assert safe_name("???", fallback="YouTube video") == "YouTube video"
+
+
+def test_generated_still_is_sought_and_resized_in_one_operation(tmp_path: Path) -> None:
+    calls = []
+
+    class Media:
+        def extract_frame(self, source, timestamp, destination, *, size):
+            calls.append((source, timestamp, destination, size))
+            destination.write_bytes(b"resized image")
+
+    exporter = PackExporter(Media())  # type: ignore[arg-type]
+    source = tmp_path / "video.mp4"
+    destination = tmp_path / "prompt.png"
+    exporter._write_image(Segment(40, 42), source, destination, 854, 480)
+    assert calls == [(source, 41, destination, (854, 480))]
+    assert destination.read_bytes() == b"resized image"
+    assert list(tmp_path.iterdir()) == [destination]
+
+
+def test_invalid_prompt_worker_count_is_rejected() -> None:
+    with pytest.raises(ValueError, match="worker count"):
+        PackExporter(object(), prompt_workers=0)  # type: ignore[arg-type]
