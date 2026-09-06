@@ -271,8 +271,10 @@ requested; it never opens automatically or takes space from the editor. Filter i
 or the current project, inspect stage progress and elapsed time, cancel supported work, reopen
 review/details, or open a successful output. Closing the Tasks window does not stop processing.
 CPU, I/O, and network budgets bound concurrent work; jobs sharing output files or inference
-components wait rather than overwrite each other. You can edit or save another project while a
-pack exports, a source opens, or analysis runs.
+components wait rather than overwrite each other. Whisper and backing separation use independent
+inference slots and can run together when the CPU budget permits (four or more logical CPUs).
+Only one job per inference engine runs at a time across projects. You can edit or save another
+project while a pack exports, a source opens, or analysis runs.
 
 **Retry** is enabled for failed/canceled analysis, refinement, YouTube imports, exports, and failed
 backing generation when the originating document/source and review are still current. Analysis
@@ -643,8 +645,13 @@ Use **Duplicate Segment** to create a second prompt at exactly the same timestam
 
 For newly cut segments, prompt audio comes from the source video. The exporter normalizes it and adds 150 ms head / 250 ms tail padding by default; both values are editable. Imported or manually chosen prompt files are preserved when already MP3 and converted otherwise.
 
-**New from Video** and **New from YouTube** automatically generate music/effects backing before
-starting transcript analysis. The first run asks permission to download a pinned, checksum-verified
+**New from Video** and **New from YouTube** automatically generate music/effects backing alongside
+transcript analysis, without opening a separate backing-generation popup. The analysis review's
+transcript selection does not control backing generation: choosing a transcript, canceling a scan,
+or closing the review leaves backing running independently. **Tools > Tasks** retains each job's
+progress and error log and offers explicit cancellation, retry, and details, even after the
+transcript review is closed.
+The first run asks permission to download a pinned, checksum-verified
 HT-Demucs model (approximately 302 MiB). Processing runs locally on the CPU; audio is never uploaded.
 The verified model is retained for offline reuse. Missing or damaged model data requires download
 permission again.
