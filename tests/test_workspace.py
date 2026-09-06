@@ -4,6 +4,7 @@ import threading
 
 import pytest
 from PySide6.QtCore import QSettings, Qt, QThread, Signal
+from PySide6.QtWidgets import QFileDialog
 
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.operations import OperationCancelled
@@ -198,7 +199,7 @@ def test_per_document_recovery_and_workspace_restore(qtbot, tmp_path):
         for editor in current.editors.values():
             editor._recovery_timer.stop()
             editor.dirty = False
-        qtbot.waitUntil(lambda: not current.job_manager.active_jobs())
+        qtbot.waitUntil(lambda current=current: not current.job_manager.active_jobs())
         current.close()
 
 
@@ -228,3 +229,84 @@ def test_managed_worker_cancellation_is_terminal_on_gui_thread(workspace, qtbot)
     assert threads == [workspace.thread()]
     assert not worker.isRunning()
     assert worker.wait(0)
+
+
+@pytest.mark.integration
+def test_visible_tabs_remain_usable_during_real_ffmpeg_export(qtbot, tmp_path, monkeypatch):
+    from choicer_voicer_pack_creator.export_progress import ExportProgress
+    from choicer_voicer_pack_creator.exporter import PackExporter
+    from choicer_voicer_pack_creator.media import MediaTools
+
+    media = MediaTools()
+    video, backing = tmp_path / "synthetic.mp4", tmp_path / "backing.wav"
+    media.run([
+        media.ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=320x240:r=24",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+        "-t", "3", "-c:v", "mpeg4", "-c:a", "aac", str(video),
+    ], "Creating synthetic workspace fixture")
+    media.run([
+        media.ffmpeg, "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+        "-t", "3", str(backing),
+    ], "Creating synthetic backing fixture")
+    window = MainWindow(
+        media, settings=QSettings(str(tmp_path / "native.ini"), QSettings.Format.IniFormat),
+        analysis_data_root=tmp_path / "analysis",
+    )
+    qtbot.addWidget(window)
+    window.show()
+    a = window.active_editor
+    a._set_project(PackProject(
+        title="Synthetic A", authors=["Synthetic fixture"],
+        video_path=str(video), video_duration=3, backing_track_path=str(backing),
+        video_height=240, video_fps=24, segments=[Segment(0.4, 1.3, "Synthetic line", ["Actor"])],
+    ), None, True)
+    qtbot.waitUntil(lambda: not window.job_manager.active_jobs(), timeout=10000)
+    released = threading.Event()
+    exporter = PackExporter(media)
+
+    class HeldExporter:
+        def export(self, project, destination, *, create_zip, progress):
+            progress(ExportProgress("Ready for concurrent workspace interaction"))
+            assert released.wait(10)
+            return exporter.export(project, destination, create_zip=create_zip, progress=progress)
+
+    a.exporter = HeldExporter()
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *_args: str(tmp_path))
+    a.action_export.trigger()
+    qtbot.waitUntil(lambda: a._export_worker is not None and any(
+        record.kind == "export" and record.state == "running"
+        for record in window.job_manager.tasks(a.session.id)
+    ))
+    b = window.add_project(PackProject(title="B", authors=["Synthetic fixture"]), dirty=False)
+    b.title_edit.selectAll()
+    qtbot.keyClicks(b.title_edit, "Editable while A exports")
+    saved = tmp_path / "B.cvpack.json"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(saved), ""))
+    b.action_save.trigger()
+    qtbot.waitUntil(lambda: not b.dirty and saved.is_file())
+    c = tmp_path / "C.cvpack.json"
+    ProjectStore.save(PackProject(title="Opened C", authors=["Synthetic fixture"]), c)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(c), ""))
+    b.action_open.trigger()
+    qtbot.waitUntil(lambda: window.active_editor.project.title == "Opened C")
+    bar = window.tabs.tabBar()
+    qtbot.mouseClick(bar, Qt.MouseButton.LeftButton, pos=bar.tabRect(window.tabs.indexOf(a)).center())
+    assert window.active_editor is a
+    a._export_dialog.close()
+    assert not a._export_dialog.isVisible()
+    assert a._export_worker.isRunning()
+    qtbot.mouseClick(bar, Qt.MouseButton.LeftButton, pos=bar.tabRect(window.tabs.indexOf(b)).center())
+    assert window.active_editor is b
+    assert b.title_edit.text() == "Editable while A exports"
+    assert window.grab().save(str(tmp_path / "workspace-during-export.png"))
+    released.set()
+    qtbot.waitUntil(lambda: a._export_worker is None, timeout=60000)
+    exported = next(record for record in window.job_manager.tasks(a.session.id) if record.kind == "export")
+    assert exported.state == "succeeded", exported.error
+    assert exported.result.pack_path.is_dir()
+    assert exported.result.zip_path.is_file()
+    assert window.active_editor is b
+    for editor in window.editors.values():
+        editor.dirty = False
+    window.close()
+    qtbot.waitUntil(lambda: not window.isVisible())

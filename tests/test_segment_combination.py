@@ -97,6 +97,7 @@ def test_combine_button_joins_selected_rows_and_updates_editor_and_saved_project
     assert not window.action_combine.isEnabled()
     window.project_path = tmp_path / "combined.cvpack.json"
     assert window.save_project()
+    qtbot.waitUntil(lambda: not window.dirty)
     assert ProjectStore.load(window.project_path).to_dict() == window.project.to_dict()
 
 
@@ -128,8 +129,8 @@ def test_multiselection_survives_refresh_and_busy_state_without_editing(window, 
     assert not window.speakers_edit.isEnabled()
     assert "2 segments selected" in window.segment_audio_help.text()
     window._set_busy(True, "Exporting")
-    assert not window.action_combine.isEnabled()
-    assert not window.combine_button.isEnabled()
+    assert window.action_combine.isEnabled()
+    assert window.combine_button.isEnabled()
     window._set_busy(False, "Ready")
     assert window.action_combine.isEnabled()
     assert window.combine_button.isEnabled()

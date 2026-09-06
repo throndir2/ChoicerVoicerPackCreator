@@ -298,6 +298,7 @@ class ProjectEditor(QWidget):
         self.action_import_zip = QAction("Import Pack ZIP...", self)
         self.action_import_zip.triggered.connect(self.import_pack_zip)
         self.action_save = QAction("Save Project", self)
+        self.action_save.setObjectName("saveProject")
         self.action_save.setShortcut(QKeySequence.StandardKey.Save)
         self.action_save.triggered.connect(self.save_project)
         self.action_save_as = QAction("Save Project As…", self)
@@ -306,11 +307,13 @@ class ProjectEditor(QWidget):
         self.action_restore_previous = QAction("Restore Previous Save…", self)
         self.action_restore_previous.triggered.connect(self.restore_previous_save)
         self.action_export = QAction("Export Pack + ZIP…", self)
+        self.action_export.setObjectName("exportProject")
         self.action_export.setShortcut(QKeySequence("Ctrl+E"))
         self.action_export.triggered.connect(self.export_pack)
         self.action_exit = QAction("Exit", self)
         self.action_exit.triggered.connect(self.workspace.close)
         self.action_analyze = QAction("Analyze Video && Suggest Segments…", self)
+        self.action_analyze.setObjectName("analyzeProject")
         self.action_analyze.setShortcut(QKeySequence("Ctrl+Shift+R"))
         self.action_analyze.triggered.connect(lambda: self.open_analysis_dialog())
         self.action_backing = QAction("Generate Backing Track...", self)
@@ -526,6 +529,7 @@ class ProjectEditor(QWidget):
         project_content = QWidget(self.project_section)
         project_form = QFormLayout(project_content)
         self.title_edit = QLineEdit()
+        self.title_edit.setObjectName("projectTitle")
         self.title_edit.editingFinished.connect(self._pack_details_changed)
         self.title_edit.textEdited.connect(self._pack_details_changed)
         project_form.addRow("Title", self.title_edit)
@@ -594,6 +598,7 @@ class ProjectEditor(QWidget):
         segment_layout = QVBoxLayout(segment_content)
         segment_layout.setContentsMargins(0, 0, 0, 0)
         self.segment_table = QTableWidget(0, 6)
+        self.segment_table.setObjectName("segmentsTable")
         self.segment_table.setHorizontalHeaderLabels(
             ["#", "In", "Out", "Speaker(s)", "Line", "Audio"]
         )
@@ -648,6 +653,7 @@ class ProjectEditor(QWidget):
         self.speakers_edit.textEdited.connect(self._selected_speakers_typed)
         editor_form.addRow("Speaker(s)", self.speakers_edit)
         self.caption_edit = QPlainTextEdit()
+        self.caption_edit.setObjectName("segmentCaption")
         self.caption_edit.setPlaceholderText("The exact line the player should perform…")
         self.caption_edit.setMaximumHeight(78)
         self.caption_edit.textChanged.connect(self._selected_caption_changed)
@@ -1118,15 +1124,15 @@ class ProjectEditor(QWidget):
         self._analysis_dialog = dialog
         dialog.suggestions_accepted.connect(
             lambda value: self._add_analysis_suggestions(value)
-            if token == self.session.source_token() else None
+            if token == self.session.source_token() and self._analysis_dialog is dialog else None
         )
         dialog.preview_requested.connect(
             lambda start, end: self._preview_analysis_range(start, end)
-            if token == self.session.source_token() else None
+            if token == self.session.source_token() and self._analysis_dialog is dialog else None
         )
         dialog.review_changed.connect(
             lambda value: self._save_analysis_review(value)
-            if token == self.session.source_token() else None
+            if token == self.session.source_token() and self._analysis_dialog is dialog else None
         )
         dialog.setWindowModality(Qt.WindowModality.NonModal)
         dialog.show()
@@ -1261,6 +1267,13 @@ class ProjectEditor(QWidget):
             self.project.video_path == project.video_path
             and self.project.video_duration == project.video_duration
         )
+        if project.backing_track_path != self.project.backing_track_path:
+            self.session.backing_revision += 1
+        if project.analysis_review != self.project.analysis_review:
+            self.session.draft_revision += 1
+            if self._analysis_dialog is not None:
+                self._analysis_dialog.hide()
+                self._analysis_dialog = None
         if not preserve_view:
             self.session.source_revision += 1
             if self._analysis_dialog is not None:
@@ -3052,16 +3065,7 @@ class MainWindow(QMainWindow):
             return sha256(destination)
 
         def saved(saved_hash):
-            editor.project_path = destination
-            editor._saved_project_hash = saved_hash
-            editor.session.saved_revision = revision
-            self.settings.setValue("lastProjectDir", str(destination.parent))
-            if not editor.dirty:
-                editor._clear_recovery_snapshot()
-            else:
-                editor._write_recovery_snapshot()
-            editor.statusBar().showMessage(f"Saved revision {revision} to {destination}")
-            self.refresh_tabs()
+            self.complete_project_save(editor.session.id, destination, revision, saved_hash)
             if on_saved is not None:
                 on_saved()
 
@@ -3086,6 +3090,21 @@ class MainWindow(QMainWindow):
         job.failed.connect(failed)
         job.finished.connect(finished)
         return True
+
+    def complete_project_save(
+        self, project_id: str, destination: Path, revision: int, saved_hash: str,
+    ) -> None:
+        editor = self.editor_for_project(project_id)
+        editor.project_path = destination
+        editor._saved_project_hash = saved_hash
+        editor.session.saved_revision = revision
+        self.settings.setValue("lastProjectDir", str(destination.parent))
+        if not editor.dirty:
+            editor._clear_recovery_snapshot()
+        else:
+            editor._write_recovery_snapshot()
+        editor.statusBar().showMessage(f"Saved revision {revision} to {destination}")
+        self.refresh_tabs()
 
     def offer_previous_save(self, editor: ProjectEditor, path: Path, message: str = "") -> None:
         previous = ProjectStore.previous_path(path)
@@ -3414,6 +3433,7 @@ class MainWindow(QMainWindow):
         def cancel():
             self._closing = False
             self._exit_discarded.clear()
+            self.updater.cancel_close_update()
 
         def next_editor():
             if editors:

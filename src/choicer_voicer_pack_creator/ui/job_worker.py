@@ -61,7 +61,9 @@ class JobWorker(QThread):
             context.report(update.message, update.fraction, detail=update)
         elif len(values) == 2:
             message, value = values
-            fraction = None if value is None or float(value) < 0 else float(value) / 1000
+            fraction = None if value is None or float(value) < 0 else (
+                float(value) if isinstance(value, float) else float(value) / 1000
+            )
             context.report(str(message), fraction)
 
     def _capture_error(self, message: str) -> None:
