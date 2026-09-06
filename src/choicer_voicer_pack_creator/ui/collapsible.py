@@ -62,6 +62,7 @@ class CollapsibleSection(QFrame):
         scroll.setObjectName("sectionScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setMinimumHeight(max(120, widget.fontMetrics().height() * 5))
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(widget)
         self.body_layout.addWidget(scroll, 1)

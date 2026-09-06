@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QSettings, Qt, QThread, Signal
-from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox, QScrollArea
 from shiboken6 import isValid
 
 from choicer_voicer_pack_creator.models import PackProject, Segment
@@ -127,17 +127,55 @@ def test_fresh_native_layout_keeps_task_and_segment_rows_clickable(workspace, qt
         )
         item = table.item(table.rowCount() - 1, 0)
         table.scrollToItem(item)
+        if table is editor.segment_table:
+            editor.editor_scroll.ensureWidgetVisible(table)
+            QApplication.processEvents()
         rectangle = table.visualItemRect(item)
         assert table.viewport().rect().contains(rectangle.center())
+        assert table.viewport().visibleRegion().contains(rectangle.center()), (
+            table.objectName(), table.viewport().visibleRegion().boundingRect(), rectangle,
+        )
         qtbot.mouseClick(table.viewport(), Qt.MouseButton.LeftButton, pos=rectangle.center())
         assert table.currentRow() == table.rowCount() - 1
     assert workspace.tasks_panel.detail_button.isEnabled()
+    assert workspace.tasks_panel.details.visibleRegion().boundingRect().height() >= 32, (
+        workspace.tasks_panel.geometry(), workspace.tasks_panel.minimumSizeHint(),
+        workspace.tasks_panel.widget().geometry(), workspace.tasks_panel.widget().minimumSizeHint(),
+        workspace.tasks_panel.table.geometry(), workspace.tasks_panel.details.geometry(),
+        workspace.tasks_panel.details.minimumHeight(),
+    )
     qtbot.mouseClick(workspace.tasks_panel.detail_button, Qt.MouseButton.LeftButton)
     assert detail.isVisible()
     detail.close()
+    QApplication.processEvents()
     root = editor.editor_splitter.parentWidget()
     assert root.grab().toImage().pixelColor(2, 2).name() == "#080d14"
     assert workspace.grab().save(str(tmp_path / "native-readable-workspace.png"))
+    for field, target, text in (
+        (editor.title_edit, editor.title_edit, "Visible title"),
+        (editor.caption_edit, editor.caption_edit.viewport(), "Visible caption"),
+    ):
+        parent = field.parentWidget()
+        while parent is not None:
+            if isinstance(parent, QScrollArea):
+                parent.ensureWidgetVisible(field)
+            parent = parent.parentWidget()
+        QApplication.processEvents()
+        point = target.rect().center()
+        assert target.visibleRegion().contains(point)
+        assert target.visibleRegion().boundingRect().height() >= target.height() - 2, (
+            field.objectName(), target.size(), target.visibleRegion().boundingRect(),
+        )
+        workspace.raise_()
+        workspace.activateWindow()
+        assert QApplication.widgetAt(target.mapToGlobal(point)) is target
+        qtbot.mouseClick(target, Qt.MouseButton.LeftButton, pos=point)
+        qtbot.keyClick(target, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+        qtbot.keyClicks(target, text)
+    assert editor.project.title == "Visible title"
+    assert editor.selected_segment().caption == "Visible caption"
+    QApplication.processEvents()
+    assert workspace.grab().save(str(tmp_path / "native-caption-workspace.png"))
 
 
 def test_save_snapshot_cannot_clear_newer_edits(workspace, qtbot, tmp_path, monkeypatch):
