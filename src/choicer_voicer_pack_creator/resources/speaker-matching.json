@@ -12,7 +12,7 @@
     "conversion": "ONNX export distributed by k2-fsa/sherpa-onnx; used unmodified"
   },
   "preprocessing": {
-    "version": "wespeaker-knf-1",
+    "version": "wespeaker-knf-2",
     "sample_rate": 16000,
     "amplitude_scale": 32768,
     "frame_length_ms": 25,
@@ -26,14 +26,16 @@
     "preemphasis": 0.97,
     "mean_normalization": "per-bin over time",
     "embedding_dimensions": 256,
-    "minimum_active_seconds": 1.5,
+    "minimum_active_seconds": 0.75,
     "activity_window_seconds": 0.02,
     "minimum_rms": 0.005,
     "maximum_clip_seconds": 12
   },
   "matching": {
-    "minimum_cosine": 0.72,
-    "single_character_minimum_cosine": 0.78,
+    "minimum_cosine": 0.40,
+    "short_reference_minimum_cosine": 0.45,
+    "single_character_minimum_cosine": 0.50,
+    "long_reference_seconds": 2.0,
     "minimum_runner_up_margin": 0.12,
     "references": "Only explicitly human-assigned, single-character clips",
     "scope": "Local similarity assistance, not diarization or percentage confidence"

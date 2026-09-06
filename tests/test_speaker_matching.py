@@ -125,11 +125,48 @@ def forbid_preparation(engine, monkeypatch):
 def test_single_reference_requires_strong_absolute_evidence():
     clips = (clip("reference", "Alice"), clip("same"), clip("unknown"), clip("weak"))
     result = choose_matches(clips, {
-        "reference": vector(1), "same": vector(0.99, 0.05),
-        "unknown": vector(0, 1), "weak": vector(0.75, math.sqrt(1 - 0.75**2)),
+        "reference": vector(1), "same": vector(0.55, math.sqrt(1 - 0.55**2)),
+        "unknown": vector(0, 1), "weak": vector(0.49, math.sqrt(1 - 0.49**2)),
     })
     assert [(match.segment_id, match.character) for match in result] == [("same", "Alice")]
-    assert 0.99 < result[0].similarity <= 1
+    assert result[0].similarity == pytest.approx(0.55)
+
+
+def test_training_matched_scores_accept_clear_matches_but_not_weak_or_competing_voices():
+    clips = (
+        clip("alice", "Alice"), clip("bob", "Bob"),
+        clip("same", end=1), clip("weak"), clip("ambiguous"), clip("unknown"),
+    )
+    signatures = {
+        "alice": vector(1), "bob": vector(0, 1),
+        "same": vector(0.43, 0, math.sqrt(1 - 0.43**2)),
+        "weak": vector(0.39, 0, math.sqrt(1 - 0.39**2)),
+        "ambiguous": vector(0.45, 0.44, math.sqrt(1 - 0.45**2 - 0.44**2)),
+        "unknown": vector(0, 0, 1),
+    }
+    result = choose_matches(clips, signatures)
+    assert [(match.segment_id, match.character) for match in result] == [("same", "Alice")]
+    # Removing a competing reference must not make weak open-set evidence sufficient.
+    assert choose_matches(tuple(item for item in clips if item.segment_id != "bob"), signatures) == ()
+
+
+@pytest.mark.parametrize("reference_end", [1.0, 1.99, None])
+def test_short_or_unknown_reference_duration_requires_stronger_evidence(reference_end):
+    clips = (
+        clip("alice", "Alice", end=reference_end), clip("bob", "Bob"),
+        clip("borderline"), clip("stronger"),
+    )
+    signatures = {
+        "alice": vector(1), "bob": vector(0, 1),
+        "borderline": vector(0.43, 0, math.sqrt(1 - 0.43**2)),
+        "stronger": vector(0.48, 0, math.sqrt(1 - 0.48**2)),
+    }
+    assert [match.segment_id for match in choose_matches(clips, signatures)] == ["stronger"]
+    longer = replace(clips[0], segment_id="longer", end=speaker.LONG_REFERENCE_SECONDS)
+    signatures["longer"] = vector(1)
+    assert [match.segment_id for match in choose_matches((*clips, longer), signatures)] == [
+        "borderline", "stronger",
+    ]
 
 
 def test_competition_margin_ambiguous_unknown_and_multi_character_references():
@@ -163,7 +200,8 @@ def test_multiple_human_seeds_aggregate_without_using_targets():
 def test_inconsistent_seeds_cannot_manufacture_centroid_evidence():
     clips = (clip("a1", "Alice"), clip("a2", "Alice"), clip("target"))
     assert choose_matches(clips, {
-        "a1": vector(0.6, 0.8), "a2": vector(0.6, -0.8), "target": vector(1),
+        "a1": vector(0.35, math.sqrt(1 - 0.35**2)),
+        "a2": vector(0.35, -math.sqrt(1 - 0.35**2)), "target": vector(1),
     }) == ()
 
 
@@ -618,7 +656,7 @@ def test_preparation_caches_skip_reasons_without_references_and_reuses_current_i
 
 @pytest.mark.parametrize(("samples", "reason"), [
     (np.zeros(32000, dtype=np.float32), "silence"),
-    (np.ones(16000, dtype=np.float32) * 0.1, "short"),
+    (np.ones(8000, dtype=np.float32) * 0.1, "short"),
     (np.full(32000, float("nan"), dtype=np.float32), "nonfinite"),
     (np.full(32000, float("inf"), dtype=np.float32), "nonfinite"),
     (np.ones(32000, dtype=np.float32) * 0.001, "silence"),
@@ -628,11 +666,49 @@ def test_unusable_audio_abstains(samples, reason):
 
 
 def test_usable_audio_measures_active_duration_and_trims_silence():
-    insufficient = np.concatenate((np.zeros(16000), np.full(16000, 0.1)))
+    insufficient = np.concatenate((np.zeros(16000), np.full(8000, 0.1)))
     assert worker.usable_audio(insufficient) == (None, "short")
     enough = np.concatenate((np.zeros(16000), np.full(32000, 0.1), np.zeros(16000)))
     samples, reason = worker.usable_audio(enough)
     assert not reason and len(samples) == 32640
+
+
+@pytest.mark.parametrize("duration", [0.75, 0.8, 1.0, 1.49])
+def test_short_spoken_audio_including_partial_activity_window_is_usable(duration):
+    samples = np.full(round(16000 * duration), 0.1, dtype=np.float32)
+    accepted, reason = worker.usable_audio(samples)
+    assert reason == ""
+    assert np.array_equal(accepted, samples)
+
+
+def test_partial_activity_window_is_not_counted_as_a_full_window():
+    samples = np.concatenate((np.zeros(16000), np.full(11999, 0.1))).astype(np.float32)
+    assert worker.usable_audio(samples) == (None, "short")
+
+
+@pytest.mark.parametrize("operation", [run, prepare])
+def test_subsecond_dialogue_is_prepared_and_matches_from_cache(engine, operation):
+    clips = tuple(replace(item, end=item.start + 0.75) for item in engine.clips)
+    operation(engine, clips=clips)
+    assert len(engine.calls) == 1 and len(engine.calls[0]) == 2
+    result = match_cached(engine, clips=clips)
+    assert [(m.segment_id, m.character) for m in result.matches] == [("target", "Alice")]
+
+
+def test_previous_preprocessing_short_skips_are_recomputed(engine, monkeypatch):
+    def old_inference(target, args, **kwargs):
+        return {key: {"embedding": None, "reason": "short"} for key, _ in args[-1]}
+
+    with monkeypatch.context() as old:
+        old.setattr(speaker, "PREPROCESSING_VERSION", "wespeaker-knf-1")
+        old.setattr(speaker, "run_process_worker", old_inference)
+        assert prepare(engine).prepared == 0
+        previous_cache = engine.manager.cache_directory
+    assert engine.manager.cache_directory != previous_cache
+    with pytest.raises(SpeakerPreparationRequired):
+        match_cached(engine)
+    assert prepare(engine).prepared == 2
+    assert match_cached(engine).matches[0].character == "Alice"
 
 
 def test_preprocessing_matches_training_options_and_scaling(monkeypatch):
@@ -709,7 +785,9 @@ def test_decode_is_bounded_and_tied_to_requested_source_range(monkeypatch, tmp_p
     assert command[command.index("-ss") + 1] == "144.000000000"
     assert command[command.index("-t") + 1] == "12.000000000"
     assert len(result) <= speaker.MAX_CLIP_SECONDS * speaker.SAMPLE_RATE
-    assert worker.decode_clip("ffmpeg", clip("short", start=100, end=101), 200, destination) is None
+    assert worker.decode_clip("ffmpeg", clip("short", start=100, end=100.5), 200, destination) is None
+    assert worker.decode_clip("ffmpeg", clip("spoken", start=100, end=101), 200, destination) is not None
+    assert commands[-1][commands[-1].index("-t") + 1] == "1.000000000"
     worker.decode_clip("ffmpeg", clip("prompt", start=0, end=None), 4, destination)
     assert commands[-1][commands[-1].index("-t") + 1] == "4.000000000"
 
@@ -737,7 +815,9 @@ def test_manifest_records_actual_preprocessing_and_threshold_policy(tmp_path):
     assert manifest["preprocessing"]["minimum_active_seconds"] == speaker.MIN_ACTIVE_SECONDS
     assert manifest["preprocessing"]["maximum_clip_seconds"] == speaker.MAX_CLIP_SECONDS
     assert manifest["matching"]["minimum_cosine"] == speaker.MIN_COSINE
+    assert manifest["matching"]["short_reference_minimum_cosine"] == speaker.SHORT_REFERENCE_MIN_COSINE
     assert manifest["matching"]["single_character_minimum_cosine"] == speaker.SINGLE_CHARACTER_MIN_COSINE
+    assert manifest["matching"]["long_reference_seconds"] == speaker.LONG_REFERENCE_SECONDS
     assert manifest["matching"]["minimum_runner_up_margin"] == speaker.MIN_RUNNER_UP_MARGIN
     for name in speaker.MODEL_NOTICES:
         assert (speaker.default_manifest_path().parent / name).is_file()

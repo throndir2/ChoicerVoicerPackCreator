@@ -682,6 +682,9 @@ file, or Still image to relink the missing asset.
 With **Auto-fill matching speakers in the background** enabled in the Segments panel, finish
 typing a speaker name (Enter or move focus out of the field) to compare that voice with eligible
 unassigned segments. You can keep editing captions, timings, and other projects while it runs.
+For the best reference, name a clear, single-speaker dialogue line of about 2 seconds or more,
+rather than an isolated name or reaction. Naming other characters helps reject competing voices;
+you can also manually name more clean lines for the same character to strengthen its reference.
 New video imports prepare name-independent fingerprints from eligible transcript draft ranges
 before those drafts are added as segments. New or retimed segments are prepared incrementally.
 Whisper and YouTube drafts keep their independent ranges; identical ranges share cached fingerprints.
@@ -711,13 +714,18 @@ signatures: it does not load or verify a model, decode audio, or launch inferenc
 damaged, or stale signatures return to the bounded preparation queue rather than doing expensive
 work in the comparison task.
 Preparation uses at most two inference threads and does not run full-video speaker diarization.
-Each clip uses at most its central 12 seconds, with at least 1.5 seconds of audible activity
+Each clip uses at most its central 12 seconds, with at least 0.75 seconds of audible activity
 required; this bounds the work but does not prove the sampled clip contains only one speaker.
+Matching uses training-matched WeSpeaker cosine cutoffs, with stricter evidence when only one
+character has been named or its references are short, and a required lead over competing named voices.
+References whose duration is unknown also use the stricter cutoff. Similarity scores are
+not confidence percentages. A new preprocessing cache version rechecks previously skipped short
+clips without downloading the model again.
 Source media and preserved prompt recordings are never modified. Closing a tab with
 **Keep processing** retains its pending work; quitting the application stops it.
 
 This identifies similar voices, not fictional character identities. Short or silent clips,
-explicit nonverbal-only captions such as `[grunting]`, multiple-speaker assignments, and ambiguous
+nonverbal-only captions such as `[grunting]` or `Ugh...`, multiple-speaker assignments, and ambiguous
 matches are skipped. Music, overlapping dialogue, shouting, impersonations, or one actor playing
 several characters can still fool the model. Similarity scores are not accuracy percentages:
 review automatic names before exporting. Reopening a saved project does not start matching by

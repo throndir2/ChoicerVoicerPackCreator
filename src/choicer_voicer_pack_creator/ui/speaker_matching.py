@@ -54,9 +54,10 @@ def update_speaker_item(item: QTableWidgetItem, segment: Segment) -> None:
 
 def _nonverbal(caption: str) -> bool:
     return bool(re.fullmatch(
-        r"\s*[\[(](?:grunts?|grunting|groans?|groaning|sighs?|sighing|"
+        r"\s*(?:[\[(](?:grunts?|grunting|groans?|groaning|sighs?|sighing|"
         r"gasps?|gasping|screams?|screaming|laughs?|laughing|laughter|"
-        r"music|silence|breathing|crying)[\])]\s*[.!]?\s*",
+        r"music|silence|breathing|crying)[\])]|u+gh|u+h|h+m+|m+m|huh|a+h)"
+        r"\s*[.!?\u2026]*\s*",
         caption, re.IGNORECASE,
     ))
 
@@ -184,6 +185,7 @@ class SpeakerMatchingControls(QWidget):
         self.enabled_check.setToolTip(
             "Prepare local voice fingerprints in the background as transcript ranges arrive. "
             "After you name a segment, compare cached voices without rerunning the model. "
+            "For a stronger reference, name a clear dialogue line of about 2 seconds or more. "
             "Manual names and cleared segments are preserved."
         )
         self.enabled_check.setChecked(editor.project.auto_speaker_matching)
@@ -663,6 +665,11 @@ class SpeakerMatchingControls(QWidget):
         self.status.setText(
             f"Filled {len(applied)} speaker name(s). Uncertain/short clips stay unassigned. "
             "Automatic names are not used as voice references."
+            + (
+                " For a stronger reference, name a longer, clean dialogue line "
+                "(about 2 seconds or more)."
+                if not applied else ""
+            )
         )
         diagnostic_event("speaker_matching_applied", count=len(applied), examined=result.examined)
 
