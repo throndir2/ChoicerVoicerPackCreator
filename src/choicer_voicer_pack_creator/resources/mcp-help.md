@@ -73,6 +73,14 @@ the client stops the process.**
 - `edit_segments` accepts `upsert` and `delete_ids` lists. Omit `id` for new
   segments; retain the returned ID for existing segments. Draft captions and
   speaker lists may be empty, but unfinished segments cannot be exported.
+- Speaker edits are manual references. Explicitly clearing characters marks the segment
+  excluded from automatic matching; set speaker_assignment="manual" to include it again,
+  or "excluded" to keep an empty segment unassigned. Returned "automatic" provenance is
+  editor-generated and cannot be supplied as an override. update_project accepts
+  auto_speaker_matching to persist the preference. In live mode, committed names may start
+  background matching with nonmodal download consent. Stale results never overwrite manual
+  changes; completions change the revision, so read it again before editing or saving.
+  Headless metadata edits do not run matching or download speaker models.
 - Call `save_project` to persist the editable draft. Saving and exporting also
   require the latest `expected_revision`. Call `validate_project`, fix errors,
   and save again before `export_pack`: export requires a clean saved project.
@@ -150,6 +158,9 @@ exportAdvanced, exportHeadPadding, exportTailPadding, exportOptionsContinue, exp
 Numeric controls report values/ranges and support Up/Down keys; expand exportAdvanced for padding.
 Escape on exportOptions or exportOptionsCancel dismisses without applying edits. Continue may
 open native backing/destination decisions; use noninteractive tools for unattended exports.
+Speaker controls are segmentSpeakers, autoSpeakerMatching, keepSpeakerUnassigned,
+matchSpeakers, undoSpeakerMatching, cancelSpeakerMatching. Checkboxes report checked;
+speaker/exclusion inputs retain the selected segment identity across queued actions.
 For short screens, reveal explicitly scrolls ancestor areas before hit-checked input.
 Real scrollbars are projectEditorScrollbar, projectDetailsScrollbar, selectedSegmentScrollbar;
 projectEditorScroll reports the overall scroll position. Global Tasks/decisions omit project_id.

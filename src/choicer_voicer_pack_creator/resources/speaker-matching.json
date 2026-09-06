@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "model": {
+    "name": "WeSpeaker VoxCeleb ResNet34-LM",
+    "filename": "wespeaker_en_voxceleb_resnet34_LM.onnx",
+    "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx",
+    "bytes": 26530550,
+    "sha256": "e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012",
+    "license": "CC-BY-4.0",
+    "original": "https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM",
+    "upstream": "https://github.com/wenet-e2e/wespeaker",
+    "conversion": "ONNX export distributed by k2-fsa/sherpa-onnx; used unmodified"
+  },
+  "preprocessing": {
+    "version": "wespeaker-knf-1",
+    "sample_rate": 16000,
+    "amplitude_scale": 32768,
+    "frame_length_ms": 25,
+    "frame_shift_ms": 10,
+    "dither": 0,
+    "snip_edges": true,
+    "window_type": "hamming",
+    "mel_bins": 80,
+    "low_freq": 20,
+    "high_freq": 0,
+    "preemphasis": 0.97,
+    "mean_normalization": "per-bin over time",
+    "embedding_dimensions": 256,
+    "minimum_active_seconds": 1.5,
+    "activity_window_seconds": 0.02,
+    "minimum_rms": 0.005,
+    "maximum_clip_seconds": 12
+  },
+  "matching": {
+    "minimum_cosine": 0.72,
+    "single_character_minimum_cosine": 0.78,
+    "minimum_runner_up_margin": 0.12,
+    "references": "Only explicitly human-assigned, single-character clips",
+    "scope": "Local similarity assistance, not diarization or percentage confidence"
+  },
+  "notices": ["WeSpeaker-Attribution.txt", "WeSpeaker-CC-BY-4.0.txt"]
+}

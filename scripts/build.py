@@ -31,7 +31,7 @@ FFMPEG_STAGE = ROOT / "build" / "ffmpeg-windows-x64-562ea50b4f2d213e"
 LATEST_BUILD_MANIFEST = DIST / "latest-portable.json"
 PENDING_BUILD_MANIFEST = DIST / "pending-portable.json"
 SEPARATION_PACKAGES = ("onnxruntime", "numpy", "soundfile", "cffi", "pycparser",
-                       "flatbuffers", "protobuf", "packaging")
+                       "flatbuffers", "protobuf", "packaging", "kaldi-native-fbank")
 
 
 def copy_separation_licenses(app_dir: Path) -> None:
@@ -61,6 +61,11 @@ def copy_separation_licenses(app_dir: Path) -> None:
             target = app_dir / "licenses" / package / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(distribution.locate_file(license_file), target)
+    shutil.copy2(
+        ROOT / "src" / "choicer_voicer_pack_creator" / "resources"
+        / "KaldiNativeFbank-ThirdParty.txt",
+        app_dir / "licenses" / "kaldi-native-fbank",
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -149,6 +154,20 @@ def _mcp_distribution_names() -> list[str]:
 
 def _write_spec() -> Path:
     BUILD.mkdir(parents=True, exist_ok=True)
+    speaker_hook = BUILD / "speaker_runtime_hook.py"
+    speaker_hook.write_text(dedent("""\
+        import multiprocessing
+        import sys
+        from pathlib import Path
+
+        # Spawned inference must enter its target before automatic Qt runtime hooks.
+        multiprocessing.freeze_support()
+
+        if len(sys.argv) == 3 and sys.argv[1] == "--speaker-matching-smoke":
+            from choicer_voicer_pack_creator.speaker_worker import smoke_main
+
+            raise SystemExit(smoke_main(Path(sys.argv[2])))
+        """), encoding="utf-8")
     spec = BUILD / f"{APP_NAME}.spec"
     spec.write_text(
         dedent(
@@ -173,16 +192,24 @@ def _write_spec() -> Path:
                 "PySide6.QtMultimediaWidgets",
                 "yt_dlp_ejs.yt.solver",
                 "anyio._backends._asyncio",
+                "_kaldi_native_fbank",
+                "choicer_voicer_pack_creator.speaker_worker",
                 *collect_submodules(
                     "mcp",
                     filter=lambda name: name != "mcp.cli" and not name.startswith("mcp.cli."),
                 ),
             ]
-            for package in ("onnxruntime", "_soundfile_data"):
+            for package in ("onnxruntime", "_soundfile_data", "kaldi_native_fbank"):
                 package_data, package_binaries, package_imports = collect_all(package)
                 data += package_data
                 binaries += package_binaries
                 hiddenimports += package_imports
+            # The extension is top-level; its companion DLL must also be at the root.
+            from importlib.metadata import distribution
+            fbank = distribution("kaldi-native-fbank")
+            binaries += [
+                (str(fbank.locate_file("kaldi-native-fbank-core.dll")), "."),
+            ]
             # Include activated dependency extras too (e.g. PyJWT's crypto extra).
             for package in {_mcp_distribution_names()!r}:
                 data += copy_metadata(package)
@@ -194,7 +221,10 @@ def _write_spec() -> Path:
                 hiddenimports=hiddenimports,
                 hookspath=[],
                 hooksconfig={{}},
-                runtime_hooks=[str(root / "scripts" / "separation_runtime_hook.py")],
+                runtime_hooks=[
+                    {str(speaker_hook)!r},
+                    str(root / "scripts" / "separation_runtime_hook.py"),
+                ],
                 excludes=[],
                 noarchive=False,
             )
@@ -330,7 +360,10 @@ def build_candidate() -> int:
     resource_dir = ROOT / "src" / "choicer_voicer_pack_creator" / "resources"
     shutil.copy2(resource_dir / "WhisperCpp-MIT.txt", app_dir / "licenses")
     shutil.copy2(resource_dir / "OpenAI-Whisper-MIT.txt", app_dir / "licenses")
-    for filename in ("Demucs-MIT.txt", "StemSplit-MIT.txt", "backing-separation.json"):
+    for filename in (
+        "Demucs-MIT.txt", "StemSplit-MIT.txt", "backing-separation.json",
+        "WeSpeaker-Attribution.txt", "WeSpeaker-CC-BY-4.0.txt", "speaker-matching.json",
+    ):
         shutil.copy2(resource_dir / filename, app_dir / "licenses")
     copy_separation_licenses(app_dir)
     for package in ("yt-dlp", "yt-dlp-ejs", "deno"):

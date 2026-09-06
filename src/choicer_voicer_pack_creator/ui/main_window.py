@@ -97,6 +97,10 @@ from choicer_voicer_pack_creator.ui.export_options_dialog import ExportOptions, 
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.ui.readable_table import ReadableTableWidget
 from choicer_voicer_pack_creator.ui.setup_consent import SetupConsent
+from choicer_voicer_pack_creator.ui.speaker_matching import (
+    SpeakerMatchingControls,
+    update_speaker_item,
+)
 from choicer_voicer_pack_creator.ui.subtitles import SubtitleVideoWidget
 from choicer_voicer_pack_creator.ui.tasks_window import TasksWindow
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
@@ -698,6 +702,8 @@ class ProjectEditor(QWidget):
         row_buttons.addWidget(self.combine_button)
         row_buttons.addStretch()
         segment_layout.addLayout(row_buttons)
+        self.speaker_matching = SpeakerMatchingControls(self)
+        segment_layout.addWidget(self.speaker_matching)
         self.segments_section.set_content(segment_content)
         self.inspector_splitter.addWidget(self.segments_section)
 
@@ -705,10 +711,15 @@ class ProjectEditor(QWidget):
         editor_content = QWidget(self.selected_section)
         editor_form = QFormLayout(editor_content)
         self.speakers_edit = QLineEdit()
+        self.speakers_edit.setObjectName("segmentSpeakers")
         self.speakers_edit.setPlaceholderText("Speaker, Second Speaker")
         self.speakers_edit.editingFinished.connect(self._selected_speakers_changed)
         self.speakers_edit.textEdited.connect(self._selected_speakers_typed)
         editor_form.addRow("Speaker(s)", self.speakers_edit)
+        self.keep_speaker_unassigned = QCheckBox("Keep unassigned (skip auto-fill)")
+        self.keep_speaker_unassigned.setObjectName("keepSpeakerUnassigned")
+        self.keep_speaker_unassigned.toggled.connect(self._speaker_exclusion_changed)
+        editor_form.addRow("", self.keep_speaker_unassigned)
         self.caption_edit = QPlainTextEdit()
         self.caption_edit.setObjectName("segmentCaption")
         self.caption_edit.setPlaceholderText("The exact line the player should perform…")
@@ -1350,6 +1361,7 @@ class ProjectEditor(QWidget):
             else:
                 self.player.setSource(QUrl())
         self.video_widget.set_position(self.current_position())
+        self.speaker_matching.project_replaced(preserve_view=preserve_view)
         self._set_dirty(mark_dirty)
         self._refresh_validation_label()
 
@@ -1600,7 +1612,10 @@ class ProjectEditor(QWidget):
             QMessageBox.warning(self, "Invalid range", "A segment must be at least 0.05 seconds long.")
             return
         existing_speaker = self.project.speakers[0] if self.project.speakers else "Speaker"
-        segment = Segment(start=start, end=end, characters=[existing_speaker])
+        segment = Segment(
+            start=start, end=end,
+            characters=[] if self.project.auto_speaker_matching else [existing_speaker],
+        )
         self.project.add_segment(segment)
         self._set_dirty(True)
         self._refresh_table(segment.id)
@@ -1960,6 +1975,8 @@ class ProjectEditor(QWidget):
                         item.setData(Qt.ItemDataRole.UserRole, segment.id)
                     if column in {4, 5}:
                         item.setToolTip(value)
+                    if column == 3:
+                        update_speaker_item(item, segment)
                     self.segment_table.setItem(row, column, item)
                 if segment.id in selected:
                     self.segment_table.selectionModel().select(
@@ -2068,6 +2085,7 @@ class ProjectEditor(QWidget):
                 action.setEnabled(enabled)
             if not segment:
                 self.speakers_edit.clear()
+                self._sync_speaker_exclusion()
                 self.caption_edit.clear()
                 self.segment_audio_label.setText("None")
                 self.segment_image_label.setText("Generated from video")
@@ -2080,6 +2098,7 @@ class ProjectEditor(QWidget):
                 )
                 return
             self.speakers_edit.setText(", ".join(segment.characters))
+            self._sync_speaker_exclusion()
             self.caption_edit.setPlainText(segment.caption)
             index = self.audio_mode_combo.findData(segment.audio_mode)
             self.audio_mode_combo.setCurrentIndex(max(0, index))
@@ -2113,26 +2132,64 @@ class ProjectEditor(QWidget):
         if self.speakers_edit.text() != ", ".join(segment.characters):
             names = [item.strip() for item in self.speakers_edit.text().split(",") if item.strip()]
             segment.characters = list(dict.fromkeys(names))
+            self.speaker_matching.name_typed(segment)
             self._set_dirty(True)
         self._refresh_table(segment.id)
+        self._sync_speaker_exclusion()
+        self.speaker_matching.name_committed()
 
     def _selected_speakers_typed(self) -> None:
         if self._syncing:
             return
         segment = self.selected_segment()
-        if not segment or self.speakers_edit.text() == ", ".join(segment.characters):
+        if not segment or (
+            self.speakers_edit.text() == ", ".join(segment.characters)
+            and segment.speaker_assignment == "manual"
+        ):
             return
         segment.characters = list(
             dict.fromkeys(
                 item.strip() for item in self.speakers_edit.text().split(",") if item.strip()
             )
         )
+        self.speaker_matching.name_typed(segment)
         row = self._row_for_segment(segment.id)
         if row >= 0:
-            self.segment_table.item(row, 3).setText(", ".join(segment.characters))
+            update_speaker_item(self.segment_table.item(row, 3), segment)
         self.video_widget.set_segments(self.project.segments)
         self._set_dirty(True)
         self._refresh_validation_label()
+        self._sync_speaker_exclusion()
+
+    def _sync_speaker_exclusion(self) -> None:
+        segment = self.selected_segment()
+        self.speakers_edit.setToolTip(
+            "Automatically matched voice. Review this name before exporting."
+            if segment is not None and segment.speaker_assignment == "automatic" else
+            "Finish naming a dialogue segment to use it as a voice reference."
+        )
+        with QSignalBlocker(self.keep_speaker_unassigned):
+            self.keep_speaker_unassigned.setChecked(
+                segment is not None and segment.speaker_assignment == "excluded"
+            )
+        self.keep_speaker_unassigned.setEnabled(
+            segment is not None and not self.session.loading
+            and not any(name.strip() for name in segment.characters)
+        )
+
+    def _speaker_exclusion_changed(self, excluded: bool) -> None:
+        if self._syncing:
+            return
+        segment = self.selected_segment()
+        if segment is None or any(name.strip() for name in segment.characters):
+            return
+        segment.speaker_assignment = "excluded" if excluded else "manual"
+        row = self._row_for_segment(segment.id)
+        if row >= 0:
+            update_speaker_item(self.segment_table.item(row, 3), segment)
+        self._set_dirty(True)
+        if not excluded:
+            self.speaker_matching.name_committed()
 
     def _selected_caption_changed(self) -> None:
         if self._syncing:
@@ -2208,6 +2265,7 @@ class ProjectEditor(QWidget):
         self.project.video_fps = self.fps_spin.value()
         self.project.preserve_source_video = self.preserve_video_check.isChecked()
         segment = self.selected_segment()
+        names_changed = False
         if segment:
             if self.speakers_edit.text() != ", ".join(segment.characters):
                 segment.characters = list(
@@ -2217,10 +2275,14 @@ class ProjectEditor(QWidget):
                         if item.strip()
                     )
                 )
+                self.speaker_matching.name_typed(segment)
+                names_changed = True
             segment.caption = self.caption_edit.toPlainText()
         if self.project.to_dict() != before:
             self.video_widget.set_segments(self.project.segments)
             self._set_dirty(True)
+        if names_changed:
+            self.speaker_matching.name_committed()
 
     def choose_source_video(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -2767,6 +2829,8 @@ class ProjectEditor(QWidget):
             f"{'*' if dirty else ''}{name} — Choicer Voicer Pack Creator"
         )
         self.workspace.refresh_tabs()
+        if hasattr(self, "speaker_matching"):
+            self.speaker_matching.changed()
 
     def _maybe_save(self) -> bool:
         if self._automation_disconnected:
@@ -3361,7 +3425,7 @@ class MainWindow(QMainWindow):
 
     def cancel_source_jobs(self, project_id: str) -> None:
         for job in self.job_manager.active_jobs(project_id):
-            if job.kind in {"waveform", "analysis", "refinement", "backing"}:
+            if job.kind in {"waveform", "analysis", "refinement", "backing", "speakers"}:
                 self.job_manager.cancel(job.id)
 
     def notice(self, title: str, message: str) -> None:
@@ -3674,6 +3738,7 @@ class MainWindow(QMainWindow):
             editor._write_recovery_snapshot()
         else:
             editor._source_request += 1
+            editor.speaker_matching.close_processing()
             self._closed_ids.add(editor.session.id)
             self.setup_consent.cancel_project(editor.session.id)
         self.tabs.removeTab(self.tabs.indexOf(editor))

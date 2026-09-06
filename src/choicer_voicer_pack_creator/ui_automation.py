@@ -47,12 +47,16 @@ SELECTORS = frozenset({
     "projectCloseSave", "projectCloseDiscard", "projectCloseCancel",
     "projectEditorScroll",
     "projectEditorScrollbar", "projectDetailsScrollbar", "selectedSegmentScrollbar",
+    "segmentSpeakers", "autoSpeakerMatching", "keepSpeakerUnassigned",
+    "matchSpeakers", "undoSpeakerMatching", "cancelSpeakerMatching",
 }) | EXPORT_OPTION_SELECTORS
 EDITOR_SELECTORS = frozenset({
     "projectTitle", "segmentCaption", "segmentsTable",
     "saveProject", "exportProject", "analyzeProject",
     "projectEditorScroll",
     "projectEditorScrollbar", "projectDetailsScrollbar", "selectedSegmentScrollbar",
+    "segmentSpeakers", "autoSpeakerMatching", "keepSpeakerUnassigned",
+    "matchSpeakers", "undoSpeakerMatching", "cancelSpeakerMatching",
 }) | EXPORT_OPTION_SELECTORS
 KEYS = {
     "Enter": Qt.Key.Key_Return, "Escape": Qt.Key.Key_Escape,
@@ -198,6 +202,8 @@ class UIAutomation:
             ])
         elif isinstance(target, QComboBox):
             result.update(index=target.currentIndex(), text=target.currentText())
+        elif isinstance(target, QAbstractButton):
+            result.update(text=target.text(), checked=target.isChecked())
         elif isinstance(target, QScrollArea):
             result.update(
                 vertical_scroll=target.verticalScrollBar().value(),
@@ -205,8 +211,6 @@ class UIAutomation:
             )
         elif isinstance(target, (QScrollBar, QSpinBox, QDoubleSpinBox)):
             result.update(value=target.value(), minimum=target.minimum(), maximum=target.maximum())
-        elif isinstance(target, QAbstractButton):
-            result.update(text=target.text(), checked=target.isChecked())
         return result
 
     def state(self) -> dict[str, Any]:
@@ -305,7 +309,11 @@ class UIAutomation:
                 row_id = item.data(Qt.ItemDataRole.UserRole)
             editor = self.bridge.window.active_editor
             editor_id = editor.session.id if selector in EDITOR_SELECTORS else None
-            caption_id = editor.selected_segment_id if selector == "segmentCaption" else None
+            caption_id = (
+                editor.selected_segment_id
+                if selector in {"segmentCaption", "segmentSpeakers", "keepSpeakerUnassigned"}
+                else None
+            )
             task_id = (
                 self.bridge.window.tasks_window._selected_id() if selector in TASK_ACTIONS else None
             )
