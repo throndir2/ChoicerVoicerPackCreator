@@ -132,7 +132,7 @@ class EditorProjectAccess:
                 "projects": [
                     {"project_id": item.project_id, "title": item.project.title,
                      "project_path": str(item.path) if item.path else None,
-                     "dirty": item.dirty, "revision": item.revision}
+                     "dirty": item.dirty, "loading": item.loading, "revision": item.revision}
                     for item in snapshots
                 ],
             }

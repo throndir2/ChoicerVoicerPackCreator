@@ -424,6 +424,20 @@ def test_queued_caption_input_rejects_changed_segment_selection(qtbot, live_edit
     assert second.caption == "Second caption"
 
 
+def test_ui_selection_refuses_a_clipped_row_instead_of_claiming_success(qtbot, live_editor):
+    from choicer_voicer_pack_creator.ui_automation import UIAutomation
+
+    window, bridge, _automation = live_editor
+    hooks = UIAutomation(bridge)
+    table = window.active_editor.segment_table
+    table.setFixedHeight(table.horizontalHeader().height() + 2 * table.frameWidth())
+    accepted = hooks.interact("segmentsTable", "select", index=0)
+    qtbot.waitUntil(lambda: hooks.state()["actions"][-1]["state"] == "failed")
+    record = hooks.state()["actions"][-1]
+    assert record["action_id"] == accepted["action_id"]
+    assert "clipped" in record["error"]
+
+
 def test_mcp_save_respects_pending_gui_destination_reservation(
     qtbot, live_editor, tmp_path, monkeypatch,
 ):

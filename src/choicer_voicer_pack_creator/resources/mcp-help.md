@@ -34,6 +34,8 @@ Prefer the absolute executable path in client settings.
 `list_projects` returns stable document IDs and the active ID. Pass `project_id`
 to project tools to target a specific document; omitted IDs capture the active
 document at request start, not completion. `activate_project` selects a document.
+An initial opening placeholder reports `loading=true`; read it, but wait for it
+to finish before editing or saving.
 `show_in_editor` can select a segment or seek to a timestamp for human
 review. It does not silently attach to an editor that was already running.
 The single-instance lock rejects a second visible editor: save and close the old
@@ -104,8 +106,8 @@ tools report an explicit error. For isolated runs add `--data-root` followed by
 an absolute new profile directory (settings/recovery/cache/lock/IPC stay there).
 Use `QT_QPA_PLATFORM=windows` for native Windows validation, not offscreen.
 
-`get_ui_state` reports actual platform/visibility, active document, owned modal
-windows, allowlisted widget state and recent input results.
+`get_ui_state` reports actual platform/process/profile/visibility, active document,
+owned modal windows, rendered widget areas/table viewports and recent input results.
 `get_ui_screenshot` returns the application's rendered window as PNG MCP image
 content, never the desktop. `get_frame` is SOURCE MEDIA, not a UI screenshot.
 These images and UI text may be sent to the client's model provider.
@@ -123,7 +125,9 @@ projectCloseCancelTasks, projectCloseKeepOpen, projectCloseSave, projectCloseDis
 and projectCloseCancel.
 Keys are Enter/Escape/Tab/Backspace/Space/Delete. Disabled, hidden, unknown or
 modal-blocked targets fail. Dismiss native file dialogs manually; use semantic
-tools for authorized paths. No arbitrary evaluation/member calls, clipboard,
+tools for authorized paths. Clipped rows are refused, not treated as successful
+invisible clicks. Queued inputs keep target identities across tab/row reordering.
+No arbitrary evaluation/member calls, clipboard,
 desktop capture or global input is exposed. Semantic calls alone do not validate UI.
 
 Tool discovery in your client shows the current argument schemas and defaults.

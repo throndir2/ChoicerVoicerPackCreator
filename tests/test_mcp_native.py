@@ -78,6 +78,8 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
                 result = await call("get_ui_state")
                 assert result["platform"] == "windows"
                 assert result["visible"]
+                assert Path(result["data_root"]) == profile
+                assert result["process_id"] != os.getpid()
                 assert not any(item["visible"] and item["modal"] for item in result["windows"])
                 return result
 
@@ -192,8 +194,10 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
             assert (await call("get_project", project_id=a["project_id"]))["revision"] == a["revision"]
             assert (await call("get_project", project_id=b["project_id"]))["revision"] == b["revision"]
 
-            all_jobs = (await call("list_jobs"))["jobs"]
-            export_row = next(index for index, item in enumerate(all_jobs) if item["job_id"] == export["job_id"])
+            task_table = next(
+                item for item in (await state())["widgets"] if item["selector"] == "tasksTable"
+            )
+            export_row = task_table["row_ids"].index(export["job_id"])
             await interact("tasksTable", "select", index=export_row)
             await interact("taskDetails", "click")
             await interact("exportDetailsClose", "click")
@@ -228,7 +232,14 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
                     if running["state"] == "running" and running["message"] != "Starting":
                         break
                     await anyio.sleep(0.02)
-            cancelled = await call("cancel_job", job_id=cancel_export["job_id"])
+            task_table = next(
+                item for item in (await state())["widgets"] if item["selector"] == "tasksTable"
+            )
+            await interact(
+                "tasksTable", "select", index=task_table["row_ids"].index(cancel_export["job_id"])
+            )
+            await interact("taskCancel", "click")
+            cancelled = await call("get_job", job_id=cancel_export["job_id"])
             assert cancelled["cancel_requested"]
             cancelled = await terminal(cancel_export["job_id"])
             assert cancelled["state"] == "cancelled", cancelled

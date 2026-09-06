@@ -148,6 +148,8 @@ Opening an already-open canonical project path focuses that document without rel
 its edits. The legacy `discard_dirty` argument is accepted but no longer needed.
 
 Every project result includes a process-local stable `project_id` and opaque `revision`.
+`loading` identifies an initial open/probe placeholder: inspection is allowed, but mutations
+and saving are refused until its real project finishes loading.
 Pass `project_id` to project inspection, editing, saving, export/analysis, previews and
 `show_in_editor`. Omitting it captures the active document **at request start**, not whichever
 tab is active when an operation finishes. Revisions include document identity; stale revisions
@@ -195,8 +197,9 @@ headless analysis storage. Use a new profile for each automated run; never point
 the user's real profile. `get_help` reports `ui_test_hooks` and `background_jobs`.
 Without the flag, or in headless mode, all UI tools return an explicit error.
 
-`get_ui_state()` returns the actual platform name, window visibility, active project, focused
-selector, allowlisted widget enabled/visible/text/selection state, owned window/modal state,
+`get_ui_state()` returns the actual platform name, process ID, isolated data root, window
+visibility, active project, focused selector, allowlisted widget enabled/visible/rendered/
+text/selection state, table viewport dimensions and the first 500 `row_ids`, owned window/modal state,
 and recent queued input outcomes. `get_ui_screenshot()` returns MCP PNG image content from
 the application's own rendered window, **not the desktop**. `get_frame` still returns a
 **source-media frame**, not a UI screenshot. UI images/text can reach the model provider too.
@@ -220,6 +223,9 @@ Closed/discarded document IDs retire after their tasks finish; retained backgrou
 keep their identity. Reopening a retired document creates a new identity.
 Allowed keys: `Enter`, `Escape`, `Tab`, `Backspace`, `Space`, `Delete`.
 Unknown selectors, disabled/hidden widgets and modal-blocked targets fail explicitly.
+Clipped table rows and widgets without a rendered input area are refused rather than
+claiming that an invisible click worked. Queued tab/row inputs retain their original identities
+across reordering; changed task/segment selection is rejected before acting on a different target.
 Native OS file dialogs are not an unconstrained automation endpoint: a human must dismiss
 them. Use semantic tools to supply authorized paths, then UI input for visible editing.
 There is no Python evaluation, arbitrary member invocation, clipboard or desktop input API.

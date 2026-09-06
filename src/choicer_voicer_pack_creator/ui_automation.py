@@ -100,6 +100,7 @@ class UIAutomation:
         if isinstance(target, QWidget):
             result.update(
                 enabled=target.isEnabled(), visible=target.isVisible(), focused=target.hasFocus(),
+                rendered=not target.visibleRegion().isEmpty(),
                 accessible_name=target.accessibleName(),
             )
         elif isinstance(target, QAction):
@@ -111,7 +112,12 @@ class UIAutomation:
         elif isinstance(target, QTableWidget):
             result.update(rows=target.rowCount(), selected_rows=sorted({
                 index.row() for index in target.selectedIndexes()
-            }))
+            }), viewport_height=target.viewport().height(), viewport_width=target.viewport().width(),
+                row_ids=[
+                    target.item(row, 0).data(Qt.ItemDataRole.UserRole)
+                    if target.item(row, 0) is not None else None
+                    for row in range(min(target.rowCount(), 500))
+                ])
         elif isinstance(target, QTabWidget):
             result.update(index=target.currentIndex(), tabs=[
                 {"index": index, "text": target.tabText(index),
@@ -139,6 +145,10 @@ class UIAutomation:
             return {
                 "platform": QApplication.platformName(),
                 "visible": window.isVisible(),
+                "window_title": window.windowTitle(),
+                "window_active": window.isActiveWindow(),
+                "process_id": QApplication.applicationPid(),
+                "data_root": QApplication.instance().property("isolatedDataRoot"),
                 "active_project_id": editor.session.id if editor else None,
                 "focus_selector": focus.objectName() if focus and self._belongs(focus) else None,
                 "widgets": widgets,
@@ -174,6 +184,8 @@ class UIAutomation:
                 raise ValueError("Target is not enabled for input.")
             if not target.isVisible():
                 raise ValueError("Target is not visible.")
+            if isinstance(target, QWidget) and target.visibleRegion().isEmpty():
+                raise ValueError("Target has no rendered input area.")
             modal = QApplication.activeModalWidget()
             if modal is not None and (
                 not isinstance(target, QWidget)
@@ -219,6 +231,8 @@ class UIAutomation:
                 try:
                     if not target.isVisible() or not target.isEnabled():
                         raise ValueError("Target became hidden or disabled before input.")
+                    if isinstance(target, QWidget) and target.visibleRegion().isEmpty():
+                        raise ValueError("Target lost its rendered input area before input.")
                     if project_id is not None and self.bridge.window.active_editor.session.id != project_id:
                         raise ValueError("The active project changed before input.")
                     if editor_id and self.bridge.window.active_editor.session.id != editor_id:
@@ -280,6 +294,8 @@ class UIAutomation:
                         bar = target.tabBar()
                         QTest.mouseClick(bar, Qt.MouseButton.LeftButton,
                                          pos=bar.tabRect(tab_index).center())
+                        if target.currentWidget() is not tab:
+                            raise RuntimeError("The tab click did not select the requested project.")
                     elif action == "select" and isinstance(target, QTableWidget):
                         item = next((
                             target.item(row, 0) for row in range(target.rowCount())
@@ -289,8 +305,18 @@ class UIAutomation:
                         if item is None:
                             raise ValueError("Selected row is no longer available.")
                         target.scrollToItem(item)
+                        point = target.visualItemRect(item).center()
+                        if not target.viewport().rect().contains(point):
+                            raise ValueError(
+                                "The target row is clipped. Enlarge its panel before selecting."
+                            )
                         QTest.mouseClick(target.viewport(), Qt.MouseButton.LeftButton,
-                                         pos=target.visualItemRect(item).center())
+                                         pos=point)
+                        if not any(
+                            selected.data(Qt.ItemDataRole.UserRole) == row_id
+                            for selected in target.selectedItems()
+                        ):
+                            raise RuntimeError("The row click did not select the requested item.")
                     elif action == "select" and isinstance(target, QComboBox):
                         target.setFocus()
                         QTest.keyClick(target, Qt.Key.Key_Home)

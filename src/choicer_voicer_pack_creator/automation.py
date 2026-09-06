@@ -76,6 +76,7 @@ class ProjectSnapshot:
     dirty: bool = False
     saved_hash: str | None = None
     project_id: str | None = None
+    loading: bool = False
 
     @property
     def revision(self) -> str:
@@ -87,6 +88,7 @@ class ProjectSnapshot:
             segment["end"] = float(segment["end"])
         payload = {
             "project_id": self.project_id,
+            "loading": self.loading,
             "project": project_data,
             "path": str(self.path) if self.path else None,
             "dirty": self.dirty,
@@ -98,11 +100,17 @@ class ProjectSnapshot:
 
     def copy(self) -> ProjectSnapshot:
         return ProjectSnapshot(
-            deepcopy(self.project), self.path, self.dirty, self.saved_hash, self.project_id
+            deepcopy(self.project), self.path, self.dirty, self.saved_hash, self.project_id, self.loading
         )
 
 
+def require_ready(snapshot: ProjectSnapshot) -> None:
+    if snapshot.loading:
+        raise ValueError("Project is still loading. Wait and call get_project again before editing.")
+
+
 def require_revision(snapshot: ProjectSnapshot, expected: str) -> None:
+    require_ready(snapshot)
     if snapshot.revision != expected:
         raise ValueError("Project changed. Call get_project and retry using its current revision.")
 
@@ -124,6 +132,7 @@ def protected_assets(project: PackProject) -> list[Path]:
 
 
 def save_snapshot(snapshot: ProjectSnapshot, destination: Path, overwrite: bool) -> ProjectSnapshot:
+    require_ready(snapshot)
     if not destination.name.casefold().endswith(".cvpack.json"):
         raise ValueError("Project destination must end in .cvpack.json.")
     assets = protected_assets(snapshot.project)
@@ -213,7 +222,7 @@ class HeadlessProjectAccess:
                 "projects": [
                     {"project_id": item.project_id, "title": item.project.title,
                      "project_path": str(item.path) if item.path else None,
-                     "dirty": item.dirty, "revision": item.revision}
+                     "dirty": item.dirty, "loading": item.loading, "revision": item.revision}
                     for item in self._root._projects.values()
                 ],
             }
@@ -281,6 +290,7 @@ class PackAutomation:
         segments = data.pop("segments")
         return {
             "project_id": snapshot.project_id,
+            "loading": snapshot.loading,
             "project": data,
             "segments": segments[offset:offset + limit],
             "total_segments": len(segments),

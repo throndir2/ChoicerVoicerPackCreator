@@ -9,6 +9,7 @@ from choicer_voicer_pack_creator.automation import (
     HeadlessProjectAccess,
     PackAutomation,
     ProjectPatch,
+    ProjectSnapshot,
     SegmentPatch,
 )
 from choicer_voicer_pack_creator.media import MediaInfo
@@ -248,3 +249,16 @@ def test_preview_bounds_and_headless_show_errors(automation):
         automation.preview_audio(5, 3)
     with pytest.raises(ValueError, match="headless"):
         automation.access.show(None, None)
+
+
+def test_loading_snapshot_is_inspectable_but_cannot_be_edited_or_saved(tmp_path):
+    access = HeadlessProjectAccess(ProjectSnapshot(PackProject(title="Opening"), loading=True))
+    automation = PackAutomation(access, tmp_path)
+    state = automation.get_project()
+    assert state["loading"]
+    with pytest.raises(ValueError, match="still loading"):
+        automation.update_project(ProjectPatch(title="Not ready"), state["revision"])
+    with pytest.raises(ValueError, match="still loading"):
+        automation.save_project(state["revision"], str(tmp_path / "must-not-exist.cvpack.json"))
+    assert automation.get_project() == state
+    assert not (tmp_path / "must-not-exist.cvpack.json").exists()
