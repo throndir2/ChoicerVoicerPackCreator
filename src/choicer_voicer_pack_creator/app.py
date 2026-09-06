@@ -5,7 +5,7 @@ import os
 import sys
 import wave
 from array import array
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QLockFile, QStandardPaths, Qt, QTimer
@@ -26,6 +26,19 @@ from choicer_voicer_pack_creator.ui.theme import APP_STYLESHEET
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(argv) if argv is not None else sys.argv
+    if "--mcp" in arguments:
+        from choicer_voicer_pack_creator.mcp_server import main as mcp_main
+
+        return mcp_main([item for item in arguments[1:] if item != "--mcp"])
+    return run_editor(arguments)
+
+
+def run_editor(
+    argv: Sequence[str],
+    *,
+    start_automation: Callable[[MainWindow], object] | None = None,
+) -> int:
+    arguments = list(argv)
     smoke_test = "--smoke-test" in arguments
     QCoreApplication.setOrganizationName("ChoicerVoicerCommunity")
     QCoreApplication.setApplicationName("Choicer Voicer Pack Creator")
@@ -49,6 +62,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         app_data.mkdir(parents=True, exist_ok=True)
         instance_lock = QLockFile(str(app_data / "application-instance.lock"))
         if not instance_lock.tryLock(100):
+            if start_automation is not None:
+                print(
+                    "The editor is already running. Close it before starting live MCP, "
+                    "or use --headless with a separate project.",
+                    file=sys.stderr,
+                )
+                return 3
             QMessageBox.warning(
                 None,
                 "Choicer Voicer Pack Creator is already running",
@@ -60,6 +80,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         media = MediaTools()
     except MediaError as error:
+        if start_automation is not None:
+            print(f"FFmpeg is unavailable: {error}", file=sys.stderr)
+            return 2
         QMessageBox.critical(
             None,
             "FFmpeg is unavailable",
@@ -132,6 +155,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         analysis_data_root=app_data / "analysis" if app_data is not None else None,
     )
     window.show()
+    if start_automation is not None:
+        window.automation_runtime = start_automation(window)
     if smoke_test:
         window.dirty = False
         QTimer.singleShot(350, app.quit)

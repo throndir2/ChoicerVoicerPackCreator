@@ -22,6 +22,7 @@ classifiers = [
 ]
 dependencies = [
   "PySide6==6.11.2",
+  "mcp==1.29.1",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +41,7 @@ dev = [
 
 [project.scripts]
 choicer-voicer-pack-creator = "choicer_voicer_pack_creator.app:main"
+choicer-voicer-mcp = "choicer_voicer_pack_creator.mcp_server:main"
 
 [project.urls]
 Repository = "https://github.com/throndir2/ChoicerVoicerPackCreator"
@@ -52,7 +54,7 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-choicer_voicer_pack_creator = ["resources/*.json", "resources/*.txt"]
+choicer_voicer_pack_creator = ["resources/*.json", "resources/*.txt", "resources/*.md"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"

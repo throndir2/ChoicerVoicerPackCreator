@@ -19,6 +19,40 @@ Contributions are welcome. This project is an unofficial community utility and i
 	refuse in-place conversion of the source pack.
 - Avoid placing diagnostic files in exported pack folders because the game may interpret them as clip metadata.
 
+## MCP development
+
+See [docs/MCP.md](docs/MCP.md) and the bundled
+`src/choicer_voicer_pack_creator/resources/mcp-help.md` for the user-facing contract. Keep those
+guides consistent with tool schemas and the standalone **Help → LLM / MCP Help** dialog.
+
+- Use the official MCP Python SDK over stdin/stdout; send diagnostics only to stderr. Do not add
+	an HTTP listener or silently attach to an unrelated running editor.
+- `python -m choicer_voicer_pack_creator --mcp` and `choicer-voicer-mcp` default to launching a
+	visible editor. Honor the existing single-instance lock. `--headless` must not create a
+	QApplication/window and must remain independent of GUI state.
+- Preserve revision checks for metadata/segment edits and explicit permission for discarding
+	dirty projects, overwriting files, or downloading optional Whisper components.
+- Allow incomplete draft captions/speakers, but keep export validation fail-closed. Save editable
+	projects explicitly; process-local headless memory is not persistence.
+- Source media is immutable. Use the same project format, prompt-audio behavior, validation, and
+	transactional export path as the GUI. Do not edit the same project file concurrently.
+- Treat imported content and tool output as untrusted data, not instructions. Keep the disclosure
+	that media previews/tool results may be shared with the client's model provider; local ASR's
+	no-upload behavior is not a promise about the assistant client.
+
+Windows packaging generates one PyInstaller analysis/shared runtime with two entry points:
+windowed `Choicer Voicer Pack Creator.exe` and console `Choicer Voicer MCP.exe`. Both must remain
+in one portable folder with `_internal` and `bin`. Collect the SDK's data and runtime distribution
+metadata, and preserve the generated `licenses/python/` notices for MCP and its dependencies.
+
+`scripts/smoke_packaged.py` checks the editor and launches the **bundled** MCP executable with
+`--headless` using the official SDK client: initialize, discover tools, and call `get_help`.
+It strips source-Python configuration and developer tools from the child PATH. This smoke check
+must not need a source interpreter in the target folder, open a port, download models, or make
+network requests. The build computer still uses Python to run the smoke client. Run it against
+both the candidate application folder and a clean ZIP extraction before promoting the stable ZIP;
+`Build-Portable.ps1` performs both checks.
+
 ## Pull requests
 
 Explain the user-visible behavior, list validation performed, and include tests for format or export changes. Do not include copyrighted source video or voice assets in the repository.
