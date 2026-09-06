@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -11,6 +13,7 @@ from choicer_voicer_pack_creator.automation import (
     require_revision,
 )
 from choicer_voicer_pack_creator.exporter import safe_name
+from choicer_voicer_pack_creator.operations import SourceSnapshot
 
 if TYPE_CHECKING:
     from choicer_voicer_pack_creator.jobs import JobHandle, JobRecord
@@ -88,7 +91,7 @@ class LiveJobs:
             folder = parent / safe_name(snapshot.project.title)
             writes = (folder, folder.with_name(folder.name + ".zip"))
 
-            def operation(ctx):
+            def process(ctx):
                 return frozen.export_pack(
                     str(parent), expected_revision, overwrite,
                     lambda detail: ctx.report(detail.message, detail.fraction, detail=detail),
@@ -96,17 +99,23 @@ class LiveJobs:
         elif kind == "analysis":
             if use_whisper and not allow_download:
                 raise ValueError("Whisper requires explicit allow_download=true permission.")
-            local_path(snapshot.project.video_path)
+            reads = [local_path(snapshot.project.video_path)]
             if use_whisper:
                 keys = ("whisper-inference",)
 
-            def operation(ctx):
+            def process(ctx):
                 return frozen.analyze(
                     use_whisper, allow_download, sensitivity, model, language,
                     ctx.report, ctx.cancelled,
                 )
         else:
             raise ValueError(f"Unsupported processing kind: {kind}")
+        assets = SourceSnapshot.capture(reads)
+        asset_revision = hashlib.sha256(json.dumps(assets.entries).encode("utf-8")).hexdigest()
+
+        def operation(ctx):
+            assets.verify()
+            return process(ctx)
 
         def submit():
             # A human edit between request capture and GUI scheduling must not silently
@@ -115,7 +124,10 @@ class LiveJobs:
             handle = self.bridge.window.job_manager.submit(
                 snapshot.project_id, kind, f"MCP {kind}: {snapshot.project.title}", operation,
                 resource_class="cpu", resource_keys=keys, read_paths=reads, write_paths=writes,
-                source_snapshot={"project_id": snapshot.project_id, "revision": snapshot.revision},
+                source_snapshot={
+                    "project_id": snapshot.project_id, "revision": snapshot.revision,
+                    "asset_revision": asset_revision,
+                },
             )
             if kind == "export":
                 from choicer_voicer_pack_creator.exporter import ExportResult

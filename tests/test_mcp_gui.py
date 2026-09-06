@@ -387,6 +387,41 @@ def test_analysis_job_keeps_submitted_snapshot_without_applying_stale_result(
         in_worker(qtbot, lambda: jobs.start(bound, "analysis", before["revision"]))
 
 
+def test_queued_processing_rejects_assets_changed_since_submission(
+    qtbot, live_editor, tmp_path, monkeypatch,
+):
+    from choicer_voicer_pack_creator.mcp_jobs import LiveJobs
+
+    window, bridge, automation = live_editor
+    source = tmp_path / "queued-source.mp4"
+    source.write_bytes(b"original source")
+    window.active_editor.project.video_path = str(source)
+    before = in_worker(qtbot, automation.get_project)
+    release, processed = threading.Event(), threading.Event()
+    holders = [
+        window.job_manager.submit(
+            None, "fixture", "Hold CPU capacity", lambda _ctx: release.wait(10)
+        )
+        for _ in range(window.job_manager.limits["cpu"])
+    ]
+    monkeypatch.setattr(PackAutomation, "analyze", lambda *_args: processed.set())
+    jobs = LiveJobs(bridge)
+    bound = in_worker(qtbot, automation.for_project)
+    try:
+        qtbot.waitUntil(lambda: all(item.record.state == "running" for item in holders))
+        record = in_worker(qtbot, lambda: jobs.start(bound, "analysis", before["revision"]))
+        handle = window.job_manager.handle(record["job_id"])
+        qtbot.waitUntil(lambda: handle.record.state == "waiting")
+        source.write_bytes(b"replacement while queued")
+    finally:
+        release.set()
+    qtbot.waitUntil(lambda: not handle.record.active)
+    assert handle.record.state == "failed"
+    assert "Source assets changed" in handle.record.error
+    assert not processed.is_set()
+    assert len(record["source_snapshot"]["asset_revision"]) == 64
+
+
 def test_queued_tab_close_keeps_identity_when_tabs_reorder(qtbot, live_editor):
     from choicer_voicer_pack_creator.ui_automation import UIAutomation
 

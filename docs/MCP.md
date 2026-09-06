@@ -161,7 +161,7 @@ In live mode prefer `start_export(output_parent, expected_revision, project_id?,
 and `start_analysis(expected_revision, project_id?, use_whisper=false, allow_download=false,
 sensitivity="balanced", model="base", language="auto")`. They return records containing
 `job_id`, `project_id`, `kind`, `state`, `active`, `message`, `fraction`, `cancel_requested`,
-`source_snapshot:{project_id,revision}`, `result`, and `error`.
+`source_snapshot:{project_id,revision,asset_revision}`, `result`, and `error`.
 **A queued/running response is not successful export or analysis completion.**
 Poll `get_job(job_id)` until terminal; only `succeeded` has completed results.
 `list_jobs(project_id?)` reads the same scheduler as the visible Tasks panel.
@@ -170,6 +170,10 @@ States are `queued`, `waiting`, `running`, `cancelling`, `succeeded`, `failed`, 
 and `blocked`. `cancel_job(job_id)` requests cancellation; wait for terminal cleanup rather
 than assuming an accepted request means subprocesses or staging have already stopped.
 Atomic publication may finish successfully after cancellation is requested.
+Queued inputs carry the backend's source-identity snapshot and are rechecked when admitted.
+`asset_revision` fingerprints file stat identities, not a media-content copy: ordinary external
+replacement/editing fails the old task rather than silently processing changed queued inputs.
+This is not protection against hostile edits that deliberately restore filesystem timestamps.
 Closing task details never cancels work. Jobs retain the submitted project snapshot; analysis
 returns draft evidence and never applies suggestions automatically. Export results include
 `exported_revision`. Later edits remain dirty and are not overwritten by old completions.

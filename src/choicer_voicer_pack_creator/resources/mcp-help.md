@@ -86,6 +86,8 @@ and `start_analysis(expected_revision, project_id?, ...)` return a `job_id`
 immediately, NOT finished output. `list_jobs(project_id?)`, `get_job(job_id)`,
 and `cancel_job(job_id)` inspect/request cancellation. Records include project
 identity, source snapshot revision, state, progress, result and error.
+An `asset_revision` records queued file identities; changed inputs are rejected
+when the task starts instead of silently processing another source version.
 Only `succeeded` means completed results; queued/waiting/running/cancelling are
 not success. Wait for terminal cleanup after cancellation; an atomic publication
 may finish successfully. Closing task details is not cancellation.
