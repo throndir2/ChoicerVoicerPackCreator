@@ -120,6 +120,12 @@ receipts are stored in the application's `export-cache` data directory outside g
 Up to two prompts are prepared concurrently, and ZIPs avoid recompressing media. These
 optimizations retain full media validation, overwrite consent, and rollback protection.
 
+The editor's **Export** action first opens an options dialog (Fast 480p30, Higher quality
+720p30, Custom, compatible-OGV copying, and advanced prompt padding). Acceptance updates the
+project and marks changed settings dirty; cancelling the dialog leaves it unchanged. This is
+only the interactive UI flow: `start_export` and `export_pack` never open that options dialog
+and still require a clean saved project. After GUI option edits, save again before MCP export.
+
 ## Tools and workflow
 
 Start with `get_help` and client tool discovery. The advertised schemas are the authoritative
@@ -244,6 +250,14 @@ Speaker controls expose `segmentSpeakers`, `autoSpeakerMatching`, `keepSpeakerUn
 `matchSpeakers`, `undoSpeakerMatching`, and `cancelSpeakerMatching`. Checkbox state is reported
 as `checked`. Speaker-field and exclusion inputs retain the selected segment's identity.
 Editor selectors are scoped to the visible `project_id`; select that tab before typing.
+`exportProject` opens `exportOptions` before processing. Options expose `exportQualityPreset`
+(select indices 0=Fast, 1=Higher quality, 2=Custom), `exportHeight`, `exportFps`,
+`exportPreserveVideo`, `exportAdvanced`, `exportHeadPadding`, `exportTailPadding`,
+`exportOptionsContinue`, and `exportOptionsCancel`, scoped to the visible project.
+Numeric options report their values/ranges and support Up/Down keys; expand `exportAdvanced`
+before interacting with padding. Send Escape to `exportOptions` or click `exportOptionsCancel`
+to dismiss without applying edits. Continue may open native backing/destination decisions;
+use the noninteractive export tools for unattended exports rather than driving those dialogs.
 Closed/discarded document IDs are rejected immediately, even while their task cleanup finishes.
 Documents explicitly kept processing in the background retain their identity.
 Reopening a retired document creates a new identity.

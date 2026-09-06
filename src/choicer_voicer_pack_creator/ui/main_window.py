@@ -93,6 +93,7 @@ from choicer_voicer_pack_creator.ui.backing_dialog import BackingDialog
 from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
 from choicer_voicer_pack_creator.ui.commands import action_button, command_icon, describe_action
 from choicer_voicer_pack_creator.ui.export_dialog import ExportProgressDialog
+from choicer_voicer_pack_creator.ui.export_options_dialog import ExportOptions, ExportOptionsDialog
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.ui.readable_table import ReadableTableWidget
 from choicer_voicer_pack_creator.ui.setup_consent import SetupConsent
@@ -232,6 +233,7 @@ class ProjectEditor(QWidget):
         self._waveform_request_id = 0
         self._export_worker: ExportWorker | None = None
         self._export_dialog: ExportProgressDialog | None = None
+        self._export_options_dialog: ExportOptionsDialog | None = None
         self._backing_dialog: BackingDialog | None = None
         self._analysis_dialog: AnalysisDialog | None = None
         self._source_request = 0
@@ -387,7 +389,7 @@ class ProjectEditor(QWidget):
             (self.action_save, "save", "Save", "Save the active project's editable file."),
             (self.action_save_as, "save", None, "Save the active project to a different file."),
             (self.action_restore_previous, "restore", None, "Restore this project's previous save."),
-            (self.action_export, "export", "Export", "Export the active project as a game-ready pack and ZIP."),
+            (self.action_export, "export", "Export", "Review export quality and options, then export the active project as a game-ready pack and ZIP."),
             (self.action_analyze, "analyze", "Analyze", "Analyze this video's dialogue and review suggested segments."),
             (self.action_backing, "backing", "Backing", "Generate music/effects backing for this project without changing the source."),
             (self.action_add, "add", "Add", "Create a new segment using the current In/Out times. Existing segments are not changed."),
@@ -2569,13 +2571,55 @@ class ProjectEditor(QWidget):
 
     # ---------- Export and status ----------
 
+    def _apply_export_options(self, options: ExportOptions) -> None:
+        if options == ExportOptions.from_project(self.project):
+            return
+        options.apply_to(self.project)
+        for widget, value in (
+            (self.height_spin, options.video_height),
+            (self.fps_spin, options.video_fps),
+            (self.head_pad_spin, options.head_padding),
+            (self.tail_pad_spin, options.tail_padding),
+        ):
+            with QSignalBlocker(widget):
+                widget.setValue(value)
+        with QSignalBlocker(self.preserve_video_check):
+            self.preserve_video_check.setChecked(options.preserve_source_video)
+        self._set_dirty(True)
+        self._refresh_validation_label()
+
     def export_pack(self) -> None:
+        if self._export_options_dialog is not None:
+            self._export_options_dialog.raise_()
+            self._export_options_dialog.activateWindow()
+            return
         if self._export_dialog is not None:
             self._export_dialog.show()
             self._export_dialog.raise_()
             self._export_dialog.activateWindow()
             return
+        revision, project = self.session.revision, self.project
+        options_dialog = ExportOptionsDialog(project, self)
+        self._export_options_dialog = options_dialog
+        try:
+            if options_dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            options = options_dialog.options()
+        finally:
+            self._export_options_dialog = None
+            options_dialog.deleteLater()
+        if (
+            self.project is not project or self.session.revision != revision
+            or self.session.id in self.workspace._closed_ids
+        ):
+            self.workspace.notice(
+                "Export options changed",
+                "The project changed while export options were open. "
+                "Review the current settings and export again.",
+            )
+            return
         self._commit_editors()
+        self._apply_export_options(options)
         if self.project.import_warnings:
             answer = QMessageBox.warning(
                 self,
