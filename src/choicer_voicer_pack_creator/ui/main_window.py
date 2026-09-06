@@ -277,6 +277,7 @@ class ProjectEditor(QWidget):
     def dirty(self, value: bool) -> None:
         if value:
             self.session.revision += 1
+            self.workspace._exit_discarded.discard(self.session.id)
         else:
             self.session.saved_revision = self.session.revision
 
@@ -348,6 +349,8 @@ class ProjectEditor(QWidget):
         self.action_delete.setShortcuts(
             [QKeySequence(Qt.Key.Key_Backspace), QKeySequence("Ctrl+Delete")]
         )
+        self.action_delete.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.addAction(self.action_delete)
         self.action_delete.setAutoRepeat(False)
         self.action_delete.triggered.connect(self.delete_segment)
         self.action_duplicate = QAction("Duplicate Segment", self)
@@ -443,6 +446,7 @@ class ProjectEditor(QWidget):
         self.play_button.setToolTip("Play / pause (Space)")
         self.play_button.clicked.connect(self.toggle_playback)
         self.play_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
+        self.play_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.play_shortcut.setAutoRepeat(False)
         self.play_shortcut.activated.connect(self.toggle_playback)
         transport.addWidget(self.play_button)
@@ -1099,7 +1103,7 @@ class ProjectEditor(QWidget):
         self.workspace.new_from_youtube()
 
     def _youtube_ready(self, dialog: YouTubeDialog) -> None:
-        if dialog.download_result is None:
+        if dialog.download_result is None or self.session.id in self.workspace._closed_ids:
             return
         result = dialog.download_result
         self.settings.setValue("lastYouTubeDir", str(result.video_path.parent.parent))
@@ -1334,7 +1338,9 @@ class ProjectEditor(QWidget):
                 self._analysis_dialog.hide()
                 self._analysis_dialog = None
         if not preserve_view:
+            self._source_request += 1
             self.session.source_revision += 1
+            self.workspace.cancel_source_jobs(self.session.id)
             if self._analysis_dialog is not None:
                 self._analysis_dialog.hide()
                 self._analysis_dialog = None
@@ -2426,6 +2432,8 @@ class ProjectEditor(QWidget):
         self._backing_dialog = dialog
 
         def apply_result() -> None:
+            if self.session.id in self.workspace._closed_ids:
+                return
             result = dialog.backing_path
             current = (
                 self.session.source_token(), self.session.backing_revision,
@@ -2935,8 +2943,10 @@ class MainWindow(QMainWindow):
         return editor
 
     def focus_project(self, project_id: str) -> None:
+        if project_id in self._closed_ids or project_id not in self.editors:
+            self.notice("Project is closed", "This project was closed. Open its saved file again.")
+            return
         editor = self.editor_for_project(project_id)
-        self._closed_ids.discard(project_id)
         if self.tabs.indexOf(editor) < 0:
             editor.session.hidden = False
             self.tabs.addTab(editor, editor.project.title)
@@ -2977,8 +2987,10 @@ class MainWindow(QMainWindow):
         path = path.resolve()
         key = canonical_project_path(path)
         if key in self._opening_paths:
-            self.focus_project(self._opening_paths[key])
-            return
+            opening_id = self._opening_paths[key]
+            if opening_id not in self._closed_ids:
+                self.focus_project(opening_id)
+                return
         for editor in self.editors.values():
             if editor.session.id in self._closed_ids:
                 continue
@@ -3004,6 +3016,8 @@ class MainWindow(QMainWindow):
             return ProjectStore.load(path), path, False, [], sha256(path)
 
         def complete(value):
+            if editor.session.id in self._closed_ids:
+                return
             project, project_path, dirty, warnings, saved_hash = value
             editor._set_project(project, project_path, mark_dirty=dirty)
             editor._saved_project_hash = saved_hash
@@ -3026,8 +3040,12 @@ class MainWindow(QMainWindow):
         )
         job.completed.connect(complete)
         job.failed.connect(failed)
-        job.finished.connect(lambda: self._opening_paths.pop(key, None))
-        job.finished.connect(lambda: editor.editor_splitter.setEnabled(True))
+
+        def finished():
+            if self._opening_paths.get(key) == editor.session.id:
+                self._opening_paths.pop(key)
+            editor.editor_splitter.setEnabled(True)
+        job.finished.connect(finished)
 
     def new_from_video(self, source: Path | None = None, *, auto_process: bool = True) -> None:
         source = source or self.active_editor._choose_new_video()
@@ -3042,7 +3060,7 @@ class MainWindow(QMainWindow):
         token = editor.session.source_token()
 
         def ready(info):
-            if token != editor.session.source_token():
+            if token != editor.session.source_token() or editor.session.id in self._closed_ids:
                 return
             editor._set_project(PackProject(
                 title=source.stem, authors=[getpass.getuser()],
@@ -3141,6 +3159,10 @@ class MainWindow(QMainWindow):
 
         def finished():
             self.release_project_save(reservation)
+            if job.record.state == "cancelled":
+                self._closing = False
+                self.updater.cancel_close_update()
+                editor.statusBar().showMessage("Save cancelled; unsaved changes were kept.")
         job.failed.connect(failed)
         job.finished.connect(finished)
         return True
@@ -3280,6 +3302,10 @@ class MainWindow(QMainWindow):
             self._closing = False
             self.notice("Could not save workspace", message)
         job.failed.connect(failed)
+        job.finished.connect(
+            lambda: failed("Workspace save was cancelled; the application remains open.")
+            if job.record.state == "cancelled" else None
+        )
 
     def restore_workspace(self) -> None:
         if self._restore_started or self.workspace_store is None or self.recovery_store is None:
@@ -3561,8 +3587,12 @@ class MainWindow(QMainWindow):
 
         def cancel():
             self._closing = False
+            discarded = self._exit_discarded.copy()
             self._exit_discarded.clear()
             self.updater.cancel_close_update()
+            for editor in self.editors.values():
+                if editor.session.id in discarded:
+                    editor._write_recovery_snapshot()
 
         def next_editor():
             if editors:
@@ -3584,6 +3614,14 @@ class MainWindow(QMainWindow):
     def _finish_close(self) -> None:
         if self.job_manager.active_jobs():
             QTimer.singleShot(50, self._finish_close)
+            return
+        if not self._automation_disconnected and any(
+            editor.dirty and editor.session.id not in self._exit_discarded
+            and editor.session.id not in self._closed_ids
+            for editor in self.editors.values()
+        ):
+            self._closing = False
+            self.close()
             return
         if not self.updater.install_on_close():
             self._closing = False
