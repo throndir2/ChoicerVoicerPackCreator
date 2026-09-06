@@ -229,6 +229,45 @@ def test_save_and_save_as_remember_the_final_project_paths(
     assert window._recent_project_paths() == [first]
 
 
+@pytest.mark.parametrize("save_as", [False, True])
+def test_save_suggests_safe_filename_without_renaming_the_project(
+    make_window, wait_for_jobs, tmp_path: Path, monkeypatch, save_as: bool,
+) -> None:
+    window = make_window()
+    original = tmp_path / "original.cvpack.json"
+    if save_as:
+        ProjectStore.save(PackProject(title="Original"), original)
+        window.open_path(original)
+        wait_for_jobs(window)
+    window.settings.setValue("lastProjectDir", str(tmp_path))
+    title = r"../A: video\clip?"
+    window.title_edit.setText(title)
+    destination = tmp_path / "..A videoclip.cvpack.json"
+    suggestions = []
+
+    def choose_destination(_parent, _caption, suggested, _filter):
+        suggestions.append(suggested)
+        return suggested, ""
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", choose_destination)
+    assert window.save_project(save_as=save_as)
+    wait_for_jobs(window)
+    assert suggestions == [str(destination)]
+    assert window.project_path == destination
+    assert window.project.title == title
+    assert window.title_edit.text() == title
+    assert ProjectStore.load(destination).title == title
+    if save_as:
+        assert ProjectStore.load(original).title == "Original"
+
+    window.title_edit.setText("New: title?")
+    assert window.save_project()
+    wait_for_jobs(window)
+    assert suggestions == [str(destination)]
+    assert window.project_path == destination
+    assert ProjectStore.load(destination).title == "New: title?"
+
+
 def test_save_remembers_completed_snapshot_without_clearing_newer_edits(
     make_window, wait_for_jobs, tmp_path: Path, monkeypatch
 ) -> None:

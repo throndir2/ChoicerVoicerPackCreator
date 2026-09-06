@@ -459,6 +459,10 @@ before replacing source download files, preserves other files in the folder, and
 previous media if publication fails. Projects referencing the replaced media may be affected.
 Save your `.cvpack.json`
 beside that folder to keep the project relocatable; downloaded media is not a temporary cache.
+The suggested project filename removes characters Windows cannot use in filenames, trims
+trailing dots/spaces, and avoids reserved device names. If nothing remains, it uses `Dub Pack`.
+The original video title stays unchanged in the project; exported folder/ZIP names use the
+same cleanup.
 The downloader retrieves the best available video/audio and may merge them into MKV.
 Download percentages combine the selected video and audio transfers. Estimates are labeled and
 may pause when sizes change or a transfer retries, but do not move backward. Unknown-size

@@ -43,7 +43,13 @@ ProgressCallback = Callable[[ExportProgress], None]
 
 
 def safe_name(value: str, fallback: str = "Dub Pack") -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "", value).strip().rstrip(".")
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "", value).strip().rstrip(". ")
+    # Windows device names stay reserved even when followed by a file extension.
+    stem = cleaned.partition(".")[0].rstrip(" ").upper()
+    if stem in {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} or re.fullmatch(
+        r"(?:COM|LPT)[1-9\u00b9\u00b2\u00b3]", stem,
+    ):
+        cleaned = f"_{cleaned}"
     return cleaned or fallback
 
 
