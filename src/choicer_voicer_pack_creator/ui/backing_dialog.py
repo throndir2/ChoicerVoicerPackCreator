@@ -154,7 +154,7 @@ class BackingDialog(QDialog):
             worker.configure_job(
                 self.job_manager, self.project_id, "backing", "Generate backing track",
                 resource_class="cpu", read_paths=(self.video,),
-                resource_keys=("local-inference", f"separation:{self.data_root.resolve()}"),
+                resource_keys=("separation-inference", f"separation:{self.data_root.resolve()}"),
                 source_snapshot=self.source_snapshot,
             )
         worker.progress.connect(self._progress)

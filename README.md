@@ -271,8 +271,10 @@ requested; it never opens automatically or takes space from the editor. Filter i
 or the current project, inspect stage progress and elapsed time, cancel supported work, reopen
 review/details, or open a successful output. Closing the Tasks window does not stop processing.
 CPU, I/O, and network budgets bound concurrent work; jobs sharing output files or inference
-components wait rather than overwrite each other. You can edit or save another project while a
-pack exports, a source opens, or analysis runs.
+components wait rather than overwrite each other. Whisper and backing separation use independent
+inference slots and can run together when the CPU budget permits (four or more logical CPUs).
+Only one job per inference engine runs at a time across projects. You can edit or save another
+project while a pack exports, a source opens, or analysis runs.
 
 **Retry** is enabled for failed/canceled analysis, refinement, YouTube imports, exports, and failed
 backing generation when the originating document/source and review are still current. Analysis
@@ -377,7 +379,7 @@ One language selection applies to an entire scan; use Auto-detect for primarily 
 sources, or rerun selected-language passes when a video deliberately mixes languages. Long videos
 also receive conservative free-disk and memory checks before analysis begins.
 
-New Whisper and Refined YouTube drafts include **up to 0.15 seconds of source audio before**
+New Whisper and YouTube drafts include **up to 0.15 seconds of source audio before**
 and **0.25 seconds after** each range. These are real audio handles, not inserted silence, so
 slightly early consonants and trailing syllables can survive extraction. Short gaps are shared
 at their midpoint to avoid introducing overlaps; touching ranges have no room for extra audio,
@@ -480,7 +482,7 @@ you can also select or type a language code. YouTube-generated translations are 
 creator-uploaded tracks can themselves be translations. Some videos have no accessible captions,
 and caption delivery can fail independently of the video download.
 
-The **Refined YouTube** panel stays empty until a local audio-only refinement pass finishes on a
+The **YouTube** panel stays empty until a local audio-only refinement pass finishes on a
 background task, then selects the processed draft for review and use. Unprocessed YouTube
 captions are never displayed or offered for import. Refinement requires no model download;
 original caption evidence stays in the project for regeneration, not as another transcript choice.
@@ -490,10 +492,10 @@ panel without changing the selected draft. Each transcript keeps its own row cou
 In/Out boundaries: a longer Whisper passage is not
 forced onto shorter YouTube captions or flagged as a conflict. You can edit, preview, and uncheck
 rows in each draft independently.
-The playback button names the chosen source: **Play Selected Refined YouTube Line** or
+The playback button names the chosen source: **Play Selected YouTube Line** or
 **Play Selected Whisper Line**.
 
-To adjust pause-aware segmentation, use the **Refined YouTube** panel and click
+To adjust pause-aware segmentation, use the **YouTube** panel and click
 **Refine YouTube Again...**. Refinement and Whisper have separate task entries and cancellation. Refinement
 uses the original imported YouTube words, not edits made to either draft.
 New imports retain YouTube's available word/text-fragment offsets. Refinement uses these
@@ -510,7 +512,7 @@ suggested boundary: this pass measures audio energy, not speaker identity, so mu
 hide pauses and two speakers without a pause can still share a row. It does not correct
 misrecognized words, perform forced alignment, or separate overlapping voices.
 
-Click **Use Refined YouTube Transcript** or **Use Whisper Transcript** directly below the
+Click **Use YouTube Transcript** or **Use Whisper Transcript** directly below the
 draft you want. Both buttons remain visible; you do not need to select that source first.
 Each button is enabled when its draft is ready and at least one row is checked.
 Click a row in a draft or its **Select** control to choose it for playback and the Enter-key
@@ -540,7 +542,7 @@ segments. Draft changes are included in recovery snapshots and **Save Project**,
 project edits. **Project → Analyze Video & Suggest Segments** restores completed drafts without
 rerunning analysis. If refinement has never completed, reopening resumes that pass without
 starting Whisper. A successful Whisper rescan replaces only the local draft after confirmation;
-refining again replaces only the Refined YouTube draft after confirmation. A failed or canceled
+refining again replaces only the YouTube draft after confirmation. A failed or canceled
 scan keeps its previous result. Original YouTube caption evidence, fragment timings, and the source URL
 are also retained. Replacing or clearing the source video clears its caption evidence and drafts.
 
@@ -641,8 +643,13 @@ Use **Duplicate Segment** to create a second prompt at exactly the same timestam
 
 For newly cut segments, prompt audio comes from the source video. The exporter normalizes it and adds 150 ms head / 250 ms tail padding by default; both values are editable. Imported or manually chosen prompt files are preserved when already MP3 and converted otherwise.
 
-**New from Video** and **New from YouTube** automatically generate music/effects backing before
-starting transcript analysis. The first run asks permission to download a pinned, checksum-verified
+**New from Video** and **New from YouTube** automatically generate music/effects backing alongside
+transcript analysis, without opening a separate backing-generation popup. The analysis review's
+transcript selection does not control backing generation: choosing a transcript, canceling a scan,
+or closing the review leaves backing running independently. **Tools > Tasks** retains each job's
+progress and error log and offers explicit cancellation, retry, and details, even after the
+transcript review is closed.
+The first run asks permission to download a pinned, checksum-verified
 HT-Demucs model (approximately 302 MiB). Processing runs locally on the CPU; audio is never uploaded.
 The verified model is retained for offline reuse. Missing or damaged model data requires download
 permission again.

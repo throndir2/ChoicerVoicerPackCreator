@@ -57,7 +57,7 @@ def test_youtube_caption_provenance_survives_save_and_recovery(tmp_path: Path) -
         analysis_review=AnalysisReview(
             local_rows=[AnalysisDraftRow("1", "2", "Whisper edit", "Whisper")],
             selected_source="refined",
-            refined_rows=[AnalysisDraftRow("1.1", "1.9", "Refined edit", "Refined YouTube")],
+            refined_rows=[AnalysisDraftRow("1.1", "1.9", "Refined edit", "YouTube")],
             pause_threshold=0.6,
             local_model_name="tiny", local_detected_language="en",
         ),

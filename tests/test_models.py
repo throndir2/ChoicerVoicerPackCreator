@@ -194,7 +194,7 @@ def test_analysis_review_round_trip_preserves_unfinished_edits() -> None:
     review = AnalysisReview(
         local_rows=[AnalysisDraftRow("0.5", "3", "Edited Whisper", "Whisper", 0.876)],
         refined_rows=[
-            AnalysisDraftRow("in progress", "2", "Edited refinement", "Refined YouTube", checked=False),
+            AnalysisDraftRow("in progress", "2", "Edited refinement", "YouTube", checked=False),
         ],
         local_model_name="tiny", local_detected_language="en",
     )
@@ -222,7 +222,7 @@ def test_caption_fragment_and_two_independent_drafts_round_trip() -> None:
         local_rows=[AnalysisDraftRow("1.5", "3", "Whisper edit", "Whisper", 0.8)],
         selected_source="refined",
         refined_rows=[
-            AnalysisDraftRow("unfinished", "3.4", "Refined edit", "Refined YouTube", checked=False),
+            AnalysisDraftRow("unfinished", "3.4", "Refined edit", "YouTube", checked=False),
         ],
         pause_threshold=0.8,
     )
@@ -253,7 +253,7 @@ def test_current_project_loads_without_retaining_obsolete_review_storage() -> No
         source_captions=[SourceCaption(1, 2, "Original evidence", "YouTube")],
         analysis_review=AnalysisReview(
             local_rows=[AnalysisDraftRow("1", "2", "Whisper draft", "Whisper")],
-            refined_rows=[AnalysisDraftRow("1", "2", "Refined draft", "Refined YouTube")],
+            refined_rows=[AnalysisDraftRow("1", "2", "Refined draft", "YouTube")],
             selected_source="refined",
         ),
     )

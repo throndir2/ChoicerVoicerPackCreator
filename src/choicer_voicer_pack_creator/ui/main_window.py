@@ -1094,7 +1094,7 @@ class ProjectEditor(QWidget):
         if self.project is project:
             self.open_analysis_dialog(initial_scan=True, auto_start=True)
         if not project.backing_track_path:
-            self.generate_backing_track()
+            self.generate_backing_track(background=True)
 
     def open_analysis_dialog(
         self, *, initial_scan: bool = False, auto_start: bool = False
@@ -2353,10 +2353,13 @@ class ProjectEditor(QWidget):
         self.backing_path_label.setToolTip(path or "Generate backing to keep music under recordings.")
         self.generate_backing_button.setText("Regenerate backing..." if path else "Generate backing...")
 
-    def generate_backing_track(self, *, after_success: Callable[[], None] | None = None) -> bool:
+    def generate_backing_track(
+        self, *, after_success: Callable[[], None] | None = None, background: bool = False,
+    ) -> bool:
         if self._backing_dialog is not None:
-            self._backing_dialog.show()
-            self._backing_dialog.raise_()
+            if not background:
+                self._backing_dialog.show()
+                self._backing_dialog.raise_()
             return False
         self._commit_editors()
         project = self.project
@@ -2414,7 +2417,8 @@ class ProjectEditor(QWidget):
         dialog.accepted.connect(apply_result)
         dialog.finished.connect(lambda _result: setattr(self, "_backing_dialog", None))
         dialog.setWindowModality(Qt.WindowModality.NonModal)
-        dialog.show()
+        if not background:
+            dialog.show()
         return True
 
     def choose_icon(self) -> None:

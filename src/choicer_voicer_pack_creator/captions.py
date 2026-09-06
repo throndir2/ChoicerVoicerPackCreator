@@ -104,7 +104,7 @@ def _normalize_text(text: str) -> str:
 
 def _label(source: str, reason: str) -> str:
     return (
-        f"Refined {source} - {reason} - source audio handles up to "
+        f"{source} - {reason} - source audio handles up to "
         f"{SOURCE_HEAD_PADDING:.2f}s before / {SOURCE_TAIL_PADDING:.2f}s after "
         "- volume-based; music/effects may mask pauses"
     )
