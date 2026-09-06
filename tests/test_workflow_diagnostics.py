@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import subprocess
+import sys
 from array import array
 from concurrent.futures import ThreadPoolExecutor
 from http.cookiejar import CookieJar
@@ -107,7 +108,7 @@ def test_media_commands_record_bounded_stderr_not_stdout(
 ) -> None:
     stderr = "diagnostic " * 600 + " final error"
     completed = subprocess.CompletedProcess([], returncode, PRIVATE_PAYLOAD, stderr)
-    monkeypatch.setattr(media_module.subprocess, "run", lambda *_args, **_kwargs: completed)
+    monkeypatch.setattr(MediaTools, "_capture", lambda *_args, **_kwargs: completed)
     media = MediaTools.__new__(MediaTools)
     command = ["ffmpeg.exe", "-i", "https://user:password@example.test/media?signature=secret"]
     with ApplicationDiagnostics(tmp_path):
@@ -137,7 +138,7 @@ def test_media_launch_errors_and_probe_metadata_are_logged(tmp_path: Path, monke
     def missing(*_args, **_kwargs):
         raise FileNotFoundError("executable missing")
 
-    monkeypatch.setattr(media_module.subprocess, "run", missing)
+    monkeypatch.setattr(media, "_capture", missing)
     with ApplicationDiagnostics(tmp_path):
         with pytest.raises(FileNotFoundError):
             media.probe(tmp_path / "video.mp4")
@@ -149,7 +150,7 @@ def test_media_launch_errors_and_probe_metadata_are_logged(tmp_path: Path, monke
             "format": {"duration": "10", "tags": {"comment": PRIVATE_PAYLOAD}},
         })
         monkeypatch.setattr(
-            media_module.subprocess, "run",
+            media, "_capture",
             lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout, ""),
         )
         assert media.probe(tmp_path / "video.mp4").has_audio
@@ -161,7 +162,7 @@ def test_media_launch_errors_and_probe_metadata_are_logged(tmp_path: Path, monke
 def test_binary_audio_commands_do_not_log_samples(tmp_path: Path, monkeypatch) -> None:
     samples = array("h", [0, 32760, 0]).tobytes()
     monkeypatch.setattr(
-        media_module.subprocess, "run",
+        MediaTools, "_capture",
         lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, samples, b""),
     )
     media = MediaTools.__new__(MediaTools)
@@ -184,29 +185,33 @@ def test_media_stderr_redacts_long_signed_urls_before_truncation(tmp_path: Path)
 
 
 def test_waveform_cancellation_logs_reaped_process_without_payload(tmp_path: Path, monkeypatch) -> None:
-    class Process:
-        pid = 123
-        returncode = -15
-        calls = 0
-        terminated = False
-
-        def communicate(self, *, timeout=None):
-            self.calls += 1
-            if self.calls == 1:
-                raise subprocess.TimeoutExpired("ffmpeg", timeout)
-            return PRIVATE_PAYLOAD.encode(), b"stopped"
-
-        def terminate(self):
-            self.terminated = True
-
-    process = Process()
-    monkeypatch.setattr(media_module.subprocess, "Popen", lambda *_args, **_kwargs: process)
     media = MediaTools.__new__(MediaTools)
     media.ffmpeg = "ffmpeg.exe"
+    ready = tmp_path / "ready"
+    children = []
+    real_popen = subprocess.Popen
+    real_capture = media._capture
+
+    def launch(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        children.append(process)
+        return process
+
+    def capture(_command):
+        return real_capture([
+            sys.executable, "-u", "-c",
+            "import pathlib,sys,time; print(sys.argv[2], flush=True); "
+            "pathlib.Path(sys.argv[1]).touch(); time.sleep(30)",
+            str(ready), PRIVATE_PAYLOAD,
+        ])
+
+    monkeypatch.setattr(media_module.subprocess, "Popen", launch)
+    monkeypatch.setattr(media, "_capture", capture)
     with ApplicationDiagnostics(tmp_path):
-        assert media.waveform_peaks(tmp_path / "video.mp4", 10, cancelled=lambda: True) == []
-    assert process.terminated
-    assert records(tmp_path, "media_command_canceled")[0]["returncode"] == -15
+        assert media.waveform_peaks(tmp_path / "video.mp4", 10, cancelled=ready.exists) == []
+    assert ready.exists()
+    assert children and children[0].poll() is not None
+    assert records(tmp_path, "media_command_canceled")
     assert_private_content_absent(tmp_path)
 
 

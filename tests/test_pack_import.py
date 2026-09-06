@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from choicer_voicer_pack_creator.config_format import render_clip_metadata, render_pack_info
+from choicer_voicer_pack_creator.operations import OperationCancelled, SourceChangedError
 from choicer_voicer_pack_creator.pack_io import PackImporter
 
 
@@ -67,3 +70,47 @@ def test_import_does_not_follow_image_reference_outside_pack(tmp_path: Path) -> 
     assert result.project.icon_path == ""
     assert result.project.segments[0].image_path == ""
     assert any("escapes the selected pack folder" in warning for warning in result.warnings)
+
+
+def _write_cancellation_fixture(root: Path) -> None:
+    (root / "_pack_info.ini").write_bytes(
+        render_pack_info("Pack", "icon.png", ["Creator"], "")
+    )
+    (root / "dub_video.ogv").write_bytes(b"video")
+    for index in range(3):
+        (root / f"{index}.txt").write_bytes(
+            render_clip_metadata("Hello", f"{index}.png", float(index + 1), ["Hero"])
+        )
+        (root / f"{index}.mp3").write_bytes(b"audio")
+
+
+def test_folder_cancellation_preserves_all_source_files(tmp_path: Path) -> None:
+    _write_cancellation_fixture(tmp_path)
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    stopped = False
+    updates = []
+
+    def progress(message: str, fraction: float | None) -> None:
+        nonlocal stopped
+        updates.append((message, fraction))
+        stopped |= message == "Reading clip metadata 2/3"
+
+    with pytest.raises(OperationCancelled):
+        PackImporter(FakeMedia()).import_folder(  # type: ignore[arg-type]
+            tmp_path, cancelled=lambda: stopped, progress=progress,
+        )
+    assert updates[-1] == ("Reading clip metadata 2/3", 1 / 3)
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+
+
+def test_folder_import_rejects_source_inventory_changes(tmp_path: Path) -> None:
+    _write_cancellation_fixture(tmp_path)
+
+    def progress(message: str, fraction: float | None) -> None:
+        if message == "Pack import ready":
+            (tmp_path / "new-file.txt").write_bytes(b"external change")
+
+    with pytest.raises(SourceChangedError):
+        PackImporter(FakeMedia()).import_folder(tmp_path, progress=progress)  # type: ignore[arg-type]
+    assert (tmp_path / "new-file.txt").read_bytes() == b"external change"
+    assert (tmp_path / "dub_video.ogv").read_bytes() == b"video"
