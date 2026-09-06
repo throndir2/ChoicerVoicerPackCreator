@@ -58,6 +58,16 @@ class UIAutomation:
         self.bridge = bridge
         self._actions: deque[dict[str, Any]] = deque(maxlen=40)
 
+    @staticmethod
+    def _find(root: QObject, selector: str) -> QObject | None:
+        targets = root.findChildren(QObject, selector)
+        if not targets:
+            return None
+        return next(
+            (target for target in targets
+             if isinstance(target, QWidget) and target.isVisible()), targets[0]
+        )
+
     def _target(self, selector: str, project_id: str | None) -> QObject:
         if selector not in SELECTORS:
             raise ValueError(f"Selector is not allowlisted: {selector}")
@@ -67,12 +77,9 @@ class UIAutomation:
             raise ValueError("Project is not the visible tab. Select it through projectTabs first.")
         roots = [editor] if selector in EDITOR_SELECTORS and editor is not None else [window]
         for root in roots:
-            targets = root.findChildren(QObject, selector)
-            if targets:
-                return next(
-                    (target for target in targets
-                     if isinstance(target, QWidget) and target.isVisible()), targets[0]
-                )
+            target = self._find(root, selector)
+            if target is not None:
+                return target
         raise ValueError(f"Widget is unavailable: {selector}")
 
     def _belongs(self, widget: QWidget) -> bool:
@@ -120,7 +127,7 @@ class UIAutomation:
                 roots = [editor] if selector in EDITOR_SELECTORS and editor is not None else [window]
                 target = next(
                     (item for root in roots
-                     if (item := root.findChild(QObject, selector)) is not None), None
+                     if (item := self._find(root, selector)) is not None), None
                 )
                 if target is not None:
                     widgets.append(self._describe(target))
@@ -136,7 +143,7 @@ class UIAutomation:
                      "visible": item.isVisible(), "object_name": item.objectName()}
                     for item in QApplication.topLevelWidgets() if self._belongs(item)
                 ],
-                "actions": list(self._actions),
+                "actions": [dict(action) for action in self._actions],
             }
         return self.bridge.call(read)
 

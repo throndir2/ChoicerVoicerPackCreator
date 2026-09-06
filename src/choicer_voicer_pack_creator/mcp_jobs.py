@@ -126,7 +126,9 @@ class LiveJobs:
                     ))
 
                 def finished():
-                    if handle.record.state != "succeeded":
+                    if handle.record.state == "cancelled":
+                        dialog.show_cancelled()
+                    elif handle.record.state != "succeeded":
                         dialog.show_error(handle.record.error or handle.record.state)
                     dialog.worker_finished()
 
