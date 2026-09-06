@@ -50,7 +50,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
-    QSpinBox,
     QSplitter,
     QStatusBar,
     QTabBar,
@@ -343,7 +342,7 @@ class ProjectEditor(QWidget):
         # Keep editor integrations compatible without duplicating application commands per tab.
         for name in (
             "action_new", "action_youtube", "action_open", "action_clear_recent",
-            "action_import", "action_import_zip", "action_exit", "recent_projects_menu",
+            "action_import", "action_import_zip", "recent_projects_menu",
         ):
             setattr(self, name, getattr(self.workspace, name))
         self.action_save = QAction("Save Project", self)
@@ -427,7 +426,7 @@ class ProjectEditor(QWidget):
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         toolbar.addActions([self.action_save, self.action_export])
         toolbar.addSeparator()
-        toolbar.addActions(self.project_actions)
+        toolbar.addAction(self.action_analyze)
         for action in self.file_actions + self.project_actions:
             button = toolbar.widgetForAction(action)
             if button is not None:
@@ -659,43 +658,6 @@ class ProjectEditor(QWidget):
         )
         project_form.addRow("Icon", icon_row)
 
-        export_settings = QHBoxLayout()
-        self.head_pad_spin = QDoubleSpinBox()
-        self.head_pad_spin.setRange(0, 2)
-        self.head_pad_spin.setDecimals(3)
-        self.head_pad_spin.setSingleStep(0.025)
-        self.tail_pad_spin = QDoubleSpinBox()
-        self.tail_pad_spin.setRange(0, 2)
-        self.tail_pad_spin.setDecimals(3)
-        self.tail_pad_spin.setSingleStep(0.025)
-        self.height_spin = QSpinBox()
-        self.height_spin.setRange(144, 2160)
-        self.height_spin.setSingleStep(72)
-        self.height_spin.setToolTip(
-            "New projects default to 480p for faster exports. "
-            "Increase Height for higher quality and slower encoding."
-        )
-        self.fps_spin = QSpinBox()
-        self.fps_spin.setRange(1, 120)
-        self.fps_spin.setToolTip(
-            "New projects default to 30 FPS. Higher frame rates take longer to encode."
-        )
-        for widget in (self.head_pad_spin, self.tail_pad_spin):
-            widget.valueChanged.connect(self._pack_details_changed)
-        self.height_spin.valueChanged.connect(self._video_profile_changed)
-        self.fps_spin.valueChanged.connect(self._video_profile_changed)
-        export_settings.addWidget(QLabel("Head"))
-        export_settings.addWidget(self.head_pad_spin)
-        export_settings.addWidget(QLabel("Tail"))
-        export_settings.addWidget(self.tail_pad_spin)
-        export_settings.addWidget(QLabel("Height"))
-        export_settings.addWidget(self.height_spin)
-        export_settings.addWidget(QLabel("FPS"))
-        export_settings.addWidget(self.fps_spin)
-        project_form.addRow("Export", export_settings)
-        self.preserve_video_check = QCheckBox("Preserve imported compatible OGV without re-encoding")
-        self.preserve_video_check.toggled.connect(self._pack_details_changed)
-        project_form.addRow("Video mode", self.preserve_video_check)
         self.project_section.set_content(
             project_content, scrollable=True, scrollbar_name="projectDetailsScrollbar",
         )
@@ -1364,11 +1326,6 @@ class ProjectEditor(QWidget):
             self._refresh_backing_controls()
             self.icon_path_label.setText(Path(project.icon_path).name if project.icon_path else "Generated from video")
             self.icon_path_label.setToolTip(project.icon_path)
-            self.head_pad_spin.setValue(project.head_padding)
-            self.tail_pad_spin.setValue(project.tail_padding)
-            self.height_spin.setValue(project.video_height)
-            self.fps_spin.setValue(project.video_fps)
-            self.preserve_video_check.setChecked(project.preserve_source_video)
             duration = max(0.1, project.video_duration)
             self.mark_in_spin.setMaximum(duration)
             self.mark_out_spin.setMaximum(duration)
@@ -2272,14 +2229,6 @@ class ProjectEditor(QWidget):
         self._commit_editors()
         self._refresh_validation_label()
 
-    def _video_profile_changed(self) -> None:
-        if self._syncing:
-            return
-        if self.preserve_video_check.isChecked():
-            with QSignalBlocker(self.preserve_video_check):
-                self.preserve_video_check.setChecked(False)
-        self._pack_details_changed()
-
     def _commit_editors(self) -> None:
         if self._syncing:
             return
@@ -2291,13 +2240,6 @@ class ProjectEditor(QWidget):
                 item.strip() for item in self.authors_edit.text().split(",") if item.strip()
             ]
         self.project.readme = self.readme_edit.toPlainText()
-        if self.head_pad_spin.value() != round(self.project.head_padding, 3):
-            self.project.head_padding = self.head_pad_spin.value()
-        if self.tail_pad_spin.value() != round(self.project.tail_padding, 3):
-            self.project.tail_padding = self.tail_pad_spin.value()
-        self.project.video_height = self.height_spin.value()
-        self.project.video_fps = self.fps_spin.value()
-        self.project.preserve_source_video = self.preserve_video_check.isChecked()
         segment = self.selected_segment()
         names_changed = False
         if segment:
@@ -2379,13 +2321,8 @@ class ProjectEditor(QWidget):
         if self.project.preserve_source_video:
             self.project.video_height = info.height
             self.project.video_fps = round(info.fps)
-            with QSignalBlocker(self.height_spin), QSignalBlocker(self.fps_spin):
-                self.height_spin.setValue(info.height)
-                self.fps_spin.setValue(round(info.fps))
         self.video_path_label.setText(str(source))
         self.video_path_label.setToolTip(str(source))
-        with QSignalBlocker(self.preserve_video_check):
-            self.preserve_video_check.setChecked(self.project.preserve_source_video)
         self.mark_in_spin.setMaximum(info.duration)
         self.mark_out_spin.setMaximum(info.duration)
         self.timeline.set_duration(info.duration)
@@ -2442,8 +2379,6 @@ class ProjectEditor(QWidget):
         self.video_path_label.setToolTip("")
         self.timeline.set_waveform([])
         self.timeline.set_duration(0.1)
-        with QSignalBlocker(self.preserve_video_check):
-            self.preserve_video_check.setChecked(False)
         self._set_dirty(True)
         self._refresh_validation_label()
 
@@ -2633,16 +2568,6 @@ class ProjectEditor(QWidget):
         if options == ExportOptions.from_project(self.project):
             return
         options.apply_to(self.project)
-        for widget, value in (
-            (self.height_spin, options.video_height),
-            (self.fps_spin, options.video_fps),
-            (self.head_pad_spin, options.head_padding),
-            (self.tail_pad_spin, options.tail_padding),
-        ):
-            with QSignalBlocker(widget):
-                widget.setValue(value)
-        with QSignalBlocker(self.preserve_video_check):
-            self.preserve_video_check.setChecked(options.preserve_source_video)
         self._set_dirty(True)
         self._refresh_validation_label()
 
@@ -3143,18 +3068,18 @@ class MainWindow(QMainWindow):
         ):
             menu.setToolTipsVisible(True)
 
-        self.action_new = QAction("New from Video...", self)
+        self.action_new = QAction("From &Video...", self)
         self.action_new.setShortcut(QKeySequence.StandardKey.New)
         self.action_new.triggered.connect(lambda: self.new_from_video())
-        self.action_youtube = QAction("New from YouTube...", self)
+        self.action_youtube = QAction("From &YouTube...", self)
         self.action_youtube.triggered.connect(self.new_from_youtube)
         self.action_open = QAction("Open Project...", self)
         self.action_open.setShortcut(QKeySequence.StandardKey.Open)
         self.action_open.triggered.connect(lambda: self.active_editor.open_project())
-        self.action_import = QAction("Import Existing Pack...", self)
+        self.action_import = QAction("&Folder...", self)
         self.action_import.setShortcut(QKeySequence("Ctrl+I"))
         self.action_import.triggered.connect(lambda: self.active_editor.import_pack())
-        self.action_import_zip = QAction("Import Pack ZIP...", self)
+        self.action_import_zip = QAction("&ZIP...", self)
         self.action_import_zip.triggered.connect(lambda: self.active_editor.import_pack_zip())
         self.action_clear_recent = QAction("Clear Recent Projects", self)
         self.action_clear_recent.triggered.connect(lambda: self._set_recent_project_paths([]))
@@ -3163,19 +3088,19 @@ class MainWindow(QMainWindow):
         self.action_close_project.triggered.connect(
             lambda: self.close_project_tab(self.tabs.currentIndex())
         )
-        self.action_exit = QAction("Exit", self)
-        self.action_exit.triggered.connect(self.close)
-
-        self.file_menu.addActions([self.action_new, self.action_youtube, self.action_open])
+        self.new_menu = self.file_menu.addMenu("&New")
+        self.new_menu.setToolTipsVisible(True)
+        self.new_menu.addActions([self.action_new, self.action_youtube])
+        self.file_menu.addAction(self.action_open)
         self.recent_projects_menu = self.file_menu.addMenu("Open &Recent")
         self.recent_projects_menu.setToolTipsVisible(True)
         self.recent_projects_menu.aboutToShow.connect(self._refresh_recent_projects_menu)
-        self.file_menu.addActions([self.action_import, self.action_import_zip])
+        self.import_menu = self.file_menu.addMenu("&Import Pack")
+        self.import_menu.setToolTipsVisible(True)
+        self.import_menu.addActions([self.action_import, self.action_import_zip])
         self.file_menu.addSeparator()
         self._file_export_separator = self.file_menu.addSeparator()
         self.file_menu.addAction(self.action_close_project)
-        self.file_menu.addSeparator()
-        self.file_menu.addAction(self.action_exit)
 
         self.action_reset_layout = QAction("Reset UI Layout", self)
         self.action_reset_layout.triggered.connect(self.reset_ui_layout)
@@ -3185,7 +3110,11 @@ class MainWindow(QMainWindow):
         self.action_mcp_help.triggered.connect(lambda: self.active_editor.show_mcp_help())
         self.help_menu.addAction(self.action_mcp_help)
         self.help_menu.addSeparator()
-        self.updater = UpdateController(self, self.help_menu)
+        self.updates_menu = self.help_menu.addMenu("&Updates")
+        self.updates_menu.setToolTipsVisible(True)
+        self.updater = UpdateController(self, self.updates_menu)
+        self.diagnostics_menu = self.help_menu.addMenu("&Diagnostics")
+        self.diagnostics_menu.setToolTipsVisible(True)
         self.action_logs = QAction("Open Diagnostic Logs...", self)
         self.action_logs.triggered.connect(
             lambda: open_diagnostic_logs(self, self.analysis_data_root)
@@ -3194,7 +3123,7 @@ class MainWindow(QMainWindow):
         self.action_save_logs.triggered.connect(
             lambda: save_diagnostic_logs(self, self.analysis_data_root)
         )
-        self.help_menu.addActions([self.action_logs, self.action_save_logs])
+        self.diagnostics_menu.addActions([self.action_logs, self.action_save_logs])
         self.help_menu.addSeparator()
         self.action_about = QAction("About", self)
         self.action_about.triggered.connect(lambda: self.active_editor.show_about())
@@ -3208,7 +3137,6 @@ class MainWindow(QMainWindow):
             (self.action_import_zip, "archive", "Import a pack ZIP into a new project tab."),
             (self.action_clear_recent, "close", "Clear the application-wide recent-project list without deleting files."),
             (self.action_close_project, "close", "Close the active project tab; unsaved work and running tasks are protected."),
-            (self.action_exit, "close", "Exit the application after handling unsaved projects and running tasks."),
             (self.action_reset_layout, "restore", "Restore the default window size and pane layout for all tabs without changing projects."),
             (self.tasks_window.show_action, "tasks", "View and manage background tasks across all projects."),
             (self.action_mcp_help, "help", "Open assistant connection instructions and the MCP safety guide."),

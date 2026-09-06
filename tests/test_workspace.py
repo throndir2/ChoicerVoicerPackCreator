@@ -99,15 +99,57 @@ def test_workspace_menu_precedes_tabs_and_project_toolbar(
     ]
     actions = [action for action in toolbar.actions() if not action.isSeparator()]
     assert actions == [
-        workspace.action_save, workspace.action_export,
-        workspace.action_analyze, workspace.action_backing,
+        workspace.action_save, workspace.action_export, workspace.action_analyze,
     ]
     assert [toolbar.widgetForAction(action).text() for action in actions] == [
-        "Save", "Export", "Analyze", "Backing",
+        "Save", "Export", "Analyze",
     ]
     assert all(toolbar.widgetForAction(action).isVisible() for action in actions)
     assert toolbar.widgetForAction(actions[-1]).geometry().right() < toolbar.width()
     assert workspace.tools_menu.actions() == [workspace.tasks_window.show_action]
+    assert workspace.action_backing in workspace.project_menu.actions()
+    assert workspace.generate_backing_button.defaultAction() is workspace.action_backing
+    assert workspace.project_section.isAncestorOf(workspace.generate_backing_button)
+
+
+def test_workspace_groups_file_and_help_commands(workspace):
+    assert [
+        action for action in workspace.file_menu.actions() if not action.isSeparator()
+    ] == [
+        workspace.new_menu.menuAction(), workspace.action_open,
+        workspace.recent_projects_menu.menuAction(), workspace.import_menu.menuAction(),
+        *workspace.active_editor.file_actions, workspace.action_close_project,
+    ]
+    assert workspace.new_menu.title() == "&New"
+    assert workspace.new_menu.actions() == [workspace.action_new, workspace.action_youtube]
+    assert [action.text() for action in workspace.new_menu.actions()] == [
+        "From &Video...", "From &YouTube...",
+    ]
+    assert workspace.import_menu.title() == "&Import Pack"
+    assert workspace.import_menu.actions() == [workspace.action_import, workspace.action_import_zip]
+    assert [action.text() for action in workspace.import_menu.actions()] == ["&Folder...", "&ZIP..."]
+    assert [
+        action for action in workspace.help_menu.actions() if not action.isSeparator()
+    ] == [
+        workspace.action_mcp_help, workspace.updates_menu.menuAction(),
+        workspace.diagnostics_menu.menuAction(), workspace.action_about,
+    ]
+    assert [
+        action for action in workspace.updates_menu.actions() if not action.isSeparator()
+    ] == [
+        workspace.updater.check_action, workspace.updater.auto_action,
+        workspace.updater.prerelease_action,
+    ]
+    assert workspace.diagnostics_menu.actions() == [
+        workspace.action_logs, workspace.action_save_logs,
+    ]
+    for menu in (
+        workspace.file_menu, workspace.new_menu, workspace.import_menu,
+        workspace.help_menu, workspace.updates_menu, workspace.diagnostics_menu,
+    ):
+        assert menu.toolTipsVisible()
+        assert not menu.actions()[-1].isSeparator()
+    assert not any(action.text() == "Exit" for action in workspace.findChildren(QAction))
 
 
 def test_global_commands_survive_project_replacement_and_close(workspace, qtbot):
@@ -115,6 +157,8 @@ def test_global_commands_survive_project_replacement_and_close(workspace, qtbot)
     initial = workspace.active_editor
     new_action = workspace.action_new
     help_actions = workspace.help_menu.actions()
+    updates = workspace.updates_menu.actions()
+    diagnostics = workspace.diagnostics_menu.actions()
     editor = workspace.add_project(PackProject(title="Replacement"), dirty=False)
     qtbot.waitUntil(lambda: not isValid(initial))
     workspace.action_close_project.trigger()
@@ -123,8 +167,12 @@ def test_global_commands_survive_project_replacement_and_close(workspace, qtbot)
     assert workspace.action_new is new_action
     assert new_action.parent() is workspace
     assert workspace.help_menu.actions() == help_actions
-    assert workspace.updater.check_action in help_actions
-    assert workspace.action_logs in help_actions
+    assert workspace.updates_menu.actions() == updates
+    assert workspace.diagnostics_menu.actions() == diagnostics
+    assert workspace.updater.check_action in updates
+    assert workspace.action_logs in diagnostics
+    assert new_action in workspace.new_menu.actions()
+    assert workspace.action_import in workspace.import_menu.actions()
     assert workspace.findChildren(QMenuBar) == [menu]
     assert len([
         action for action in workspace.findChildren(QAction)
@@ -183,20 +231,55 @@ def test_project_save_commands_only_save_active_tab(
     assert saved == [first, second, first]
 
 
-def test_global_open_shortcut_is_not_duplicated_across_tabs(workspace, qtbot, monkeypatch):
+@pytest.mark.parametrize("action_name,key", [
+    ("action_open", Qt.Key.Key_O), ("action_new", Qt.Key.Key_N), ("action_import", Qt.Key.Key_I),
+])
+def test_global_file_shortcuts_are_not_duplicated_across_tabs(
+    workspace, qtbot, monkeypatch, action_name, key,
+):
     first = workspace.add_project(PackProject(title="First"), dirty=False)
     second = workspace.add_project(PackProject(title="Second"), dirty=False)
     opened = []
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (opened.append(1) or "", ""))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *_args: opened.append(1) or "")
     workspace.activateWindow()
     qtbot.waitUntil(workspace.isActiveWindow)
     for editor in (first, second):
         workspace.tabs.setCurrentWidget(editor)
         editor.title_edit.setFocus()
         qtbot.waitUntil(editor.title_edit.hasFocus)
-        qtbot.keyClick(editor.title_edit, Qt.Key.Key_O, Qt.KeyboardModifier.ControlModifier)
-        assert editor.action_open is workspace.action_open
+        qtbot.keyClick(editor.title_edit, key, Qt.KeyboardModifier.ControlModifier)
+        assert getattr(editor, action_name) is getattr(workspace, action_name)
     assert opened == [1, 1]
+
+
+@pytest.mark.parametrize("control", ["mouse", "keyboard"])
+@pytest.mark.parametrize("action_name,method", [
+    ("action_import", "import_pack"), ("action_import_zip", "import_pack_zip"),
+])
+def test_import_submenu_commands_follow_active_project(
+    workspace, qtbot, monkeypatch, control, action_name, method,
+):
+    first = workspace.add_project(PackProject(title="First"), dirty=False)
+    second = workspace.add_project(PackProject(title="Second"), dirty=False)
+    imported = []
+    for editor in (first, second):
+        monkeypatch.setattr(editor, method, lambda editor=editor: imported.append(editor))
+    menu = workspace.import_menu
+    action = getattr(workspace, action_name)
+    for editor in (first, second, first):
+        workspace.tabs.setCurrentWidget(editor)
+        menu.popup(workspace.menuBar().mapToGlobal(QPoint(0, workspace.menuBar().height())))
+        qtbot.waitUntil(menu.isVisible)
+        if control == "mouse":
+            qtbot.mouseClick(
+                menu, Qt.MouseButton.LeftButton, pos=menu.actionGeometry(action).center(),
+            )
+        else:
+            menu.setActiveAction(action)
+            qtbot.keyClick(menu, Qt.Key.Key_Return)
+        qtbot.waitUntil(lambda: not menu.isVisible())
+    assert imported == [first, second, first]
 
 
 def test_project_loading_disables_matching_menu_and_toolbar_actions(workspace):
@@ -223,7 +306,7 @@ def test_project_loading_disables_matching_menu_and_toolbar_actions(workspace):
     assert loading.action_backing.isEnabled()
 
 
-@pytest.mark.parametrize("control", ["tab-button", "shortcut"])
+@pytest.mark.parametrize("control", ["tab-button", "shortcut", "menu"])
 def test_close_project_controls_keep_unsaved_confirmation(workspace, qtbot, control):
     editor = workspace.add_project(PackProject(title="Unsaved"), dirty=True)
     workspace.activateWindow()
@@ -234,14 +317,50 @@ def test_close_project_controls_keep_unsaved_confirmation(workspace, qtbot, cont
         )
         assert button.accessibleName() == "Close project: Unsaved"
         qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
-    else:
+    elif control == "shortcut":
         editor.title_edit.setFocus()
         qtbot.keyClick(editor.title_edit, Qt.Key.Key_W, Qt.KeyboardModifier.ControlModifier)
+    else:
+        menu = workspace.file_menu
+        menu.popup(workspace.menuBar().mapToGlobal(QPoint(0, workspace.menuBar().height())))
+        qtbot.waitUntil(menu.isVisible)
+        qtbot.mouseClick(
+            menu, Qt.MouseButton.LeftButton,
+            pos=menu.actionGeometry(workspace.action_close_project).center(),
+        )
     qtbot.waitUntil(lambda: bool(workspace._decisions))
     box = workspace._decisions[-1]
     qtbot.mouseClick(box.button(QMessageBox.StandardButton.Cancel), Qt.MouseButton.LeftButton)
     assert workspace.active_editor is editor
     assert editor.dirty
+
+
+def test_window_close_saves_cancels_and_discards_across_projects(
+    workspace, qtbot, monkeypatch, tmp_path,
+):
+    first = workspace.active_editor
+    first._set_project(PackProject(title="First dirty project"), None, mark_dirty=True)
+    second = workspace.add_project(PackProject(title="Second dirty project"), dirty=True)
+    saved = tmp_path / "first.cvpack.json"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(saved), ""))
+    assert not workspace.close()
+    box = workspace._decisions[-1]
+    assert box.property("projectId") == first.session.id
+    qtbot.mouseClick(box.button(QMessageBox.StandardButton.Save), Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: any(
+        decision.property("projectId") == second.session.id for decision in workspace._decisions
+    ))
+    assert ProjectStore.load(saved).title == "First dirty project"
+    assert not first.dirty
+    box = workspace._decisions[-1]
+    qtbot.mouseClick(box.button(QMessageBox.StandardButton.Cancel), Qt.MouseButton.LeftButton)
+    assert workspace.isVisible() and not workspace._closing
+    assert workspace.tabs.count() == 2 and second.dirty
+    assert not workspace.close()
+    box = workspace._decisions[-1]
+    assert box.property("projectId") == second.session.id
+    qtbot.mouseClick(box.button(QMessageBox.StandardButton.Discard), Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: workspace._close_approved and not workspace.isVisible())
 
 
 def test_command_icons_and_compact_buttons_are_described(workspace):

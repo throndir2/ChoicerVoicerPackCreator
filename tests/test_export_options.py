@@ -220,9 +220,8 @@ def test_accepted_options_reach_export_snapshot_and_explicit_save(
     assert ExportOptions.from_project(calls[0]) == expected
     assert calls[0] is not editor.project
     assert calls[0].to_dict() == editor.project.to_dict()
-    assert editor.height_spin.value() == expected.video_height
-    assert editor.fps_spin.value() == expected.video_fps
-    assert editor.head_pad_spin.value() == expected.head_padding
+    editor._commit_editors()
+    assert ExportOptions.from_project(editor.project) == expected
     assert editor.dirty is (choice != "unchanged")
     assert editor.session.revision == revision + (choice != "unchanged")
     saved = tmp_path / "saved.cvpack.json"
@@ -268,7 +267,7 @@ def test_acceptance_keeps_dirty_settings_when_later_export_steps_stop(
             lambda *_args: "" if stop == "destination" else str(tmp_path),
         )
     editor.export_pack()
-    assert editor.project.video_height == editor.height_spin.value() == 720
+    assert editor.project.video_height == 720
     assert editor.dirty
     assert not editor.workspace.job_manager.tasks(editor.session.id)
     assert "lastExportDir" not in editor.settings.allKeys()
@@ -282,16 +281,52 @@ def test_acceptance_keeps_dirty_settings_when_later_export_steps_stop(
 def test_options_do_not_overwrite_a_project_changed_during_dialog(editor, monkeypatch):
     def choose(dialog):
         dialog.quality_combo.setCurrentIndex(1)
-        editor.height_spin.setValue(1080)
+        editor.title_edit.setText("Changed while exporting")
+        editor._commit_editors()
         return QDialog.DialogCode.Accepted
 
     notices = []
     monkeypatch.setattr(ExportOptionsDialog, "exec", choose)
     monkeypatch.setattr(editor.workspace, "notice", lambda *args: notices.append(args))
     editor.export_pack()
-    assert editor.project.video_height == 1080
+    assert editor.project.title == "Changed while exporting"
+    assert editor.project.video_height == 480
     assert len(notices) == 1 and "project changed" in notices[0][1].lower()
     assert not editor.workspace.job_manager.tasks(editor.session.id)
+
+
+@pytest.mark.parametrize("widget_name", [
+    "height_spin", "fps_spin", "head_pad_spin", "tail_pad_spin",
+])
+def test_numeric_export_options_do_not_trigger_editor_shortcuts(
+    editor, qtbot, monkeypatch, widget_name,
+):
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *_args: pytest.fail("Editing must not delete a segment"),
+    )
+    monkeypatch.setattr(editor.player, "play", lambda: pytest.fail("Editing must not play video"))
+    before = editor.project.to_dict()
+
+    def edit_options():
+        dialog = editor._export_options_dialog
+        try:
+            dialog.quality_combo.setCurrentIndex(2)
+            dialog.advanced.set_collapsed(False)
+            spin = getattr(dialog, widget_name)
+            spin.setFocus()
+            qtbot.waitUntil(spin.hasFocus)
+            spin.selectAll()
+            qtbot.keyClick(spin, Qt.Key.Key_Backspace)
+            qtbot.keyClick(spin, Qt.Key.Key_Backspace)
+            assert not spin.cleanText().strip()
+            qtbot.keyClick(spin, Qt.Key.Key_Space)
+        finally:
+            dialog.reject()
+
+    QTimer.singleShot(0, edit_options)
+    editor.action_export.trigger()
+    assert editor.project.to_dict() == before
+    assert not editor.dirty
 
 
 @pytest.mark.integration

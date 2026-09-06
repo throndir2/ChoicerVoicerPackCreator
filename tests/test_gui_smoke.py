@@ -8,7 +8,15 @@ import pytest
 from PySide6.QtCore import QEvent, QPoint, QSettings, Qt, QThread, QTimer, QUrl, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QKeyEvent
 from PySide6.QtMultimedia import QMediaPlayer
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QLineEdit, QMessageBox, QPushButton
+from PySide6.QtWidgets import (
+    QAbstractSpinBox,
+    QApplication,
+    QDialog,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+)
 from shiboken6 import isValid
 
 from choicer_voicer_pack_creator import __version__
@@ -16,6 +24,7 @@ from choicer_voicer_pack_creator.exporter import ExportResult
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
 from choicer_voicer_pack_creator.ui.about_dialog import AboutDialog
+from choicer_voicer_pack_creator.ui.export_options_dialog import ExportOptions
 from choicer_voicer_pack_creator.ui.main_window import (
     ExportWorker,
     MainWindow,
@@ -69,33 +78,35 @@ def test_main_window_starts_with_empty_editor(qtbot) -> None:
     qtbot.addWidget(window)
     window.show()
     assert window.project.title == "Untitled Dub Pack"
-    assert window.height_spin.value() == 480
-    assert window.fps_spin.value() == 30
+    assert window.project.video_height == 480
+    assert window.project.video_fps == 30
     assert window.segment_table.rowCount() == 0
     assert "Choicer Voicer Pack Creator" in window.windowTitle()
-    help_actions = window.menuBar().actions()[-1].menu().actions()
-    assert window.updater.check_action in help_actions
-    assert window.action_logs in help_actions
+    assert window.updater.check_action in window.updates_menu.actions()
+    assert window.action_logs in window.diagnostics_menu.actions()
     window.dirty = False
     window.close()
 
 
-def test_export_quality_controls_keep_saved_profiles_and_allow_opt_in(qtbot, tmp_path) -> None:
+def test_pack_details_preserve_export_options_without_duplicate_controls(qtbot, tmp_path) -> None:
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     window = MainWindow(
         UnusedMedia(), settings=settings, analysis_data_root=tmp_path / "analysis",
     )  # type: ignore[arg-type]
     qtbot.addWidget(window)
-    window._set_project(
-        PackProject(video_height=720, video_fps=60, preserve_source_video=True),
-        None, mark_dirty=False,
+    project = PackProject(
+        video_height=720, video_fps=60, preserve_source_video=True,
+        head_padding=0.1234, tail_padding=0.5678,
     )
-    assert window.height_spin.value() == 720
-    assert window.fps_spin.value() == 60
-    window.height_spin.setValue(1080)
-    assert window.project.video_height == 1080
-    assert window.project.video_fps == 60
-    assert not window.project.preserve_source_video
+    expected = ExportOptions.from_project(project)
+    window._set_project(project, None, mark_dirty=False)
+    assert not window.project_section.findChildren(QAbstractSpinBox)
+    assert ExportOptions.from_project(window.project) == expected
+    window.title_edit.setText("Changed pack title")
+    window._commit_editors()
+    assert window.project.title == "Changed pack title"
+    assert ExportOptions.from_project(window.project) == expected
+    assert window.dirty
     window.dirty = False
     window.close()
 
@@ -416,8 +427,7 @@ def test_delete_shortcuts_use_existing_segment_confirmation(
     "widget_name",
     [
         "title_edit", "authors_edit", "readme_edit", "speakers_edit", "caption_edit",
-        "mark_in_spin", "mark_out_spin", "head_pad_spin", "tail_pad_spin",
-        "height_spin", "fps_spin",
+        "mark_in_spin", "mark_out_spin",
     ],
 )
 def test_backspace_remains_available_in_editors(
@@ -571,7 +581,7 @@ def test_space_remains_available_in_text_editors(
 
 @pytest.mark.parametrize(
     "widget_name",
-    ["mark_in_spin", "mark_out_spin", "head_pad_spin", "tail_pad_spin", "height_spin", "fps_spin"],
+    ["mark_in_spin", "mark_out_spin"],
 )
 def test_space_does_not_play_video_while_editing_numbers(
     qtbot, playback_window, widget_name: str

@@ -118,6 +118,7 @@ class UpdateController(QObject):
         self.shutting_down = False
         self.check_action = menu.addAction("Check for Updates...")
         self.check_action.triggered.connect(lambda: self.check(manual=True))
+        menu.addSeparator()
         self.auto_action = menu.addAction("Check for Updates on Startup")
         self.auto_action.setCheckable(True)
         self.auto_action.setChecked(window.settings.value("updates/automatic", True, type=bool))
@@ -134,7 +135,6 @@ class UpdateController(QObject):
         )
         for action in (self.check_action, self.auto_action, self.prerelease_action):
             action.setParent(window)
-        menu.addSeparator()
         self.prompt_timer = QTimer(self)
         self.prompt_timer.setInterval(1000)
         self.prompt_timer.timeout.connect(self._offer_pending_release)
