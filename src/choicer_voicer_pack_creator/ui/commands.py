@@ -69,7 +69,8 @@ def describe_action(
     action: QAction, icon: str, description: str, *, label: str | None = None,
 ) -> None:
     action.setIcon(command_icon(icon))
-    action.setIconVisibleInMenu(True)
+    # Native menu styles can use the icon gutter for the check indicator.
+    action.setIconVisibleInMenu(not action.isCheckable())
     if label is not None:
         action.setIconText(label)
     shortcuts = " / ".join(

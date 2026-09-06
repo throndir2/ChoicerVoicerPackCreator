@@ -10,10 +10,17 @@ from functools import partial
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QSettings, Qt, QThread, QTimer
+from PySide6.QtCore import QPoint, QSettings, Qt, QThread, QTimer
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtTest import QSignalSpy
-from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox, QPushButton
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QFileDialog,
+    QMessageBox,
+    QPushButton,
+    QStyleOptionMenuItem,
+)
 
 from choicer_voicer_pack_creator.models import PackProject
 from choicer_voicer_pack_creator.project_io import ProjectStore
@@ -352,6 +359,47 @@ def test_manual_menu_check_uses_and_persists_prerelease_preference(
     restored = QSettings(window.settings.fileName(), QSettings.Format.IniFormat)
     assert restored.value("updates/prereleases", type=bool) is include_prereleases
     assert restored.value("updates/automatic", type=bool) is False
+
+
+@pytest.mark.parametrize("automatic", [False, True], ids=["disabled", "enabled"])
+@pytest.mark.parametrize("control", ["mouse", "keyboard"])
+def test_update_menu_preferences_show_native_checks_and_persist(
+    qtbot, make_window, automatic, control,
+) -> None:
+    window = make_window(automatic=automatic, prereleases=not automatic)
+    menu = window.help_menu
+    updater = window.updater
+    option = QStyleOptionMenuItem()
+    menu.initStyleOption(option, updater.check_action)
+    assert option.checkType == QStyleOptionMenuItem.CheckType.NotCheckable
+    assert not option.icon.isNull()
+
+    for action, key, initial in (
+        (updater.auto_action, "updates/automatic", automatic),
+        (updater.prerelease_action, "updates/prereleases", not automatic),
+    ):
+        option = QStyleOptionMenuItem()
+        menu.initStyleOption(option, action)
+        assert option.checkType == QStyleOptionMenuItem.CheckType.NonExclusive
+        assert option.checked is initial
+        assert option.icon.isNull()
+        menu.popup(window.menuBar().mapToGlobal(QPoint(0, window.menuBar().height())))
+        qtbot.waitUntil(menu.isVisible)
+        if control == "mouse":
+            qtbot.mouseClick(
+                menu, Qt.MouseButton.LeftButton, pos=menu.actionGeometry(action).center(),
+            )
+        else:
+            menu.setActiveAction(action)
+            qtbot.keyClick(menu, Qt.Key.Key_Return)
+        qtbot.waitUntil(lambda: not menu.isVisible())
+        option = QStyleOptionMenuItem()
+        menu.initStyleOption(option, action)
+        assert option.checked is not initial
+        assert option.icon.isNull()
+        window.settings.sync()
+        restored = QSettings(window.settings.fileName(), QSettings.Format.IniFormat)
+        assert restored.value(key, type=bool) is not initial
 
 
 @pytest.mark.parametrize("manual", [False, True], ids=["automatic", "manual"])
