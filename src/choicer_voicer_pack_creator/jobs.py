@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import time
 import uuid
+import weakref
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -64,7 +65,7 @@ class JobHandle(QObject):
 
     def __init__(self, manager: JobManager, record: JobRecord) -> None:
         super().__init__(manager)
-        self._manager = manager
+        self._manager = weakref.ref(manager)
         self._record = record
         self._cancel = Event()
 
@@ -77,7 +78,10 @@ class JobHandle(QObject):
         return self._record
 
     def cancel(self) -> None:
-        self._manager.cancel(self.id)
+        manager = self._manager()
+        if manager is None:
+            raise RuntimeError("The job manager has been destroyed")
+        manager.cancel(self.id)
 
 
 class JobContext:
@@ -128,6 +132,10 @@ class _Task:
 class JobManager(QObject):
     """Keep this manager alive until active_jobs() is empty before destroying Qt.
 
+    Before destroying its owner, call shutdown(wait=True) to join the now-idle
+    executor and drain queued completions. Handles weakly reference their manager
+    so Python cyclic GC cannot retire Qt objects from a later worker thread.
+
     Limits bound simultaneous operations, not threads in external tools. The default
     single CPU job reserves room for playback; I/O and network work can overlap it.
     All public methods and signals run on the owning Qt thread. Worker events use an
@@ -136,6 +144,7 @@ class JobManager(QObject):
 
     changed = Signal(object)
     _events = Signal(object)
+    _dispatch = Signal()
 
     def __init__(
         self, parent: QObject | None = None, *, limits: Mapping[str, int] | None = None,
@@ -158,6 +167,7 @@ class JobManager(QObject):
         self._progress_lock = Lock()
         self._pending_progress: dict[str, tuple] = {}
         self._events.connect(self._receive, Qt.ConnectionType.QueuedConnection)
+        self._dispatch.connect(self._schedule, Qt.ConnectionType.QueuedConnection)
         self._timer = QTimer(self)
         self._timer.setInterval(100)
         self._timer.timeout.connect(self._schedule)
@@ -200,7 +210,7 @@ class JobManager(QObject):
         )
         self.changed.emit(record)
         self._timer.start()
-        QTimer.singleShot(0, self._schedule)
+        self._dispatch.emit()
         return handle
 
     def tasks(self, project_id: str | None | object = _ALL_PROJECTS) -> tuple[JobRecord, ...]:

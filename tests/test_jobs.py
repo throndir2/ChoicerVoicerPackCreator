@@ -4,9 +4,10 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 
 import pytest
-from PySide6.QtCore import QObject, QThread, Slot
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, QThread, Slot
 
 from choicer_voicer_pack_creator.jobs import JobManager
 from choicer_voicer_pack_creator.operations import check_cancelled, path_leases
@@ -17,6 +18,8 @@ def manager(qtbot):
     manager = JobManager(limits={"cpu": 2, "io": 2, "network": 1})
     yield manager
     manager.shutdown(wait=True)
+    manager.deleteLater()
+    QCoreApplication.sendPostedEvents(manager, QEvent.Type.DeferredDelete)
 
 
 def finish(qtbot, manager):
@@ -300,3 +303,19 @@ assert "PySide6.QtWidgets" not in sys.modules
         [sys.executable, "-c", script], capture_output=True, text=True, timeout=10,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_shutdown_manager_is_retired_on_its_owner_thread(qtbot):
+    manager = JobManager()
+    manager.submit("one", "test", "Complete", lambda context: 1)
+    finish(qtbot, manager)
+    manager.shutdown(wait=True)
+    destroyed_on = []
+    manager.destroyed.connect(
+        lambda: destroyed_on.append(threading.get_ident()), Qt.ConnectionType.DirectConnection,
+    )
+    reference = weakref.ref(manager)
+    owner_thread = threading.get_ident()
+    del manager
+    assert reference() is None
+    assert destroyed_on == [owner_thread]
