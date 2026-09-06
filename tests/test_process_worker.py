@@ -14,6 +14,8 @@ from uuid import uuid4
 import pytest
 
 from choicer_voicer_pack_creator import process_worker
+from choicer_voicer_pack_creator.media import MediaTools
+from choicer_voicer_pack_creator.operations import OperationCancelled, operation_scope
 from choicer_voicer_pack_creator.process_worker import (
     ProcessWorkerCancelled,
     ProcessWorkerError,
@@ -145,7 +147,7 @@ def _no_leaked_workers():
     before_threads = set(threading.enumerate())
     yield
     assert {child.pid for child in multiprocessing.active_children()} == before
-    assert set(threading.enumerate()) == before_threads
+    assert not (set(threading.enumerate()) - before_threads)
 
 
 def _is_running(pid):
@@ -195,6 +197,36 @@ def _assert_stopped(pids):
     while any(_is_running(pid) for pid in pids) and time.monotonic() < until:
         time.sleep(0.05)
     assert not any(_is_running(pid) for pid in pids)
+
+
+@pytest.mark.parametrize("mode", ["capture", "video-progress"])
+def test_media_cancellation_reaps_descendants_even_without_pipe_output(tmp_path, mode):
+    pids_file = tmp_path / "pids"
+    locked_file = tmp_path / "owned-stage"
+    locked_file.write_bytes(b"synthetic")
+    script = """
+import os, pathlib, subprocess, sys, time
+child = subprocess.Popen([
+        sys.executable, "-c",
+        "import sys,time; locked=open(sys.argv[1], 'rb'); print('ready',flush=True); time.sleep(60)",
+        sys.argv[2]
+], stdout=subprocess.PIPE, text=True)
+assert child.stdout.readline().strip() == "ready"
+pathlib.Path(sys.argv[1]).write_text(str(os.getpid()) + " " + str(child.pid))
+time.sleep(60)
+"""
+    command = [sys.executable, "-c", script, str(pids_file), str(locked_file)]
+    media = MediaTools.__new__(MediaTools)
+    started = time.monotonic()
+    with pytest.raises(OperationCancelled), operation_scope(pids_file.exists):
+        if mode == "capture":
+            media._capture(command)
+        else:
+            media._run_video_conversion(command, None)
+    assert time.monotonic() - started < 5
+    pids = [int(pid) for pid in pids_file.read_text().split()]
+    _assert_stopped(pids)
+    locked_file.unlink()
 
 
 @pytest.fixture

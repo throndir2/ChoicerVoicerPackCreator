@@ -210,7 +210,9 @@ class SourceSnapshot:
             path = Path(root)
             candidates = [path]
             if path.is_dir():
-                candidates.extend(path.rglob("*"))
+                for candidate in path.rglob("*"):
+                    check_cancelled()
+                    candidates.append(candidate)
             for candidate in sorted(candidates):
                 check_cancelled()
                 if candidate in seen:

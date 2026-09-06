@@ -5,13 +5,14 @@ from __future__ import annotations
 import math
 import time
 import uuid
+import weakref
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import copy_context
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from typing import Any
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, QThread, QTimer, Signal, Slot
@@ -64,7 +65,7 @@ class JobHandle(QObject):
 
     def __init__(self, manager: JobManager, record: JobRecord) -> None:
         super().__init__(manager)
-        self._manager = manager
+        self._manager = weakref.ref(manager)
         self._record = record
         self._cancel = Event()
 
@@ -77,7 +78,10 @@ class JobHandle(QObject):
         return self._record
 
     def cancel(self) -> None:
-        self._manager.cancel(self.id)
+        manager = self._manager()
+        if manager is None:
+            raise RuntimeError("The job manager has been destroyed")
+        manager.cancel(self.id)
 
 
 class JobContext:
@@ -100,7 +104,12 @@ class JobContext:
     def report(self, message: str, fraction: float | None = None, *, detail: Any = None) -> None:
         if fraction is not None and (not math.isfinite(fraction) or not 0 <= fraction <= 1):
             raise ValueError("Progress fraction must be finite and between 0 and 1")
-        self._manager._events.emit((self.job_id, "progress", (message, fraction, detail)))
+        if detail is not None:
+            # Rich events can establish a plan or close an estimator stage: unlike
+            # plain text updates they must reach consumers in their original order.
+            self._manager._events.emit((self.job_id, "detail", (message, fraction, detail)))
+        else:
+            self._manager._post_progress(self.job_id, (message, fraction, None))
 
     @contextmanager
     def critical_stage(self, message: str):
@@ -114,14 +123,20 @@ class JobContext:
 @dataclass(slots=True)
 class _Task:
     handle: JobHandle
-    operation: Callable[[JobContext], Any]
+    operation: Callable[[JobContext], Any] | None
     requests: tuple
     dependencies: tuple[str, ...]
     lease: str | None = None
+    admission: Event = field(default_factory=Event)
+    rejected: bool = False
 
 
 class JobManager(QObject):
     """Keep this manager alive until active_jobs() is empty before destroying Qt.
+
+    Before destroying its owner, call shutdown(wait=True) to join the now-idle
+    executor and drain queued completions. Handles weakly reference their manager
+    so Python cyclic GC cannot retire Qt objects from a later worker thread.
 
     Limits bound simultaneous operations, not threads in external tools. The default
     single CPU job reserves room for playback; I/O and network work can overlap it.
@@ -131,10 +146,13 @@ class JobManager(QObject):
 
     changed = Signal(object)
     _events = Signal(object)
+    _dispatch = Signal()
 
     def __init__(
         self, parent: QObject | None = None, *, limits: Mapping[str, int] | None = None,
     ) -> None:
+        if QCoreApplication.instance() is None:
+            raise RuntimeError("JobManager requires a running QtCore application/event loop")
         super().__init__(parent)
         self.limits = dict(limits if limits is not None else {"cpu": 1, "io": 2, "network": 2})
         if not self.limits or any(
@@ -148,7 +166,10 @@ class JobManager(QObject):
         self._tasks: dict[str, _Task] = {}
         self._running = dict.fromkeys(self.limits, 0)
         self._closed = False
+        self._progress_lock = Lock()
+        self._pending_progress: dict[str, tuple] = {}
         self._events.connect(self._receive, Qt.ConnectionType.QueuedConnection)
+        self._dispatch.connect(self._schedule, Qt.ConnectionType.QueuedConnection)
         self._timer = QTimer(self)
         self._timer.setInterval(100)
         self._timer.timeout.connect(self._schedule)
@@ -191,7 +212,7 @@ class JobManager(QObject):
         )
         self.changed.emit(record)
         self._timer.start()
-        QTimer.singleShot(0, self._schedule)
+        self._dispatch.emit()
         return handle
 
     def tasks(self, project_id: str | None | object = _ALL_PROJECTS) -> tuple[JobRecord, ...]:
@@ -213,7 +234,7 @@ class JobManager(QObject):
         record = handle._record = replace(previous, **changes)
         if record.state != previous.state:
             handle.state_changed.emit(record.state)
-        self.changed.emit(record)
+        self.changed.emit(handle.record)
 
     def cancel(self, job_id: str) -> None:
         self._assert_thread()
@@ -235,6 +256,9 @@ class JobManager(QObject):
     @Slot()
     def _schedule(self) -> None:
         self._assert_thread()
+        if self._closed:
+            self._timer.stop()
+            return
         for task in tuple(self._tasks.values()):
             handle = task.handle
             if handle.record.state not in {"queued", "waiting"}:
@@ -257,8 +281,20 @@ class JobManager(QObject):
             task.lease = token
             self._running[resource] += 1
             self._update(handle, state="running", message="Starting", started_at=time.time())
+            # Direct Qt listeners may cancel or shut down the executor while the
+            # starting state is being announced, before any worker was admitted.
+            if self._closed or handle._cancel.is_set():
+                self._reject_start(task, "cancelled", None)
+                continue
             context = copy_context()
-            self._executor.submit(context.run, self._execute, task)
+            try:
+                self._executor.submit(
+                    context.run, JobManager._run_queued, weakref.ref(self), handle.id,
+                )
+            except Exception as error:
+                self._reject_start(task, "failed", f"{type(error).__name__}: {error}")
+            else:
+                task.admission.set()
         if not self.active_jobs():
             self._timer.stop()
 
@@ -266,7 +302,29 @@ class JobManager(QObject):
         if handle.record.state != "waiting" or handle.record.message != message:
             self._update(handle, state="waiting", message=message)
 
+    def _reject_start(self, task: _Task, state: str, error: str | None) -> None:
+        task.rejected = True
+        task.admission.set()
+        if task.lease is not None:
+            leases.release(task.lease)
+            task.lease = None
+        self._running[task.handle.record.resource_class] -= 1
+        self._finish(task.handle, state, None, error)
+
+    @staticmethod
+    def _run_queued(manager_ref: weakref.ReferenceType[JobManager], job_id: str) -> None:
+        # A failed thread start can leave this item in an executor with no workers
+        # to drain it. The queue must not own a bound method/Qt manager reference.
+        manager = manager_ref()
+        if manager is not None:
+            manager._execute(manager._tasks[job_id])
+
     def _execute(self, task: _Task) -> None:
+        # submit() can fail after putting work on the executor's internal queue.
+        # Such a work item must never execute application code or release twice.
+        task.admission.wait()
+        if task.rejected:
+            return
         context = JobContext(task.handle, self)
         state, result, error = "succeeded", None, None
         try:
@@ -274,12 +332,13 @@ class JobManager(QObject):
                 cancelled=context._cancel.is_set, progress=context.report,
                 owner=context.job_id, committed=context._mark_committed,
             ):
+                assert task.operation is not None
                 result = task.operation(context)
                 if not context._committed:
                     context.check_cancelled()
         except OperationCancelled:
             state = "cancelled"
-        except Exception as failure:
+        except BaseException as failure:
             # Cleanup failures remain failures even after a cancellation request.
             state, error = "failed", f"{type(failure).__name__}: {failure}"
         finally:
@@ -288,15 +347,28 @@ class JobManager(QObject):
                 leases.release(task.lease)
             self._events.emit((context.job_id, "finished", (state, result, error)))
 
+    def _post_progress(self, job_id: str, value: tuple) -> None:
+        with self._progress_lock:
+            pending = job_id in self._pending_progress
+            self._pending_progress[job_id] = value
+            if not pending:
+                self._events.emit((job_id, "progress", None))
+
     @Slot(object)
     def _receive(self, event: tuple) -> None:
         job_id, kind, value = event
         handle = self._tasks[job_id].handle
-        if kind == "progress":
+        if kind in {"progress", "detail"}:
+            if kind == "progress":
+                with self._progress_lock:
+                    value = self._pending_progress.pop(job_id)
             if not handle.record.active:
                 return
             message, fraction, detail = value
-            self._update(handle, message=message, fraction=fraction, detail=detail)
+            self._update(
+                handle, message=message, fraction=fraction,
+                detail=detail if detail is not None else handle.record.detail,
+            )
             handle.progress.emit(message, fraction)
             if detail is not None:
                 handle.detail.emit(detail)
@@ -306,6 +378,7 @@ class JobManager(QObject):
             self._schedule()
 
     def _finish(self, handle: JobHandle, state: str, result: Any, error: str | None) -> None:
+        self._tasks[handle.id].operation = None
         self._update(
             handle, state=state, finished_at=time.time(), result=result, error=error,
             message=error or state.capitalize(), fraction=None,
@@ -318,12 +391,13 @@ class JobManager(QObject):
 
     def shutdown(self, *, cancel: bool = True, wait: bool = False) -> None:
         self._assert_thread()
+        if not cancel and self.active_jobs():
+            raise RuntimeError("Wait for active jobs before shutting down without cancellation")
         self._closed = True
+        self._timer.stop()
         if cancel:
             for record in self.active_jobs():
                 self.cancel(record.id)
-        if not cancel and self.active_jobs():
-            raise RuntimeError("Wait for active jobs before shutting down without cancellation")
         self._executor.shutdown(wait=wait)
         if wait:
             QCoreApplication.sendPostedEvents(self, QEvent.Type.MetaCall)

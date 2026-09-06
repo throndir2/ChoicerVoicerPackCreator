@@ -20,6 +20,7 @@ import wave
 import zipfile
 from array import array
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any
@@ -39,6 +40,15 @@ from choicer_voicer_pack_creator.diagnostics import (
 )
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import SourceCaption
+from choicer_voicer_pack_creator.operations import (
+    OperationCancelled,
+    SourceSnapshot,
+    cancellation_deferred,
+    check_cancelled,
+    operation_scope,
+    path_leases,
+)
+from choicer_voicer_pack_creator.process_worker import owned_subprocess
 
 ProgressCallback = Callable[[str, float | None], None]
 CancelCallback = Callable[[], bool]
@@ -61,7 +71,7 @@ class AnalysisError(RuntimeError):
     pass
 
 
-class AnalysisCancelled(AnalysisError):
+class AnalysisCancelled(AnalysisError, OperationCancelled):
     pass
 
 
@@ -107,9 +117,12 @@ def default_manifest_path() -> Path:
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
+    _check_cancel(lambda: False)
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(BUFFER_SIZE), b""):
+            _check_cancel(lambda: False)
             digest.update(chunk)
+    _check_cancel(lambda: False)
     return digest.hexdigest()
 
 
@@ -123,6 +136,27 @@ def download_verified(
     cancelled: CancelCallback,
 ) -> Path:
     """Download a pinned optional component, retaining the shared verification policy."""
+    partial = destination.with_name(destination.name + ".partial")
+    try:
+        with operation_scope(cancelled, progress), path_leases(
+            write_paths=(destination, partial),
+        ):
+            return _download_verified(
+                url, destination, expected_hash, expected_bytes, label, progress, cancelled,
+            )
+    except OperationCancelled as error:
+        raise AnalysisCancelled("Video analysis was canceled") from error
+
+
+def _download_verified(
+    url: str,
+    destination: Path,
+    expected_hash: str,
+    expected_bytes: int,
+    label: str,
+    progress: ProgressCallback,
+    cancelled: CancelCallback,
+) -> Path:
     diagnostic_event(
         "component_requested", component=label, destination=str(destination),
         expected_bytes=expected_bytes, expected_sha256=expected_hash,
@@ -180,8 +214,7 @@ def download_verified(
                 try:
                     chunk = response.read(min(BUFFER_SIZE, expected_bytes - downloaded + 1))
                 except (TimeoutError, OSError) as error:
-                    if cancelled():
-                        raise AnalysisCancelled("Video analysis was canceled") from None
+                    _check_cancel(cancelled)
                     raise AnalysisError(f"{label} download failed: {error}") from error
                 if not chunk:
                     break
@@ -206,6 +239,7 @@ def download_verified(
                 f"{label} verification failed. Expected {expected_bytes} bytes / "
                 f"{expected_hash}, received {partial.stat().st_size} bytes / {actual_hash}."
             )
+        _check_cancel(cancelled)
         os.replace(partial, destination)
         diagnostic_event(
             "component_download_verified", component=label, bytes=downloaded, sha256=actual_hash,
@@ -265,7 +299,12 @@ def detect_hardware() -> HardwareProfile:
 
 
 def _check_cancel(cancelled: CancelCallback) -> None:
-    if cancelled():
+    try:
+        check_cancelled()
+    except OperationCancelled as error:
+        diagnostic_event("cancellation_observed")
+        raise AnalysisCancelled("Video analysis was canceled") from error
+    if not cancellation_deferred() and cancelled():
         diagnostic_event("cancellation_observed")
         raise AnalysisCancelled("Video analysis was canceled")
 
@@ -286,8 +325,9 @@ def _run_cancellable(
         cwd=str(cwd) if cwd else None, timeout_seconds=timeout,
     )
     startupinfo = MediaTools._startup_info()
+    resources = ExitStack()
     try:
-        process = subprocess.Popen(
+        process = resources.enter_context(owned_subprocess(
             command,
             cwd=cwd,
             stdin=subprocess.DEVNULL,
@@ -297,22 +337,26 @@ def _run_cancellable(
             encoding="utf-8",
             errors="replace",
             startupinfo=startupinfo,
-        )
+        ))
+    except OperationCancelled as error:
+        resources.close()
+        raise AnalysisCancelled("Video analysis was canceled") from error
     except OSError as error:
+        resources.close()
         diagnostic_exception(
             "process_launch_failed", error, description=description,
             winerror=getattr(error, "winerror", None), errno=error.errno,
         )
         raise
     # Windows pipes need reader threads to report live output without blocking either stream.
-    messages: queue.Queue[tuple[str, str | OSError | None]] = queue.Queue()
+    messages: queue.Queue[tuple[str, str | OSError | ValueError | None]] = queue.Queue()
     captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
 
     def read_stream(name: str, stream: IO[str]) -> None:
         try:
             for line in stream:
                 messages.put((name, line))
-        except OSError as error:
+        except (OSError, ValueError) as error:
             messages.put((name, error))
         finally:
             messages.put((name, None))
@@ -325,9 +369,9 @@ def _run_cancellable(
     started = time.monotonic()
     last_output = started
     last_heartbeat = started
-    for reader in readers:
-        reader.start()
     try:
+        for reader in readers:
+            reader.start()
         diagnostic_event("process_started", description=description, pid=process.pid)
         closed = 0
         while closed < len(readers) or process.poll() is None:
@@ -354,7 +398,7 @@ def _run_cancellable(
                 continue
             if message is None:
                 closed += 1
-            elif isinstance(message, OSError):
+            elif isinstance(message, (OSError, ValueError)):
                 raise AnalysisError(f"Could not read {description} output: {message}") from message
             else:
                 last_output = time.monotonic()
@@ -368,21 +412,13 @@ def _run_cancellable(
                     output_line(message)
         process.wait()
     finally:
-        termination = None
-        if process.poll() is None:
-            termination = "terminate"
-            process.terminate()
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                termination = "kill"
-                process.kill()
-                process.wait()
-        for reader in readers:
-            reader.join()
-        for stream in (process.stdout, process.stderr):
-            if stream is not None:
-                stream.close()
+        termination = "terminate" if process.poll() is None else None
+        try:
+            resources.close()
+        finally:
+            for reader in readers:
+                if reader.ident is not None:
+                    reader.join()
         diagnostic_event(
             "process_exited", description=description, pid=process.pid,
             return_code=process.returncode, termination=termination,
@@ -607,6 +643,18 @@ class WhisperManager:
     def ensure_runtime(
         self, progress: ProgressCallback, cancelled: CancelCallback
     ) -> Path:
+        temporary = self.runtime_dir.with_name(self.runtime_dir.name + ".partial")
+        try:
+            with operation_scope(cancelled, progress), path_leases(
+                write_paths=(self.runtime_dir, temporary),
+            ):
+                return self._ensure_runtime(progress, cancelled)
+        except OperationCancelled as error:
+            raise AnalysisCancelled("Video analysis was canceled") from error
+
+    def _ensure_runtime(
+        self, progress: ProgressCallback, cancelled: CancelCallback,
+    ) -> Path:
         diagnostic_event(
             "runtime_setup", build=self.runtime["build"], version=self.runtime["version"],
             directory=str(self.runtime_dir),
@@ -689,7 +737,9 @@ class WhisperManager:
                     with package.open(member) as source, (
                         temporary / filename
                     ).open("wb") as output:
-                        shutil.copyfileobj(source, output, BUFFER_SIZE)
+                        while chunk := source.read(BUFFER_SIZE):
+                            _check_cancel(cancelled)
+                            output.write(chunk)
             for license_name in ("WhisperCpp-MIT.txt", "OpenAI-Whisper-MIT.txt"):
                 shutil.copy2(self.manifest_path.parent / license_name, temporary / license_name)
             shutil.copy2(self.manifest_path, temporary / self.manifest_path.name)
@@ -719,6 +769,7 @@ class WhisperManager:
             )
             if str(self.runtime["version"]) not in result.stdout + result.stderr:
                 raise AnalysisError("The Whisper runtime version does not match its manifest")
+            _check_cancel(cancelled)
             os.replace(temporary, self.runtime_dir)
             diagnostic_event(
                 "runtime_installed", files=expected_files, cli=self.cli_path,
@@ -822,11 +873,17 @@ class WhisperManager:
                 message = f"Loading {model_name} on CPU ({elapsed_text}); you can cancel."
             progress(message, percent / 100 if percent is not None else None)
 
-        _run_cancellable(
-            command, "Local Whisper transcription", cancelled,
-            output_line=on_output, tick=report_status,
-            timeout=max(600, audio_duration * 30),
-        )
+        try:
+            with operation_scope(cancelled, progress), path_leases(
+                read_paths=(self.runtime_dir, model),
+            ):
+                _run_cancellable(
+                    command, "Local Whisper transcription", cancelled,
+                    output_line=on_output, tick=report_status,
+                    timeout=max(600, audio_duration * 30),
+                )
+        except OperationCancelled as error:
+            raise AnalysisCancelled("Video analysis was canceled") from error
         progress("Reading Whisper transcript and timestamps...", 0.99)
         output_path = output_base.with_suffix(".json")
         if not output_path.is_file():
@@ -954,6 +1011,39 @@ def analyze_video(
         or not 0.2 <= pause_threshold <= 1.0
     ):
         raise ValueError("Caption pause threshold must be between 0.2 and 1.0 seconds")
+    video = video.resolve()
+    try:
+        with operation_scope(cancelled, progress), path_leases(read_paths=(video,)):
+            source = SourceSnapshot.capture((video,))
+            result = _analyze_video(
+                media, video, duration, data_root,
+                sensitivity=sensitivity, use_whisper=use_whisper, model_key=model_key,
+                language=language, progress=progress, cancelled=cancelled,
+                manifest_path=manifest_path, source_captions=source_captions,
+                pause_threshold=pause_threshold,
+            )
+            source.verify()
+            return result
+    except OperationCancelled as error:
+        raise AnalysisCancelled("Video analysis was canceled") from error
+
+
+def _analyze_video(
+    media: MediaTools,
+    video: Path,
+    duration: float,
+    data_root: Path,
+    *,
+    sensitivity: str,
+    use_whisper: bool,
+    model_key: str,
+    language: str,
+    progress: ProgressCallback,
+    cancelled: CancelCallback,
+    manifest_path: Path | None,
+    source_captions: list[SourceCaption] | None,
+    pause_threshold: float,
+) -> AnalysisResult:
     hardware = detect_hardware()
     diagnostic_event(
         "analysis_configuration", source_video=str(video), duration_seconds=duration,

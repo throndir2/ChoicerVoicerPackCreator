@@ -4,8 +4,10 @@ import hashlib
 import io
 import stat
 import struct
+import threading
 import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -14,6 +16,11 @@ import pytest
 
 from choicer_voicer_pack_creator import pack_io
 from choicer_voicer_pack_creator.config_format import render_clip_metadata, render_pack_info
+from choicer_voicer_pack_creator.operations import (
+    OperationCancelled,
+    SourceChangedError,
+    path_leases,
+)
 from choicer_voicer_pack_creator.pack_io import PackImporter
 from choicer_voicer_pack_creator.project_io import ProjectStore
 
@@ -83,6 +90,95 @@ def _snapshot(root: Path) -> dict[str, bytes]:
         for path in root.rglob("*")
         if path.is_file()
     }
+
+
+def test_independent_imports_share_library_without_blocking_existing_readers(tmp_path: Path):
+    source = _write_zip(tmp_path / "pack.zip")
+    library = tmp_path / "library"
+    existing = library / "existing" / "video.ogv"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"playing source")
+    barrier = threading.Barrier(2)
+
+    def progress(message, fraction):
+        if message == "Inspecting pack ZIP...":
+            barrier.wait(timeout=3)
+
+    with path_leases(read_paths=[existing]), ThreadPoolExecutor(2) as executor:
+        futures = [
+            executor.submit(_importer().import_zip, source, library, progress=progress)
+            for _ in range(2)
+        ]
+        results = [future.result(timeout=5) for future in futures]
+    roots = [result.project.source_pack_path for result in results]
+    assert roots[0] != roots[1]
+    assert all(Path(root).is_dir() for root in roots)
+    assert existing.read_bytes() == b"playing source"
+
+
+@pytest.mark.parametrize("phase", ["inventory", "extraction", "folder"])
+def test_cancelled_zip_import_cleans_only_its_owned_directory(
+    tmp_path: Path, phase: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_zip(tmp_path / "pack.zip")
+    original = source.read_bytes()
+    destination = tmp_path / "library"
+    destination.mkdir()
+    (destination / "keep.txt").write_bytes(b"unrelated")
+    monkeypatch.setattr(pack_io, "_ZIP_BUFFER_SIZE", 16)
+    stopped = False
+    updates = []
+
+    def progress(message: str, fraction: float | None) -> None:
+        nonlocal stopped
+        updates.append((message, fraction))
+        if phase == "inventory":
+            stopped |= message.startswith("Checking ZIP entry 2/")
+        elif phase == "extraction":
+            stopped |= message.startswith("Extracting ZIP entry") and bool(fraction)
+        else:
+            stopped |= message.startswith("Reading clip metadata")
+
+    with pytest.raises(OperationCancelled, match="cancelled"):
+        _importer().import_zip(
+            source, destination, cancelled=lambda: stopped, progress=progress,
+        )
+    assert stopped
+    assert updates
+    assert _snapshot(destination) == {"keep.txt": b"unrelated"}
+    assert source.read_bytes() == original
+
+
+def test_changed_source_archive_discards_owned_extraction(tmp_path: Path) -> None:
+    source = _write_zip(tmp_path / "pack.zip")
+    destination = tmp_path / "library"
+    destination.mkdir()
+    (destination / "keep.txt").write_bytes(b"unrelated")
+
+    def progress(message: str, fraction: float | None) -> None:
+        if message == "Verifying source ZIP has not changed...":
+            with source.open("ab") as stream:
+                stream.write(b"external change")
+
+    with pytest.raises(SourceChangedError):
+        _importer().import_zip(source, destination, progress=progress)
+    assert _snapshot(destination) == {"keep.txt": b"unrelated"}
+    assert source.read_bytes().endswith(b"external change")
+
+
+def test_cancel_request_during_zip_import_commit_keeps_successful_result(tmp_path: Path) -> None:
+    source = _write_zip(tmp_path / "pack.zip")
+    stopped = False
+
+    def progress(message: str, fraction: float | None) -> None:
+        nonlocal stopped
+        stopped |= message.startswith("Finishing pack ZIP import")
+
+    result = _importer().import_zip(
+        source, tmp_path / "library", cancelled=lambda: stopped, progress=progress,
+    )
+    assert stopped
+    assert _snapshot(Path(result.project.source_pack_path)) == _pack_files()
 
 
 @pytest.mark.parametrize("root", ["Pack", "", "日本語 — 雨"])

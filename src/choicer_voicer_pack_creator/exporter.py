@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import os
 import re
@@ -11,7 +12,7 @@ import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from choicer_voicer_pack_creator.config_format import render_clip_metadata, render_pack_info
 from choicer_voicer_pack_creator.diagnostics import (
@@ -28,6 +29,14 @@ from choicer_voicer_pack_creator.export_progress import (
 )
 from choicer_voicer_pack_creator.media import MediaInfo, MediaTools, VideoEncodingProgress
 from choicer_voicer_pack_creator.models import PackProject, Segment
+from choicer_voicer_pack_creator.operations import (
+    SourceSnapshot,
+    check_cancelled,
+    critical_stage,
+    operation_scope,
+    path_leases,
+    report,
+)
 from choicer_voicer_pack_creator.validation import PackValidator
 
 ProgressCallback = Callable[[ExportProgress], None]
@@ -45,11 +54,30 @@ def slug(value: str, fallback: str = "Voice") -> str:
 
 
 def sha256(path: Path) -> str:
+    check_cancelled()
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            check_cancelled()
             digest.update(chunk)
+    check_cancelled()
     return digest.hexdigest()
+
+
+def _copy_stream(source: BinaryIO, destination: BinaryIO) -> None:
+    while True:
+        check_cancelled()
+        chunk = source.read(1024 * 1024)
+        if not chunk:
+            break
+        destination.write(chunk)
+    check_cancelled()
+
+
+def _copy_file(source: Path, destination: Path) -> None:
+    with source.open("rb") as input_stream, destination.open("wb") as output_stream:
+        _copy_stream(input_stream, output_stream)
+    shutil.copystat(source, destination)
 
 
 def is_same_or_within(path: Path, directory: Path) -> bool:
@@ -165,6 +193,47 @@ class PackExporter:
         output_parent: Path,
         create_zip: bool = True,
         progress: ProgressCallback | None = None,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> ExportResult:
+        with operation_scope(cancelled=cancelled):
+            project = copy.deepcopy(project)
+            parent = output_parent.resolve()
+            folder_name = safe_name(project.title)
+            target = parent / folder_name
+            target_zip = parent / f"{folder_name}.zip" if create_zip else None
+            protected_paths = [Path(project.video_path).resolve()]
+            for value in (
+                project.source_pack_path, project.backing_track_path, project.icon_path,
+                *(value for segment in project.segments
+                  for value in (segment.audio_path, segment.image_path)),
+            ):
+                if value:
+                    protected_paths.append(Path(value).resolve())
+            outputs = [target, *([target_zip] if target_zip else [])]
+            endangered = [
+                path for path in protected_paths
+                if any(
+                    is_same_or_within(path, output)
+                    or (path.is_dir() and is_same_or_within(output, path))
+                    for output in outputs
+                )
+            ]
+            if endangered:
+                diagnostic_event("pack_export_assets_protected", path_count=len(endangered))
+                preview = "\n".join(f"• {path}" for path in endangered[:8])
+                raise ValueError(
+                    "Refusing to replace an output folder or ZIP that contains source or project assets, "
+                    "or write inside a source pack. Choose another export directory or change the "
+                    "pack title. Endangered paths:\n" + preview
+                )
+            with path_leases(read_paths=protected_paths, write_paths=outputs):
+                snapshot = SourceSnapshot.capture(protected_paths)
+                return self._export(project, parent, create_zip, progress, snapshot)
+
+    def _export(
+        self, project: PackProject, output_parent: Path, create_zip: bool,
+        progress: ProgressCallback | None, snapshot: SourceSnapshot,
     ) -> ExportResult:
         diagnostic_event(
             "pack_export_requested", output_parent=output_parent, create_zip=create_zip,
@@ -181,12 +250,15 @@ class PackExporter:
             plan: tuple[ExportStep, ...] = (), live: bool = False,
         ) -> None:
             nonlocal current_step
+            check_cancelled()
             current_step = step or current_step
             logged_progress.report(diagnostic_message or message, fraction)
+            report(message, fraction)
             if progress:
                 progress(ExportProgress(
                     message, current_step, fraction, position, plan, live,
                 ))
+            check_cancelled()
 
         notify("Inspecting source video and audio...")
         source_video = Path(project.video_path).resolve()
@@ -209,28 +281,6 @@ class PackExporter:
         folder_name = safe_name(project.title)
         target = parent / folder_name
         target_zip = parent / f"{folder_name}.zip" if create_zip else None
-        protected_paths = [source_video]
-        for value in (
-            project.source_pack_path,
-            project.backing_track_path,
-            project.icon_path,
-        ):
-            if value:
-                protected_paths.append(Path(value).resolve())
-        for segment in project.segments:
-            for value in (segment.audio_path, segment.image_path):
-                if value:
-                    protected_paths.append(Path(value).resolve())
-        endangered = [path for path in protected_paths if is_same_or_within(path, target)]
-        if endangered:
-            diagnostic_event("pack_export_assets_protected", path_count=len(endangered))
-            preview = "\n".join(f"• {path}" for path in endangered[:8])
-            raise ValueError(
-                "Refusing to replace an output folder that contains source or project assets. "
-                "Choose another export directory or change the pack title. Endangered paths:\n"
-                + preview
-            )
-
         with tempfile.TemporaryDirectory(prefix=f".{folder_name}.staging-", dir=parent) as temporary:
             temporary_root = Path(temporary)
             stage = temporary_root / folder_name
@@ -259,7 +309,7 @@ class PackExporter:
             output_video = stage / "dub_video.ogv"
             if preserve_video:
                 notify("Preserving existing Ogg video…", step=VIDEO_CONVERSION_STEP)
-                shutil.copy2(source_video, output_video)
+                _copy_file(source_video, output_video)
                 diagnostic_event("pack_export_video_preserved")
             else:
                 conversion_message = (
@@ -327,7 +377,7 @@ class PackExporter:
                     and backing_info.channels == 2
                     and abs(backing_info.duration - output_video_info.duration) <= 0.25
                 ):
-                    shutil.copy2(backing_source, stage / "_backing_track.mp3")
+                    _copy_file(backing_source, stage / "_backing_track.mp3")
                     diagnostic_event("pack_export_backing_preserved")
                 else:
                     self.media.convert_audio(
@@ -424,7 +474,11 @@ class PackExporter:
                 with zipfile.ZipFile(staged_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
                     for index, path in enumerate(files, start=1):
                         notify(f"Creating ZIP: compressing file {index}/{len(files)}...")
-                        archive.write(path, f"{folder_name}/{path.name}")
+                        with (
+                            path.open("rb") as source,
+                            archive.open(f"{folder_name}/{path.name}", "w", force_zip64=True) as output,
+                        ):
+                            _copy_stream(source, output)
                 notify("Testing staged ZIP integrity and file inventory...", step="zip-check")
                 self.validator.validate_zip(staged_zip, folder_name, set(file_hashes))
                 diagnostic_event("pack_export_zip_validated", file_count=len(file_hashes))
@@ -434,35 +488,38 @@ class PackExporter:
             def publish_progress(update: ExportProgress) -> None:
                 notify(update.message, step=update.step)
 
-            validation, publish_warnings = self._publish_verified(
-                stage,
-                target,
-                staged_zip,
-                target_zip,
-                folder_name,
-                file_hashes,
-                total,
-                progress=publish_progress,
-            )
-            if backing_is_silent:
-                publish_warnings.append(
-                    "Exported without backing music: the backing track is silent or below -60 dBFS. "
-                    "Dubbed playback will contain only the players' recordings. Generate or choose "
-                    "an audible backing track and re-export to include music/effects."
+            snapshot.verify()
+            with critical_stage("Publishing and verifying pack; cancellation is deferred..."):
+                validation, publish_warnings = self._publish_verified(
+                    stage,
+                    target,
+                    staged_zip,
+                    target_zip,
+                    folder_name,
+                    file_hashes,
+                    total,
+                    progress=publish_progress,
+                    snapshot=snapshot,
                 )
-            notify("Cleaning up export staging files...", step="cleanup")
-            logged_progress.report("Pack export ready", 1.0)
-            diagnostic_event(
-                "pack_export_ready", path=target, zip_path=target_zip,
-                file_count=len(file_hashes), segment_count=total, warning_count=len(publish_warnings),
-            )
-            return ExportResult(
-                pack_path=target,
-                zip_path=target_zip,
-                validation=validation,
-                file_hashes=file_hashes,
-                warnings=publish_warnings,
-            )
+                if backing_is_silent:
+                    publish_warnings.append(
+                        "Exported without backing music: the backing track is silent or below -60 dBFS. "
+                        "Dubbed playback will contain only the players' recordings. Generate or choose "
+                        "an audible backing track and re-export to include music/effects."
+                    )
+                notify("Cleaning up export staging files...", step="cleanup")
+                logged_progress.report("Pack export ready", 1.0)
+                diagnostic_event(
+                    "pack_export_ready", path=target, zip_path=target_zip,
+                    file_count=len(file_hashes), segment_count=total, warning_count=len(publish_warnings),
+                )
+                return ExportResult(
+                    pack_path=target,
+                    zip_path=target_zip,
+                    validation=validation,
+                    file_hashes=file_hashes,
+                    warnings=publish_warnings,
+                )
 
     def _write_audio(
         self,
@@ -480,7 +537,7 @@ class PackExporter:
                 and audio_info.sample_rate == 48000
                 and audio_info.channels == 1
             ):
-                shutil.copy2(source, destination)
+                _copy_file(source, destination)
             else:
                 self.media.convert_audio(source, destination, mono=True)
             return segment.start
@@ -506,7 +563,7 @@ class PackExporter:
             source = Path(segment.image_path).resolve()
             source_dimensions = self.media.probe_image_dimensions(source)
             if source.suffix.casefold() == ".png" and source_dimensions == (width, height):
-                shutil.copy2(source, destination)
+                _copy_file(source, destination)
             else:
                 self.media.convert_image(source, destination, width, height)
             return
@@ -535,6 +592,20 @@ class PackExporter:
         file_hashes: dict[str, str],
         expected_clips: int,
         progress: ProgressCallback | None = None,
+        *,
+        snapshot: SourceSnapshot | None = None,
+    ) -> tuple[dict[str, Any], list[str]]:
+        with critical_stage("Publishing and verifying pack; cancellation is deferred..."):
+            return self._publish(
+                stage, target, staged_zip, target_zip, folder_name,
+                file_hashes, expected_clips, progress, snapshot,
+            )
+
+    def _publish(
+        self, stage: Path, target: Path, staged_zip: Path | None, target_zip: Path | None,
+        folder_name: str, file_hashes: dict[str, str], expected_clips: int,
+        progress: ProgressCallback | None,
+        snapshot: SourceSnapshot | None,
     ) -> tuple[dict[str, Any], list[str]]:
         diagnostic_event(
             "pack_publish_requested", stage=stage, target=target, zip_path=target_zip,
@@ -557,6 +628,8 @@ class PackExporter:
         zip_published = False
         try:
             notify("Publishing: retaining existing output as rollback backups...")
+            if snapshot is not None:
+                snapshot.verify()
             if target.exists():
                 os.replace(target, backup)
                 pack_backed_up = True

@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import math
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from array import array
@@ -21,6 +23,13 @@ from choicer_voicer_pack_creator.diagnostics import (
     diagnostic_operation,
     diagnostic_text,
 )
+from choicer_voicer_pack_creator.operations import (
+    OperationCancelled,
+    check_cancelled,
+    operation_scope,
+    report,
+)
+from choicer_voicer_pack_creator.process_worker import owned_subprocess
 
 ProgressCallback = Callable[[str], None]
 
@@ -192,18 +201,31 @@ class MediaTools:
             stderr=diagnostic_text(stderr, limit=4096), stderr_truncated=truncated,
         )
 
+    def _capture(self, command: Sequence[str], *, text: bool = False):
+        check_cancelled()
+        options = {"text": True, "encoding": "utf-8", "errors": "replace"} if text else {}
+        with owned_subprocess(
+            list(command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, startupinfo=self._startup_info(), **options,
+        ) as process:
+            while True:
+                check_cancelled()
+                try:
+                    stdout, stderr = process.communicate(timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            check_cancelled()
+            return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
     def run(self, command: Sequence[str], description: str) -> subprocess.CompletedProcess[str]:
         started = self._command_started(command, description)
+        report(description)
         try:
-            completed = subprocess.run(
-                [str(item) for item in command],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                startupinfo=self._startup_info(),
-                check=False,
-            )
+            completed = self._capture([str(item) for item in command], text=True)
+        except OperationCancelled:
+            self._command_finished(-1, "", started, canceled=True)
+            raise
         except OSError as error:
             diagnostic_exception(
                 "media_command_launch_failed", error, command=[str(item) for item in command],
@@ -216,8 +238,15 @@ class MediaTools:
             raise MediaError(f"{description} failed: {detail}")
         return completed
 
+    def probe(
+        self, path: Path, *, cancelled: Callable[[], bool] | None = None,
+        progress: Callable[[str, float | None], None] | None = None,
+    ) -> MediaInfo:
+        with operation_scope(cancelled, progress):
+            return self._probe(path)
+
     @diagnostic_operation("media_probe")
-    def probe(self, path: Path) -> MediaInfo:
+    def _probe(self, path: Path) -> MediaInfo:
         diagnostic_event("media_probe_requested", path=path)
         completed = self.run(
             [
@@ -266,8 +295,15 @@ class MediaTools:
     def probe_audio_duration(self, path: Path) -> float:
         return self.probe_audio(path).duration
 
+    def probe_audio(
+        self, path: Path, *, cancelled: Callable[[], bool] | None = None,
+        progress: Callable[[str, float | None], None] | None = None,
+    ) -> AudioInfo:
+        with operation_scope(cancelled, progress):
+            return self._probe_audio(path)
+
     @diagnostic_operation("media_audio_probe")
-    def probe_audio(self, path: Path) -> AudioInfo:
+    def _probe_audio(self, path: Path) -> AudioInfo:
         diagnostic_event("media_audio_probe_requested", path=path)
         completed = self.run(
             [
@@ -347,9 +383,7 @@ class MediaTools:
         ]
         started = self._command_started(command, "Decoding audio statistics")
         try:
-            completed = subprocess.run(
-                command, capture_output=True, startupinfo=self._startup_info(), check=False,
-            )
+            completed = self._capture(command)
         except OSError as error:
             diagnostic_exception(
                 "media_command_launch_failed", error, command=command,
@@ -366,6 +400,7 @@ class MediaTools:
             samples.byteswap()
         if not samples:
             raise MediaError(f"{path.name} decoded to no audio samples")
+        check_cancelled()
         threshold = round(32767 * 10 ** (quiet_threshold_dbfs / 20.0))
         first = next((index for index, value in enumerate(samples) if abs(value) >= threshold), None)
         last = next(
@@ -440,46 +475,25 @@ class MediaTools:
         ]
         started = self._command_started(command, "Extracting waveform")
         try:
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                startupinfo=self._startup_info(),
-            )
+            with operation_scope(cancelled):
+                completed = self._capture(command)
+        except OperationCancelled:
+            self._command_finished(-1, "", started, canceled=True)
+            # Keep the legacy interruption contract; JobManager checks its token
+            # after the operation returns, so an interrupted job is still cancelled.
+            return []
         except OSError as error:
             diagnostic_exception(
                 "media_command_launch_failed", error, command=command,
                 duration_seconds=round(time.monotonic() - started[0], 3), command_id=started[1],
             )
             raise
-        diagnostic_event("media_process_started", pid=process.pid, command_id=started[1])
-        while True:
-            try:
-                stdout, stderr = process.communicate(timeout=0.2)
-                break
-            except subprocess.TimeoutExpired:
-                if not cancelled or not cancelled():
-                    continue
-                diagnostic_event(
-                    "media_process_cancel_requested", pid=process.pid, command_id=started[1],
-                )
-                process.terminate()
-                try:
-                    _, stderr = process.communicate(timeout=2)
-                except subprocess.TimeoutExpired:
-                    diagnostic_event(
-                        "media_process_kill_requested", pid=process.pid, command_id=started[1],
-                    )
-                    process.kill()
-                    _, stderr = process.communicate()
-                self._command_finished(process.returncode, stderr, started, canceled=True)
-                return []
-        self._command_finished(process.returncode, stderr, started)
-        if process.returncode != 0:
-            detail = stderr.decode("utf-8", "replace").strip()
+        self._command_finished(completed.returncode, completed.stderr, started)
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", "replace").strip()
             raise MediaError(f"Extracting waveform failed: {detail}")
         samples = array("f")
-        samples.frombytes(stdout)
+        samples.frombytes(completed.stdout)
         if sys.byteorder != "little":
             samples.byteswap()
         if not samples:
@@ -501,6 +515,7 @@ class MediaTools:
         progress: ProgressCallback | None = None,
         *,
         encoding_progress: Callable[[VideoEncodingProgress], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> None:
         if progress:
             progress("Converting video to Ogg Theora/Vorbis…")
@@ -538,23 +553,63 @@ class MediaTools:
                 str(destination),
             ],
             encoding_progress,
+            cancelled=cancelled,
         )
 
     def _run_video_conversion(
         self,
         command: Sequence[str],
         progress: Callable[[VideoEncodingProgress], None] | None,
+        *,
+        cancelled: Callable[[], bool] | None = None,
     ) -> None:
         description = "Video conversion"
         started = self._command_started(command, description)
         # Keep stderr off the progress pipe so verbose failures cannot deadlock FFmpeg.
-        with tempfile.TemporaryFile() as errors:
+        reader: threading.Thread | None = None
+        with operation_scope(cancelled), tempfile.TemporaryFile() as errors:
             try:
-                process = subprocess.Popen(
+                with owned_subprocess(
                     list(command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                     stderr=errors, text=True, encoding="utf-8", errors="replace",
                     startupinfo=self._startup_info(),
-                )
+                ) as process:
+                    assert process.stdout is not None
+                    messages: queue.Queue[str | BaseException | None] = queue.Queue()
+
+                    def read_progress() -> None:
+                        try:
+                            for line in process.stdout:
+                                messages.put(line)
+                        except (OSError, ValueError) as error:
+                            messages.put(error)
+                        finally:
+                            messages.put(None)
+
+                    reader = threading.Thread(target=read_progress, name="ffmpeg-progress")
+                    reader.start()
+                    fields: dict[str, str] = {}
+                    while True:
+                        check_cancelled()
+                        try:
+                            line = messages.get(timeout=0.1)
+                        except queue.Empty:
+                            continue
+                        if line is None:
+                            break
+                        if isinstance(line, BaseException):
+                            raise line
+                        key, separator, value = line.strip().partition("=")
+                        if separator:
+                            fields[key] = value
+                            if key == "progress":
+                                if progress is not None:
+                                    progress(VideoEncodingProgress.from_fields(fields))
+                                fields.clear()
+                    while process.poll() is None:
+                        check_cancelled()
+                        time.sleep(0.05)
+                    check_cancelled()
             except OSError as error:
                 diagnostic_exception(
                     "media_command_launch_failed", error, command=list(command),
@@ -562,28 +617,14 @@ class MediaTools:
                     command_id=started[1],
                 )
                 raise
-            try:
-                assert process.stdout is not None
-                fields: dict[str, str] = {}
-                for line in process.stdout:
-                    key, separator, value = line.strip().partition("=")
-                    if separator:
-                        fields[key] = value
-                        if key == "progress":
-                            if progress is not None:
-                                progress(VideoEncodingProgress.from_fields(fields))
-                            fields.clear()
-                process.wait()
             finally:
-                if process.poll() is None:
-                    process.kill()
-                process.wait()
-                if process.stdout is not None:
-                    process.stdout.close()
+                if reader is not None:
+                    reader.join()
                 errors.seek(0, os.SEEK_END)
                 errors.seek(max(0, errors.tell() - 16384))
                 detail = errors.read().decode("utf-8", "replace").strip()
-                self._command_finished(process.returncode, detail, started)
+                if reader is not None:
+                    self._command_finished(process.returncode, detail, started)
             if process.returncode != 0:
                 raise MediaError(
                     f"{description} failed: {detail or 'Unknown FFmpeg error'} "
@@ -749,9 +790,7 @@ class MediaTools:
         ]
         started = self._command_started(command, "Checking source audio activity")
         try:
-            completed = subprocess.run(
-                command, capture_output=True, startupinfo=self._startup_info(), check=False,
-            )
+            completed = self._capture(command)
         except OSError as error:
             diagnostic_exception(
                 "media_command_launch_failed", error, command=command,
