@@ -86,8 +86,10 @@ def test_real_stdio_client_creates_reviews_exports_and_reimports_pack(tmp_path, 
     if live:
         arguments = [
             "-c",
-            "import sys; from PySide6.QtCore import QStandardPaths; "
+            "import sys; from PySide6.QtCore import QSettings, QStandardPaths; "
             "QStandardPaths.writableLocation = staticmethod(lambda _: sys.argv[1]); "
+            "QSettings.setDefaultFormat(QSettings.IniFormat); "
+            "QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, sys.argv[1]); "
             "from choicer_voicer_pack_creator.app import main; "
             "raise SystemExit(main(['test', '--mcp']))",
             str(app_data),
@@ -106,7 +108,11 @@ def test_real_stdio_client_creates_reviews_exports_and_reimports_pack(tmp_path, 
             await client.initialize()
 
             async def call(name, **arguments):
-                result = await client.call_tool(name, arguments)
+                async def progress(value, total, message):
+                    assert value >= 0
+                    assert message is None or isinstance(message, str)
+
+                result = await client.call_tool(name, arguments, progress_callback=progress)
                 assert not result.isError, result.content
                 return result.structuredContent
 
@@ -185,8 +191,10 @@ def test_live_cli_exits_on_stdin_eof(tmp_path):
     result = subprocess.run(
         [
             sys.executable, "-c",
-            "import sys; from PySide6.QtCore import QStandardPaths; "
+            "import sys; from PySide6.QtCore import QSettings, QStandardPaths; "
             "QStandardPaths.writableLocation = staticmethod(lambda _: sys.argv[1]); "
+            "QSettings.setDefaultFormat(QSettings.IniFormat); "
+            "QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, sys.argv[1]); "
             "from choicer_voicer_pack_creator.app import main; "
             "raise SystemExit(main(['test', '--mcp']))",
             str(tmp_path),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import shutil
@@ -14,7 +15,10 @@ from importlib import metadata
 from pathlib import Path
 from textwrap import dedent
 
+import deno
 from ffmpeg_bundle import prepare_bundle
+
+from choicer_voicer_pack_creator.updates import write_portable_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 with (ROOT / "pyproject.toml").open("rb") as project_file:
@@ -26,6 +30,37 @@ MCP_NAME = "Choicer Voicer MCP"
 FFMPEG_STAGE = ROOT / "build" / "ffmpeg-windows-x64-562ea50b4f2d213e"
 LATEST_BUILD_MANIFEST = DIST / "latest-portable.json"
 PENDING_BUILD_MANIFEST = DIST / "pending-portable.json"
+SEPARATION_PACKAGES = ("onnxruntime", "numpy", "soundfile", "cffi", "pycparser",
+                       "flatbuffers", "protobuf", "packaging")
+
+
+def copy_separation_licenses(app_dir: Path) -> None:
+    for package in SEPARATION_PACKAGES:
+        distribution = importlib.metadata.distribution(package)
+        licenses = [
+            path for path in distribution.files or []
+            if Path(path).name.casefold().startswith(("license", "copying", "notice",
+                                                      "thirdpartynotices"))
+        ]
+        if not licenses:
+            if package == "flatbuffers" and distribution.version == "25.12.19":
+                target = app_dir / "licenses" / package
+                target.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(
+                    ROOT / "src" / "choicer_voicer_pack_creator" / "resources"
+                    / "Flatbuffers-Apache-2.0.txt", target / "LICENSE.txt",
+                )
+                continue
+            raise RuntimeError(f"Installed {package} wheel is missing its license notices")
+        for license_file in licenses:
+            relative = str(license_file).replace("\\", "/")
+            if ".dist-info/licenses/" in relative:
+                relative = relative.split(".dist-info/licenses/", 1)[1]
+            elif ".dist-info/" in relative:
+                relative = relative.split(".dist-info/", 1)[1]
+            target = app_dir / "licenses" / package / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(distribution.locate_file(license_file), target)
 
 
 def _sha256(path: Path) -> str:
@@ -119,7 +154,9 @@ def _write_spec() -> Path:
         dedent(
             f"""\
             from pathlib import Path
-            from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
+            from PyInstaller.utils.hooks import (
+                collect_all, collect_data_files, collect_submodules, copy_metadata,
+            )
 
             root = Path({str(ROOT)!r})
             source = root / "src" / "choicer_voicer_pack_creator"
@@ -129,26 +166,35 @@ def _write_spec() -> Path:
                 (str(source / "resources"), "choicer_voicer_pack_creator/resources"),
             ]
             data += collect_data_files("mcp")
+            data += collect_data_files("yt_dlp_ejs")
+            binaries = [({str(deno.find_deno_bin())!r}, "runtime/deno")]
+            hiddenimports = [
+                "PySide6.QtMultimedia",
+                "PySide6.QtMultimediaWidgets",
+                "yt_dlp_ejs.yt.solver",
+                "anyio._backends._asyncio",
+                *collect_submodules(
+                    "mcp",
+                    filter=lambda name: name != "mcp.cli" and not name.startswith("mcp.cli."),
+                ),
+            ]
+            for package in ("onnxruntime", "_soundfile_data"):
+                package_data, package_binaries, package_imports = collect_all(package)
+                data += package_data
+                binaries += package_binaries
+                hiddenimports += package_imports
             # Include activated dependency extras too (e.g. PyJWT's crypto extra).
             for package in {_mcp_distribution_names()!r}:
                 data += copy_metadata(package)
             analysis = Analysis(
                 [str(path) for path in entrypoints],
                 pathex=[str(root / "src")],
-                binaries=[],
+                binaries=binaries,
                 datas=data,
-                hiddenimports=[
-                    "PySide6.QtMultimedia",
-                    "PySide6.QtMultimediaWidgets",
-                    "anyio._backends._asyncio",
-                    *collect_submodules(
-                        "mcp",
-                        filter=lambda name: name != "mcp.cli" and not name.startswith("mcp.cli."),
-                    ),
-                ],
+                hiddenimports=hiddenimports,
                 hookspath=[],
                 hooksconfig={{}},
-                runtime_hooks=[],
+                runtime_hooks=[str(root / "scripts" / "separation_runtime_hook.py")],
                 excludes=[],
                 noarchive=False,
             )
@@ -284,6 +330,22 @@ def build_candidate() -> int:
     resource_dir = ROOT / "src" / "choicer_voicer_pack_creator" / "resources"
     shutil.copy2(resource_dir / "WhisperCpp-MIT.txt", app_dir / "licenses")
     shutil.copy2(resource_dir / "OpenAI-Whisper-MIT.txt", app_dir / "licenses")
+    for filename in ("Demucs-MIT.txt", "StemSplit-MIT.txt", "backing-separation.json"):
+        shutil.copy2(resource_dir / filename, app_dir / "licenses")
+    copy_separation_licenses(app_dir)
+    for package in ("yt-dlp", "yt-dlp-ejs", "deno"):
+        distribution = importlib.metadata.distribution(package)
+        license_files = [
+            path for path in distribution.files or []
+            if ".dist-info/licenses/" in str(path).replace("\\", "/")
+        ]
+        if not license_files:
+            raise RuntimeError(f"Installed {package} wheel is missing its license notices")
+        for license_file in license_files:
+            relative = str(license_file).replace("\\", "/").split(".dist-info/licenses/", 1)[1]
+            target = app_dir / "licenses" / package / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(distribution.locate_file(license_file), target)
     python_license = Path(sys.base_prefix) / "LICENSE.txt"
     if not python_license.is_file():
         print(f"Python license was not found: {python_license}", file=sys.stderr)
@@ -313,6 +375,7 @@ def build_candidate() -> int:
         if result.returncode != 0:
             print(f"Bundled tool failed to start: {executable}", file=sys.stderr)
             return 1
+    write_portable_manifest(app_dir, APP_VERSION)
     stable_archive = DIST / f"Choicer-Voicer-Pack-Creator-{APP_VERSION}-Windows-x64.zip"
     candidate_archive = portable_root / f".{stable_archive.name}.candidate"
     partial_archive = portable_root / f".{stable_archive.name}.partial"

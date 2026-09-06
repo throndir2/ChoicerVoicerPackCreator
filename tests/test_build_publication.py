@@ -20,6 +20,16 @@ finally:
     sys.path.pop(0)
 
 
+def test_separation_dependency_licenses_are_copied_from_installed_wheels(tmp_path):
+    BUILD_SCRIPT.copy_separation_licenses(tmp_path)
+    for package in BUILD_SCRIPT.SEPARATION_PACKAGES:
+        assert any(path.is_file() for path in (tmp_path / "licenses" / package).rglob("*"))
+    assert any("thirdpartynotices" in path.name.casefold()
+               for path in (tmp_path / "licenses" / "onnxruntime").rglob("*"))
+    assert any("copying" in path.name.casefold()
+               for path in (tmp_path / "licenses" / "soundfile").rglob("*"))
+
+
 def _prepare_candidate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path]:
     distribution = tmp_path / "dist" / "vtest"
     application = distribution / "portable-build" / "Choicer Voicer Pack Creator"
@@ -128,6 +138,8 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
     monkeypatch.setattr(BUILD_SCRIPT, "ROOT", root)
     monkeypatch.setattr(BUILD_SCRIPT, "BUILD", root / "build")
     monkeypatch.setattr(BUILD_SCRIPT, "_mcp_distribution_names", lambda: ["mcp", "cryptography"])
+    deno = root / "Deno's runtime" / "deno.exe"
+    monkeypatch.setattr(BUILD_SCRIPT.deno, "find_deno_bin", lambda: deno)
     analyses = []
     executables = []
     collections = []
@@ -138,7 +150,15 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
 
     def collect_data_files(name):
         hook_calls.append(("data", name))
-        return [("sdk-data", "mcp")]
+        return [(f"{name}-data", name)]
+
+    def collect_all(name):
+        hook_calls.append(("all", name))
+        return (
+            [(f"{name}-data", name)],
+            [(f"{name}-binary", name)],
+            [f"{name}.dynamic_module"],
+        )
 
     def collect_submodules(name, *, filter):
         hook_calls.append(("submodules", name))
@@ -153,6 +173,7 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
         return [("sdk-metadata", "mcp.dist-info")]
 
     hooks.collect_data_files = collect_data_files
+    hooks.collect_all = collect_all
     hooks.collect_submodules = collect_submodules
     hooks.copy_metadata = copy_metadata
 
@@ -163,9 +184,11 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
                 *[(Path(path).stem, path, "PYSOURCE") for path in paths],
             ],
             pure=object(),
-            binaries=object(),
+            binaries=kwargs["binaries"],
             datas=kwargs["datas"],
             hiddenimports=kwargs["hiddenimports"],
+            runtime_hooks=kwargs["runtime_hooks"],
+            pathex=kwargs["pathex"],
         )
         analyses.append(result)
         return result
@@ -200,10 +223,28 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
         )
     ]
     assert ("data", "mcp") in hook_calls
+    assert ("data", "yt_dlp_ejs") in hook_calls
     assert ("metadata", "mcp") in hook_calls
     assert ("metadata", "cryptography") in hook_calls
     assert "mcp.dynamic_module" in analyses[0].hiddenimports
     assert "anyio._backends._asyncio" in analyses[0].hiddenimports
+    assert "yt_dlp_ejs.yt.solver" in analyses[0].hiddenimports
+    assert "PySide6.QtMultimedia" in analyses[0].hiddenimports
+    assert "PySide6.QtMultimediaWidgets" in analyses[0].hiddenimports
+    assert (str(deno), "runtime/deno") in analyses[0].binaries
+    assert (str(root / "assets"), "assets") in analyses[0].datas
+    assert (
+        str(root / "src" / "choicer_voicer_pack_creator" / "resources"),
+        "choicer_voicer_pack_creator/resources",
+    ) in analyses[0].datas
+    assert ("yt_dlp_ejs-data", "yt_dlp_ejs") in analyses[0].datas
+    assert analyses[0].runtime_hooks == [str(root / "scripts" / "separation_runtime_hook.py")]
+    assert analyses[0].pathex == [str(root / "src")]
+    for name in ("onnxruntime", "_soundfile_data"):
+        assert ("all", name) in hook_calls
+        assert (f"{name}-data", name) in analyses[0].datas
+        assert (f"{name}-binary", name) in analyses[0].binaries
+        assert f"{name}.dynamic_module" in analyses[0].hiddenimports
 
 
 def test_mcp_distribution_licenses_and_dependency_notices_are_bundled(

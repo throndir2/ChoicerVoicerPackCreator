@@ -4,10 +4,11 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QThread, QUrl, Slot
-from PySide6.QtGui import QColor
+import pytest
+from PySide6.QtCore import QEvent, QPoint, QSettings, Qt, QThread, QUrl, Slot
+from PySide6.QtGui import QColor, QKeyEvent
 from PySide6.QtMultimedia import QMediaPlayer
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QMessageBox, QPushButton
 
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
@@ -16,6 +17,7 @@ from choicer_voicer_pack_creator.ui.main_window import (
     MainWindow,
     WaveformWorker,
 )
+from choicer_voicer_pack_creator.ui.theme import APP_STYLESHEET
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
 
 
@@ -31,6 +33,9 @@ def test_main_window_starts_with_empty_editor(qtbot) -> None:
     assert window.project.title == "Untitled Dub Pack"
     assert window.segment_table.rowCount() == 0
     assert "Choicer Voicer Pack Creator" in window.windowTitle()
+    help_actions = window.menuBar().actions()[-1].menu().actions()
+    assert window.updater.check_action in help_actions
+    assert window.action_logs in help_actions
     window.dirty = False
     window.close()
 
@@ -92,7 +97,7 @@ def test_inspector_sections_resize_collapse_and_restore(qtbot, tmp_path: Path) -
     assert after_collapse[0] <= window.project_section.minimumHeight()
     assert after_collapse[1] > before_collapse[1]
     assert after_collapse[1] > after_collapse[0]
-    assert window.editor_splitter.handleWidth() == 9
+    assert window.editor_splitter.handleWidth() == 1
     assert window.inspector_splitter.handleWidth() == 9
     window._save_layout_state()
     window.close()
@@ -116,6 +121,443 @@ def test_inspector_sections_resize_collapse_and_restore(qtbot, tmp_path: Path) -
     )
     assert not restored.project_section.body.isHidden()
     restored.close()
+
+
+def test_editor_divider_has_a_thin_gap_and_wider_grab_area(qtbot, tmp_path: Path) -> None:
+    settings = QSettings(str(tmp_path / "layout.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(UnusedMedia(), settings=settings)  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    window.setStyleSheet(APP_STYLESHEET)
+    window.show()
+    qtbot.waitUntil(lambda: window._layout_restored)
+
+    splitter = window.editor_splitter
+    left = splitter.widget(0)
+    inspector_left = window.inspector_splitter.mapTo(splitter, QPoint(0, 0)).x()
+    assert inspector_left - (left.x() + left.width()) == 1
+    assert splitter.handleWidth() == 1
+    assert splitter.handle(1).width() >= 5
+    window.close()
+
+
+@pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
+def test_editor_left_pane_shrinks_collapses_and_reopens(
+    qtbot, tmp_path: Path, stylesheet: str
+) -> None:
+    settings = QSettings(str(tmp_path / "layout.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(UnusedMedia(), settings=settings)  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    window.setStyleSheet(stylesheet)
+    window.show()
+    qtbot.waitUntil(lambda: window._layout_restored)
+
+    splitter = window.editor_splitter
+    original_window_size = window.size()
+    for width in (700, 160, 32, 1, 0):
+        splitter.moveSplitter(width, 1)
+        assert splitter.sizes()[0] == width
+        assert splitter.sizes()[1] >= 420
+        assert window.size() == original_window_size
+
+    handle = splitter.handle(1)
+    assert handle.isVisible()
+    assert handle.isEnabled()
+    grab_point = handle.rect().center()
+    target = splitter.mapToGlobal(QPoint(320, grab_point.y()))
+    qtbot.mousePress(handle, Qt.MouseButton.LeftButton, pos=grab_point)
+    qtbot.mouseMove(handle, handle.mapFromGlobal(target))
+    qtbot.mouseRelease(handle, Qt.MouseButton.LeftButton, pos=handle.mapFromGlobal(target))
+    qtbot.waitUntil(lambda: abs(splitter.sizes()[0] - 320) <= 2)
+    assert window.video_widget.isVisible()
+    assert window.video_widget.width() > 0
+    window.close()
+
+
+@pytest.mark.parametrize("left_width", [80, 0], ids=["narrow", "collapsed"])
+def test_editor_restores_pane_size_without_restoring_old_divider_width(
+    qtbot, tmp_path: Path, left_width: int
+) -> None:
+    settings_path = str(tmp_path / "layout.ini")
+    settings = QSettings(settings_path, QSettings.Format.IniFormat)
+    window = MainWindow(UnusedMedia(), settings=settings)  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    window.setStyleSheet(APP_STYLESHEET)
+    window.show()
+    qtbot.waitUntil(lambda: window._layout_restored)
+    window.editor_splitter.setHandleWidth(9)
+    window.editor_splitter.moveSplitter(left_width, 1)
+    window.close()
+
+    restored_settings = QSettings(settings_path, QSettings.Format.IniFormat)
+    restored = MainWindow(UnusedMedia(), settings=restored_settings)  # type: ignore[arg-type]
+    qtbot.addWidget(restored)
+    restored.setStyleSheet(APP_STYLESHEET)
+    restored.show()
+    qtbot.waitUntil(lambda: restored._layout_restored)
+    splitter = restored.editor_splitter
+    assert abs(splitter.sizes()[0] - left_width) <= 1
+    assert splitter.handleWidth() == 1
+    assert splitter.getRange(1)[0] == 0
+    assert splitter.getRange(1)[1] <= splitter.width() - 420
+    left = splitter.widget(0)
+    inspector_left = restored.inspector_splitter.mapTo(splitter, QPoint(0, 0)).x()
+    assert inspector_left - (left.x() + left.width()) == 1
+    restored.close()
+
+
+@pytest.fixture
+def playback_window(qtbot, tmp_path: Path, monkeypatch):
+    settings = QSettings(str(tmp_path / "layout.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(UnusedMedia(), settings=settings)  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_maybe_save", lambda: True)
+    segment = Segment(1, 2, "Line", ["Speaker"])
+    window._set_project(
+        PackProject(video_duration=10, segments=[segment]), None, mark_dirty=False
+    )
+    window.select_segment(segment.id)
+    calls: list[str] = []
+    monkeypatch.setattr(window.player, "play", lambda: calls.append("play"))
+    monkeypatch.setattr(window.player, "pause", lambda: calls.append("pause"))
+    window.show()
+    window.activateWindow()
+    qtbot.waitUntil(window.isActiveWindow)
+    qtbot.waitUntil(lambda: window._layout_restored)
+    return window, calls
+
+
+@pytest.mark.parametrize("widget_name", ["timeline", "segment_table", "video_widget"])
+@pytest.mark.parametrize(
+    ("key", "modifier"),
+    [
+        (Qt.Key.Key_Backspace, Qt.KeyboardModifier.NoModifier),
+        (Qt.Key.Key_Delete, Qt.KeyboardModifier.ControlModifier),
+    ],
+)
+@pytest.mark.parametrize("confirmed", [False, True], ids=["cancel", "confirm"])
+def test_delete_shortcuts_use_existing_segment_confirmation(
+    qtbot, playback_window, monkeypatch, widget_name: str, key, modifier, confirmed: bool
+) -> None:
+    window, _calls = playback_window
+    selected = window.selected_segment()
+    other = Segment(3, 4, "Keep this line", ["Another speaker"])
+    window.project.add_segment(other)
+    window._refresh_table()
+    questions: list[str] = []
+
+    def confirm(_parent, _title, message):
+        questions.append(message)
+        return QMessageBox.StandardButton.Yes if confirmed else QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, "question", confirm)
+    widget = getattr(window, widget_name)
+    widget.setFocus()
+    qtbot.waitUntil(widget.hasFocus)
+
+    qtbot.keyClick(widget, key, modifier)
+
+    assert len(questions) == 1
+    assert selected.caption in questions[0]
+    assert window.project.segments == ([other] if confirmed else [selected, other])
+    assert window.segment_table.rowCount() == (1 if confirmed else 2)
+    assert window.timeline.segments == window.project.segments
+    assert window.selected_segment() == (None if confirmed else selected)
+    assert window.dirty == confirmed
+
+
+@pytest.mark.parametrize(
+    "widget_name",
+    [
+        "title_edit", "authors_edit", "readme_edit", "speakers_edit", "caption_edit",
+        "mark_in_spin", "mark_out_spin", "head_pad_spin", "tail_pad_spin",
+        "height_spin", "fps_spin",
+    ],
+)
+def test_backspace_remains_available_in_editors(
+    qtbot, playback_window, monkeypatch, widget_name: str
+) -> None:
+    window, _calls = playback_window
+    selected = window.selected_segment()
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *_args: pytest.fail("Editing must not delete a segment")
+    )
+    editor = getattr(window, widget_name)
+    editor.setFocus()
+    qtbot.waitUntil(editor.hasFocus)
+    editor.selectAll()
+
+    qtbot.keyClick(editor, Qt.Key.Key_Backspace)
+    qtbot.keyClick(editor, Qt.Key.Key_Backspace)
+
+    text = editor.toPlainText() if hasattr(editor, "toPlainText") else editor.text()
+    assert text.strip() == ("s" if widget_name in {"mark_in_spin", "mark_out_spin"} else "")
+    assert window.project.segments == [selected]
+
+
+@pytest.mark.parametrize("blocked", ["no-selection", "busy"])
+def test_backspace_does_not_delete_without_an_available_action(
+    qtbot, playback_window, monkeypatch, blocked: str
+) -> None:
+    window, _calls = playback_window
+    segments = list(window.project.segments)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *_args: pytest.fail("Deletion should be unavailable")
+    )
+    if blocked == "no-selection":
+        window.selected_segment_id = ""
+        window._refresh_table()
+        window._sync_selected_editor()
+    else:
+        window._set_busy(True, "Exporting")
+    window.setFocus()
+    qtbot.waitUntil(window.hasFocus)
+
+    qtbot.keyClick(window, Qt.Key.Key_Backspace)
+
+    assert window.project.segments == segments
+    assert not window.dirty
+
+
+def test_holding_backspace_does_not_repeat_confirmation(
+    qtbot, playback_window, monkeypatch
+) -> None:
+    window, _calls = playback_window
+    questions: list[str] = []
+
+    def decline(_parent, _title, message):
+        questions.append(message)
+        return QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, "question", decline)
+    window.timeline.setFocus()
+    qtbot.waitUntil(window.timeline.hasFocus)
+
+    qtbot.keyPress(window.timeline, Qt.Key.Key_Backspace)
+    for _ in range(3):
+        QApplication.sendEvent(
+            window.timeline,
+            QKeyEvent(
+                QEvent.Type.KeyPress, Qt.Key.Key_Backspace, Qt.KeyboardModifier.NoModifier,
+                "\b", True,
+            ),
+        )
+    qtbot.keyRelease(window.timeline, Qt.Key.Key_Backspace)
+
+    assert len(questions) == 1
+    assert len(window.project.segments) == 1
+    assert not window.dirty
+
+
+@pytest.mark.parametrize("modal", [False, True], ids=["modeless", "modal"])
+def test_backspace_in_a_dialog_does_not_delete_a_segment(
+    qtbot, playback_window, monkeypatch, modal: bool
+) -> None:
+    window, _calls = playback_window
+    selected = window.selected_segment()
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *_args: pytest.fail("Dialogs must not delete a segment")
+    )
+    dialog = QDialog(window)
+    qtbot.addWidget(dialog)
+    dialog.setModal(modal)
+    button = QPushButton("Dialog action", dialog)
+    dialog.show()
+    dialog.activateWindow()
+    button.setFocus()
+    qtbot.waitUntil(dialog.isActiveWindow)
+    qtbot.waitUntil(button.hasFocus)
+
+    qtbot.keyClick(button, Qt.Key.Key_Backspace)
+
+    assert window.project.segments == [selected]
+    assert not window.dirty
+    dialog.close()
+
+
+@pytest.mark.parametrize(
+    "widget_name",
+    [
+        "video_widget", "timeline", "segment_table", "seek_slider",
+        "volume_slider", "play_button", "stop_button",
+    ],
+)
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        (QMediaPlayer.PlaybackState.StoppedState, "play"),
+        (QMediaPlayer.PlaybackState.PausedState, "play"),
+        (QMediaPlayer.PlaybackState.PlayingState, "pause"),
+    ],
+)
+def test_space_toggles_video_playback(
+    qtbot, playback_window, monkeypatch, widget_name: str, state, expected: str
+) -> None:
+    window, calls = playback_window
+    monkeypatch.setattr(window.player, "playbackState", lambda: state)
+    widget = getattr(window, widget_name)
+    widget.setFocus()
+    qtbot.waitUntil(widget.hasFocus)
+
+    qtbot.keyClick(widget, Qt.Key.Key_Space)
+
+    assert calls == [expected]
+
+
+@pytest.mark.parametrize(
+    "widget_name", ["title_edit", "authors_edit", "readme_edit", "speakers_edit", "caption_edit"]
+)
+def test_space_remains_available_in_text_editors(
+    qtbot, playback_window, widget_name: str
+) -> None:
+    window, calls = playback_window
+    editor = getattr(window, widget_name)
+    editor.setFocus()
+    qtbot.waitUntil(editor.hasFocus)
+    editor.clear()
+
+    qtbot.keyClicks(editor, "two words")
+
+    text = editor.text() if isinstance(editor, QLineEdit) else editor.toPlainText()
+    assert text == "two words"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "widget_name",
+    ["mark_in_spin", "mark_out_spin", "head_pad_spin", "tail_pad_spin", "height_spin", "fps_spin"],
+)
+def test_space_does_not_play_video_while_editing_numbers(
+    qtbot, playback_window, widget_name: str
+) -> None:
+    window, calls = playback_window
+    editor = getattr(window, widget_name)
+    editor.setFocus()
+    qtbot.waitUntil(editor.hasFocus)
+
+    qtbot.keyClick(editor, Qt.Key.Key_Space)
+
+    assert calls == []
+
+
+def test_holding_space_does_not_repeatedly_toggle_playback(qtbot, playback_window) -> None:
+    window, calls = playback_window
+    window.timeline.setFocus()
+    qtbot.waitUntil(window.timeline.hasFocus)
+
+    qtbot.keyPress(window.timeline, Qt.Key.Key_Space)
+    for _ in range(3):
+        QApplication.sendEvent(
+            window.timeline,
+            QKeyEvent(
+                QEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier,
+                " ", True,
+            ),
+        )
+    qtbot.keyRelease(window.timeline, Qt.Key.Key_Space)
+
+    assert calls == ["play"]
+
+
+@pytest.mark.parametrize(
+    "modifier",
+    [Qt.KeyboardModifier.ControlModifier, Qt.KeyboardModifier.AltModifier,
+     Qt.KeyboardModifier.ShiftModifier, Qt.KeyboardModifier.MetaModifier],
+)
+def test_modified_space_does_not_toggle_playback(qtbot, playback_window, modifier) -> None:
+    window, calls = playback_window
+    window.timeline.setFocus()
+    qtbot.waitUntil(window.timeline.hasFocus)
+
+    qtbot.keyClick(window.timeline, Qt.Key.Key_Space, modifier)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("modal", [False, True], ids=["modeless", "modal"])
+def test_space_in_a_dialog_does_not_toggle_video(qtbot, playback_window, modal: bool) -> None:
+    window, calls = playback_window
+    dialog = QDialog(window)
+    qtbot.addWidget(dialog)
+    dialog.setModal(modal)
+    button = QPushButton("Dialog action", dialog)
+    dialog.show()
+    dialog.activateWindow()
+    button.setFocus()
+    qtbot.waitUntil(dialog.isActiveWindow)
+    qtbot.waitUntil(button.hasFocus)
+
+    with qtbot.waitSignal(button.clicked):
+        qtbot.keyClick(button, Qt.Key.Key_Space)
+
+    assert calls == []
+    dialog.close()
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        QMediaPlayer.PlaybackState.StoppedState,
+        QMediaPlayer.PlaybackState.PausedState,
+        QMediaPlayer.PlaybackState.PlayingState,
+    ],
+)
+def test_dragging_playhead_seeks_player_without_changing_project(qtbot, state) -> None:
+    class SeekPlayer:
+        def __init__(self) -> None:
+            self.position_ms = 3000
+
+        def playbackState(self):
+            return state
+
+        def source(self):
+            return QUrl.fromLocalFile("C:/source.mp4")
+
+        def setPosition(self, milliseconds):
+            self.position_ms = milliseconds
+            window._player_position_changed(milliseconds)
+
+        def stop(self):
+            pass
+
+    window = MainWindow(UnusedMedia())  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    segment = Segment(2, 4, "Line", ["Speaker"])
+    window._set_project(
+        PackProject(video_duration=10, segments=[segment]), None, mark_dirty=False
+    )
+    player = SeekPlayer()
+    window.player = player  # type: ignore[assignment]
+    timeline = window.timeline
+    timeline.set_marks(2, 4, segment.id)
+    timeline.set_playhead(3)
+    window.show()
+    qtbot.waitUntil(lambda: window._layout_restored)
+    window.editor_splitter.setSizes([700, 250])
+    seeks: list[float] = []
+    timeline.seek_requested.connect(seeks.append)
+    start = QPoint(round(timeline._time_to_x(3)), 65)
+    target = QPoint(round(timeline._time_to_x(7.5)), 65)
+    expected = int(timeline._x_to_time(target.x()) * 1000)
+
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, pos=start)
+    qtbot.mouseMove(timeline, target)
+    assert player.position_ms == expected
+    qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=target)
+
+    assert player.position_ms == expected
+    assert seeks[-1] == pytest.approx(expected / 1000, abs=0.001)
+    assert timeline.playhead == pytest.approx(expected / 1000, abs=0.001)
+    assert window.seek_slider.value() == int(expected / 10_000 * 100_000)
+    assert not window.dirty
+    assert window._range_edit_record is None
+    assert (segment.start, segment.end) == (2, 4)
+    assert (timeline.mark_in, timeline.mark_out) == (2, 4)
+    assert timeline.mark_segment_id == segment.id
+    assert player.playbackState() == state
+    if state == QMediaPlayer.PlaybackState.StoppedState:
+        assert window._stopped_seek_active
+        assert window._stopped_seek_target_ms == expected
+    window.close()
 
 
 def test_seek_from_stopped_state_decodes_then_pauses_on_target(qtbot) -> None:
@@ -252,6 +694,95 @@ def test_selecting_table_segment_cues_playback_before_play(qtbot) -> None:
     assert player.calls[-1] == "play"
     assert player.position_ms == 6250
     window.dirty = False
+    window.close()
+
+
+@pytest.mark.parametrize("surface", ["table", "timeline"])
+@pytest.mark.parametrize(
+    "state",
+    [
+        QMediaPlayer.PlaybackState.StoppedState,
+        QMediaPlayer.PlaybackState.PausedState,
+        QMediaPlayer.PlaybackState.PlayingState,
+    ],
+)
+def test_segment_clicks_cue_start_even_when_already_selected(
+    qtbot, tmp_path: Path, surface: str, state
+) -> None:
+    class SeekPlayer:
+        def __init__(self) -> None:
+            self.position_ms = 500
+            self.state = state
+
+        def playbackState(self):
+            return self.state
+
+        def source(self):
+            return QUrl.fromLocalFile("C:/source.mp4")
+
+        def setPosition(self, milliseconds):
+            self.position_ms = milliseconds
+            window._player_position_changed(milliseconds)
+
+        def position(self):
+            return self.position_ms
+
+        def play(self):
+            self.state = QMediaPlayer.PlaybackState.PlayingState
+
+        def pause(self):
+            self.state = QMediaPlayer.PlaybackState.PausedState
+
+        def stop(self):
+            self.state = QMediaPlayer.PlaybackState.StoppedState
+
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(UnusedMedia(), settings=settings)  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    first = Segment(1, 2, "First", ["A"])
+    second = Segment(6.25, 7.5, "Second", ["B"])
+    window._set_project(
+        PackProject(video_duration=10, segments=[first, second]), None, mark_dirty=False
+    )
+    player = SeekPlayer()
+    window.player = player  # type: ignore[assignment]
+    window.show()
+    qtbot.waitUntil(lambda: window._layout_restored)
+    window.editor_splitter.setSizes([700, 470])
+    window.select_segment(first.id)
+    if surface == "table":
+        target = window.segment_table.viewport()
+        point = window.segment_table.visualItemRect(window.segment_table.item(1, 4)).center()
+    else:
+        target = window.timeline
+        point = QPoint(
+            round(window.timeline._time_to_x(7)),
+            round(window.timeline._segment_rect(second).center().y()),
+        )
+
+    for _ in range(2):
+        player.setPosition(9000)
+        window._preview_end = first.end
+        qtbot.mouseClick(target, Qt.MouseButton.LeftButton, pos=point)
+
+        assert window.selected_segment_id == second.id
+        assert player.position_ms == 6250
+        assert window.timeline.playhead == second.start
+        assert window.timeline.mark_segment_id == second.id
+        assert window.mark_in_spin.value() == second.start
+        assert window.mark_out_spin.value() == second.end
+        assert window._preview_end is None
+        assert not window.dirty
+        assert window._range_edit_record is None
+        assert (second.start, second.end) == (6.25, 7.5)
+        assert player.playbackState() == state
+        if state == QMediaPlayer.PlaybackState.StoppedState:
+            assert window._stopped_seek_target_ms == 6250
+    if surface == "table":
+        qtbot.mouseDClick(target, Qt.MouseButton.LeftButton, pos=point)
+        qtbot.mouseRelease(target, Qt.MouseButton.LeftButton, pos=point)
+        assert window._preview_end == second.end
+        assert player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
     window.close()
 
 

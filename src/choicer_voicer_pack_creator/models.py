@@ -9,6 +9,150 @@ from typing import Any, Literal
 AudioMode = Literal["video", "file"]
 
 
+@dataclass(frozen=True, slots=True)
+class CaptionFragment:
+    text: str
+    start: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"text": self.text, "start": self.start}
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> CaptionFragment:
+        text = value.get("text")
+        start = value.get("start")
+        if not isinstance(text, str):
+            raise ValueError("Caption fragment text must be a string")
+        if start is not None:
+            if isinstance(start, bool) or not isinstance(start, (int, float)):
+                raise ValueError("Caption fragment start must be a number or null")
+            if not math.isfinite(start) or start < 0:
+                raise ValueError("Caption fragment has an invalid start")
+            start = float(start)
+        return cls(text, start)
+
+
+@dataclass(frozen=True, slots=True)
+class SourceCaption:
+    start: float
+    end: float
+    text: str
+    source: str
+    fragments: tuple[CaptionFragment, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "start": self.start,
+            "end": self.end,
+            "text": self.text,
+            "source": self.source,
+            "fragments": [fragment.to_dict() for fragment in self.fragments],
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> SourceCaption:
+        start, end = float(value["start"]), float(value["end"])
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
+            raise ValueError("Source caption has an invalid time range")
+        fragments = value.get("fragments", [])
+        if not isinstance(fragments, list) or not all(
+            isinstance(fragment, dict) for fragment in fragments
+        ):
+            raise ValueError("Caption fragments must be an array of JSON objects")
+        return cls(
+            start, end, str(value["text"]), str(value["source"]),
+            tuple(CaptionFragment.from_dict(fragment) for fragment in fragments),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisDraftRow:
+    # Keep time edits as text so even an unfinished/invalid edit survives closing the review.
+    start: str
+    end: str
+    caption: str
+    source: str
+    confidence: float | None = None
+    checked: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "start": self.start,
+            "end": self.end,
+            "caption": self.caption,
+            "source": self.source,
+            "confidence": self.confidence,
+            "checked": self.checked,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> AnalysisDraftRow:
+        confidence = value.get("confidence")
+        if confidence is not None:
+            confidence = float(confidence)
+            if not math.isfinite(confidence) or not 0 <= confidence <= 1:
+                raise ValueError("Analysis draft confidence must be between zero and one")
+        return cls(
+            str(value["start"]), str(value["end"]), str(value["caption"]),
+            str(value["source"]), confidence, bool(value.get("checked", True)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisReview:
+    youtube_rows: list[AnalysisDraftRow] = field(default_factory=list)
+    local_rows: list[AnalysisDraftRow] = field(default_factory=list)
+    selected_source: str = "local"
+    local_source: str = "Whisper"
+    refined_rows: list[AnalysisDraftRow] = field(default_factory=list)
+    pause_threshold: float = 0.4
+    local_model_name: str = ""
+    local_detected_language: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "youtube_rows": [row.to_dict() for row in self.youtube_rows],
+            "local_rows": [row.to_dict() for row in self.local_rows],
+            "selected_source": self.selected_source,
+            "local_source": self.local_source,
+            "refined_rows": [row.to_dict() for row in self.refined_rows],
+            "pause_threshold": self.pause_threshold,
+            "local_model_name": self.local_model_name,
+            "local_detected_language": self.local_detected_language,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> AnalysisReview:
+        rows: dict[str, list[AnalysisDraftRow]] = {}
+        for key in ("youtube_rows", "local_rows", "refined_rows"):
+            items = value.get(key, [])
+            if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+                raise ValueError("Analysis draft rows must be an array of JSON objects")
+            rows[key] = [AnalysisDraftRow.from_dict(item) for item in items]
+        selected_source = str(value.get("selected_source", "local"))
+        local_source = str(value.get("local_source", "Whisper"))
+        if selected_source not in {"youtube", "local", "refined"}:
+            raise ValueError("Unknown analysis transcript selection")
+        if local_source not in {"Whisper", "Audio activity"}:
+            raise ValueError("Unknown local analysis source")
+        local_model_name = value.get("local_model_name", "")
+        local_detected_language = value.get("local_detected_language", "")
+        if not isinstance(local_model_name, str) or not isinstance(local_detected_language, str):
+            raise ValueError("Analysis draft model and language must be text")
+        pause_threshold = value.get("pause_threshold", 0.4)
+        if (
+            isinstance(pause_threshold, bool)
+            or not isinstance(pause_threshold, (int, float))
+            or not math.isfinite(pause_threshold)
+            or not 0.2 <= pause_threshold <= 1.0
+        ):
+            raise ValueError("Caption pause threshold must be between 0.2 and 1.0 seconds")
+        return cls(
+            rows["youtube_rows"], rows["local_rows"], selected_source, local_source,
+            rows["refined_rows"], float(pause_threshold), local_model_name, local_detected_language,
+        )
+
+
 @dataclass(slots=True)
 class Segment:
     """One playable dub prompt on the video timeline."""
@@ -96,6 +240,10 @@ class PackProject:
     source_pack_path: str = ""
     preserve_source_video: bool = False
     import_warnings: list[str] = field(default_factory=list)
+    source_url: str = ""
+    caption_language: str = ""
+    source_captions: list[SourceCaption] = field(default_factory=list)
+    analysis_review: AnalysisReview | None = None
 
     @property
     def speakers(self) -> list[str]:
@@ -120,6 +268,48 @@ class PackProject:
         previous = len(self.segments)
         self.segments = [item for item in self.segments if item.id != segment_id]
         return len(self.segments) != previous
+
+    def combine_segments(
+        self, segment_ids: list[str], *, discard_other_images: bool = False
+    ) -> Segment:
+        identifiers = set(segment_ids)
+        if len(identifiers) < 2:
+            raise ValueError("Select at least two segments to combine.")
+        selected = sorted(
+            (segment for segment in self.segments if segment.id in identifiers),
+            key=lambda segment: (segment.start, segment.end),
+        )
+        if len(selected) != len(identifiers):
+            raise ValueError("A selected segment no longer exists. Select the segments again.")
+        if any(segment.audio_mode != "video" or not segment.source_range_known for segment in selected):
+            raise ValueError(
+                "Preserved recordings cannot be combined safely. For each recording, mark the "
+                "exact source-video In/Out range, click Apply Range, and choose Yes to regenerate "
+                "its prompt audio. Then select the segments and combine them."
+            )
+        if any(
+            not math.isfinite(segment.start) or not math.isfinite(segment.end)
+            or segment.start < 0 or segment.end <= segment.start
+            for segment in selected
+        ):
+            raise ValueError("Correct the selected segments' In/Out ranges before combining them.")
+        images = list(dict.fromkeys(segment.image_path for segment in selected if segment.image_path))
+        if len(images) > 1 and not discard_other_images:
+            raise ValueError("Combining different still images requires choosing which image to keep.")
+        combined = Segment(
+            start=selected[0].start,
+            end=max(segment.end for segment in selected),
+            caption=" ".join(segment.caption.strip() for segment in selected if segment.caption.strip()),
+            characters=list(dict.fromkeys(
+                character for segment in selected for character in segment.characters
+            )),
+            image_path=images[0] if images else "",
+        )
+        self.segments = [
+            segment for segment in self.segments if segment.id not in identifiers
+        ]
+        self.add_segment(combined)
+        return combined
 
     def validate(self) -> list[str]:
         errors: list[str] = []
@@ -196,6 +386,10 @@ class PackProject:
             "source_pack_path": self.source_pack_path,
             "preserve_source_video": self.preserve_source_video,
             "import_warnings": list(self.import_warnings),
+            "source_url": self.source_url,
+            "caption_language": self.caption_language,
+            "source_captions": [caption.to_dict() for caption in self.source_captions],
+            "analysis_review": self.analysis_review.to_dict() if self.analysis_review else None,
             "segments": [segment.to_dict() for segment in self.segments],
         }
 
@@ -211,6 +405,14 @@ class PackProject:
             raise ValueError("Project segments must be an array")
         if not all(isinstance(item, dict) for item in segments_value):
             raise ValueError("Every project segment must be a JSON object")
+        captions_value = value.get("source_captions", [])
+        if not isinstance(captions_value, list) or not all(
+            isinstance(item, dict) for item in captions_value
+        ):
+            raise ValueError("Project source captions must be an array of JSON objects")
+        review_value = value.get("analysis_review")
+        if review_value is not None and not isinstance(review_value, dict):
+            raise ValueError("Project analysis review must be a JSON object")
         import_warnings = value.get("import_warnings", [])
         if not isinstance(import_warnings, list):
             import_warnings = [str(import_warnings)] if import_warnings else []
@@ -229,6 +431,10 @@ class PackProject:
             source_pack_path=str(value.get("source_pack_path", "")),
             preserve_source_video=bool(value.get("preserve_source_video", False)),
             import_warnings=[str(item) for item in import_warnings if str(item).strip()],
+            source_url=str(value.get("source_url", "")),
+            caption_language=str(value.get("caption_language", "")),
+            source_captions=[SourceCaption.from_dict(item) for item in captions_value],
+            analysis_review=AnalysisReview.from_dict(review_value) if review_value is not None else None,
             segments=[Segment.from_dict(item) for item in segments_value],
         )
         project.sort_segments()

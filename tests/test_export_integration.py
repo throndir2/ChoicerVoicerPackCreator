@@ -6,15 +6,41 @@ from pathlib import Path
 
 import pytest
 
+from choicer_voicer_pack_creator.captions import refine_captions
 from choicer_voicer_pack_creator.config_format import read_config
 from choicer_voicer_pack_creator.exporter import PackExporter
 from choicer_voicer_pack_creator.media import MediaTools
-from choicer_voicer_pack_creator.models import PackProject, Segment
+from choicer_voicer_pack_creator.models import PackProject, Segment, SourceCaption
 from choicer_voicer_pack_creator.pack_io import PackImporter
 
 
 def file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.integration
+def test_caption_handles_retain_source_audio_outside_subtitle_window(tmp_path: Path) -> None:
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg is not available")
+    media = MediaTools()
+    source = tmp_path / "source.wav"
+    media.run([
+        media.ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
+        "sine=frequency=440:sample_rate=48000:duration=1.27",
+        "-af", "adelay=910,apad=whole_dur=5", str(source),
+    ], "Creating audio that starts before and finishes after its caption")
+    cue = refine_captions(
+        [SourceCaption(1, 2, "Synthetic timing fixture", "YouTube creator (en)")],
+        [(0.91, 2.18)], 5,
+    )[0]
+    prompt = tmp_path / "prompt.mp3"
+    timestamp = media.extract_prompt(source, cue.start, cue.end, 0.15, 0.25, prompt)
+    stats = media.decoded_audio_stats(prompt)
+    assert timestamp == pytest.approx(0.7)
+    assert stats.leading_quiet >= 0.15 - 0.02
+    assert stats.trailing_quiet >= 0.25 - 0.02
+    assert timestamp + stats.leading_quiet == pytest.approx(0.91, abs=0.025)
+    assert timestamp + stats.duration - stats.trailing_quiet == pytest.approx(2.18, abs=0.025)
 
 
 @pytest.mark.integration
@@ -63,12 +89,50 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
         ],
     )
 
-    result = PackExporter(media).export(project, tmp_path / "output")
+    updates = []
+    result = PackExporter(media).export(project, tmp_path / "output", progress=updates.append)
+    messages = [update.message for update in updates]
+    assert messages[0] == "Inspecting source video and audio..."
+    assert any("Converting full video" in message for message in messages)
+    encoding = [update for update in updates if update.live and update.position is not None]
+    assert encoding
+    assert encoding[-1].position == pytest.approx(2.0)
+    assert 0 < encoding[-1].fraction < 1
+    assert "frames" in encoding[-1].message
+    plan = next(update.plan for update in updates if update.plan)
+    observed_steps = list(dict.fromkeys(update.step for update in updates if update.step))
+    assert observed_steps == [step.key for step in plan]
+    assert "Creating pack icon..." in messages
+    for index, speaker in enumerate(("Alice", "Bob"), start=1):
+        for operation in (
+            "Preparing prompt audio", "Preparing prompt still image",
+            "Checking prompt audio duration, padding, and audibility",
+            "Writing prompt caption and character metadata",
+        ):
+            assert any(
+                message.startswith(operation) and f"Prompt {index}/2 - {speaker}" in message
+                and project.segments[index - 1].caption in message for message in messages
+            )
+        for phase in ("Validating staged pack", "Revalidating published pack"):
+            assert f"{phase}: fully decoding Ogg video and audio" in messages
+            assert f"{phase}: prompt {index}/2: checking and decoding audio" in messages
+            assert f"{phase}: prompt {index}/2: checking and decoding still image" in messages
+    assert "Hashing staged file 10/10..." in messages
+    assert "Creating ZIP: compressing file 10/10..." in messages
+    assert "Verifying published file 10/10..." in messages
+    assert "Testing staged ZIP integrity and file inventory..." in messages
+    assert "Testing published ZIP integrity and file inventory..." in messages
+    assert messages.index("Hashing staged file 10/10...") < messages.index(
+        "Creating ZIP: compressing file 1/10..."
+    ) < messages.index("Verifying published file 1/10...")
+    assert messages[-1] == "Cleaning up export staging files..."
     assert result.pack_path.is_dir()
     assert result.zip_path and result.zip_path.is_file()
     assert result.validation["status"] == "passed"
     assert result.validation["clip_count"] == 2
     assert result.validation["file_count"] == 10
+    assert any("without backing music" in warning for warning in result.warnings)
+    assert media.audio_peak_dbfs(result.pack_path / "_backing_track.mp3") == float("-inf")
     metadata = read_config(result.pack_path / "001_Alice.txt")["data"]
     assert metadata["dub_timestamps"] == [0.1]
     assert metadata["caption"] == "First line"
@@ -96,13 +160,69 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
     original_image_hash = file_hash(result.pack_path / "001_Alice.png")
     imported.title = "Modified Integration Pack"
     imported.segments[0].caption = "Edited first line"
-    modified = PackExporter(media).export(imported, tmp_path / "modified-output")
+    updates.clear()
+    modified = PackExporter(media).export(
+        imported, tmp_path / "modified-output", create_zip=False, progress=updates.append,
+    )
+    messages = [update.message for update in updates]
+    assert any("Preserving existing Ogg video" in message for message in messages)
+    assert any("Preparing prompt audio\nPrompt 1/2 - Alice" in message for message in messages)
+    assert not any("compressing file" in message for message in messages)
+    plan = next(update.plan for update in updates if update.plan)
+    assert not any(step.kind in {"video-encode", "zip", "zip-check"} for step in plan)
+    assert list(dict.fromkeys(update.step for update in updates if update.step)) == [
+        step.key for step in plan
+    ]
+    assert modified.zip_path is None
     assert modified.validation["status"] == "passed"
+    assert any("without backing music" in warning for warning in modified.warnings)
     assert read_config(modified.pack_path / "001_Alice.txt")["data"]["caption"] == (
         "Edited first line"
     )
     assert file_hash(modified.pack_path / "001_Alice.mp3") == original_audio_hash
     assert file_hash(modified.pack_path / "001_Alice.png") == original_image_hash
+
+    recovered = PackImporter(media).import_zip(result.zip_path, tmp_path / "recovered").project
+    dialogue_before = [segment.to_dict() for segment in recovered.segments]
+    recovered_backing = tmp_path / "recovered-backing.mp3"
+    media.convert_audio(source, recovered_backing, mono=False, duration=recovered.video_duration)
+    recovered.backing_track_path = str(recovered_backing)
+    repaired = PackExporter(media).export(recovered, tmp_path / "repaired-output")
+    assert [segment.to_dict() for segment in recovered.segments] == dialogue_before
+    assert media.decoded_audio_stats(repaired.pack_path / "_backing_track.mp3").has_activity
+    assert not repaired.warnings
+    assert file_hash(repaired.pack_path / "dub_video.ogv") == file_hash(result.pack_path / "dub_video.ogv")
+    for name in ("001_Alice.mp3", "001_Alice.png", "001_Alice.txt", "002_Bob.txt"):
+        assert file_hash(repaired.pack_path / name) == file_hash(result.pack_path / name)
+
+    project.combine_segments([segment.id for segment in reversed(project.segments)])
+    combined = PackExporter(media).export(project, tmp_path / "combined-output")
+    assert combined.validation["status"] == "passed"
+    assert combined.validation["clip_count"] == 1
+    assert combined.validation["file_count"] == 7
+    combined_metadata = read_config(combined.pack_path / "001_Alice.txt")["data"]
+    assert combined_metadata["caption"] == "First line Second line"
+    assert combined_metadata["dub_characters"] == ["Alice", "Bob"]
+    assert combined_metadata["dub_timestamps"] == [0.1]
+    combined_duration = media.probe_audio_duration(combined.pack_path / "001_Alice.mp3")
+    assert combined_duration == pytest.approx(1.55 - 0.2 + 0.1 + 0.15, abs=0.05)
+
+
+@pytest.mark.integration
+def test_backing_peak_checks_both_channels_without_mono_cancellation(tmp_path: Path) -> None:
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg is not available")
+    media = MediaTools()
+    stereo = tmp_path / "opposite-channels.wav"
+    media.run(
+        [
+            media.ffmpeg, "-v", "error", "-f", "lavfi", "-i",
+            "aevalsrc=0.1*sin(2*PI*440*t)|-0.1*sin(2*PI*440*t):s=44100:d=0.2",
+            str(stereo),
+        ],
+        "Creating stereo backing fixture",
+    )
+    assert media.audio_peak_dbfs(stereo) == pytest.approx(-20, abs=0.02)
 
 
 @pytest.mark.integration

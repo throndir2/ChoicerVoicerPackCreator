@@ -96,6 +96,8 @@ class TimelineWidget(QWidget):
         self.update()
 
     def set_playhead(self, seconds: float) -> None:
+        if self._drag_kind == "playhead":
+            return
         self.playhead = max(0.0, min(self.duration, seconds))
         if not self._drag_kind:
             self.ensure_visible(self.playhead, margin=0.05)
@@ -238,11 +240,29 @@ class TimelineWidget(QWidget):
             painter.setBrush(QColor("#ffffff"))
             painter.drawPolygon([QPointF(x - 5, 0), QPointF(x + 5, 0), QPointF(x, 8)])
 
+    def _playhead_hit(self, position: QPointF) -> bool:
+        x = self._time_to_x(self.playhead)
+        if not (0 <= x <= self.width() and abs(position.x() - x) <= 7):
+            return False
+        # Keep colored handles and segment blocks editable where they cross the playhead.
+        if 25 <= position.y() <= 37 and any(
+            abs(position.x() - self._time_to_x(mark)) <= 8
+            for mark in (self.mark_in, self.mark_out)
+        ):
+            return False
+        return not any(self._segment_rect(segment).contains(position) for segment in self.segments)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
             return
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         x = event.position().x()
+        if self._playhead_hit(event.position()):
+            self._prepare_drag("playhead", "", self.playhead, self.playhead, x)
+            self._activate_drag()
+            self._update_drag(x)
+            event.accept()
+            return
         for segment in reversed(self.segments):
             rect = self._segment_rect(segment)
             if rect.contains(event.position()):
@@ -294,6 +314,10 @@ class TimelineWidget(QWidget):
             return
 
         x = event.position().x()
+        if self._playhead_hit(event.position()):
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            QToolTip.hideText()
+            return
         if 25 <= event.position().y() <= 109:
             x1 = self._time_to_x(self.mark_in)
             x2 = self._time_to_x(self.mark_out)
@@ -318,7 +342,8 @@ class TimelineWidget(QWidget):
                 QToolTip.showText(
                     event.globalPosition().toPoint(),
                     f"{segment.primary_character}\n{segment.start:.3f}–{segment.end:.3f}s\n"
-                    f"Drag the center to move; drag an edge to trim.\n{segment.caption}",
+                    f"Click to cue the start; drag the center to move; drag an edge to trim.\n"
+                    f"{segment.caption}",
                     self,
                 )
                 return
@@ -327,7 +352,9 @@ class TimelineWidget(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton or not self._drag_kind:
             return
-        if self._drag_active:
+        if self._drag_kind == "playhead":
+            self._update_drag(event.position().x())
+        elif self._drag_active:
             final_start, final_end = self._current_drag_range()
             self.range_edit_finished.emit(
                 self._drag_id,
@@ -336,6 +363,8 @@ class TimelineWidget(QWidget):
                 final_start,
                 final_end,
             )
+        elif self._drag_kind == "segment-body":
+            self.seek_requested.emit(self._drag_original_start)
         else:
             self.seek_requested.emit(self._drag_anchor_time)
         self._clear_drag()
@@ -344,7 +373,9 @@ class TimelineWidget(QWidget):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if event.key() == Qt.Key.Key_Escape and self._drag_kind:
-            if self._drag_active:
+            if self._drag_kind == "playhead":
+                self._seek_playhead(self._drag_original_start)
+            elif self._drag_active:
                 if self._drag_kind == "mark-new":
                     self._apply_drag_range(
                         self._drag_previous_mark_start, self._drag_previous_mark_end
@@ -395,6 +426,10 @@ class TimelineWidget(QWidget):
         if self._drag_active:
             return
         self._drag_active = True
+        if self._drag_kind == "playhead":
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            QToolTip.hideText()
+            return
         if self._drag_kind == "mark-new":
             self.mark_segment_id = ""
         self.range_edit_started.emit(
@@ -408,6 +443,9 @@ class TimelineWidget(QWidget):
 
     def _update_drag(self, x: float) -> None:
         timestamp = self._x_to_time(x)
+        if self._drag_kind == "playhead":
+            self._seek_playhead(timestamp)
+            return
         minimum = 0.05
         start, end = self._drag_base_start, self._drag_base_end
         if self._drag_kind in {"segment-start", "mark-start"}:
@@ -433,6 +471,11 @@ class TimelineWidget(QWidget):
             else:
                 start = round(max(0.0, end - minimum), 3)
         self._apply_drag_range(start, end)
+
+    def _seek_playhead(self, seconds: float) -> None:
+        self.playhead = max(0.0, min(self.duration, seconds))
+        self.update()
+        self.seek_requested.emit(self.playhead)
 
     def _apply_drag_range(self, start: float, end: float) -> None:
         segment = self._segment(self._drag_id)

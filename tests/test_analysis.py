@@ -4,6 +4,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 import wave
 import zipfile
 from array import array
@@ -14,6 +15,7 @@ import pytest
 import choicer_voicer_pack_creator.analysis as analysis_module
 from choicer_voicer_pack_creator.analysis import (
     ActivityRegion,
+    AnalysisCancelled,
     AnalysisError,
     AnalysisSuggestion,
     HardwareProfile,
@@ -23,7 +25,9 @@ from choicer_voicer_pack_creator.analysis import (
     default_manifest_path,
     scan_audio_activity,
 )
+from choicer_voicer_pack_creator.diagnostics import AnalysisDiagnostics, analysis_log_path
 from choicer_voicer_pack_creator.media import MediaTools
+from choicer_voicer_pack_creator.models import CaptionFragment, SourceCaption
 
 
 def _write_test_wav(path: Path) -> None:
@@ -60,6 +64,55 @@ def test_activity_scan_finds_deterministic_regions(tmp_path: Path) -> None:
     assert regions[1].start == pytest.approx(1.7, abs=0.04)
     assert regions[1].end == pytest.approx(2.4, abs=0.04)
     assert progress[-1][1] == 1.0
+
+
+def test_raw_activity_retains_real_gap_edges_without_default_padding(tmp_path: Path) -> None:
+    wav_path = tmp_path / "activity.wav"
+    _write_test_wav(wav_path)
+    messages = []
+    regions, threshold = scan_audio_activity(
+        wav_path, 2.4, "balanced", lambda message, _: messages.append(message),
+        lambda: False, raw=True,
+    )
+    assert regions == [ActivityRegion(0.5, 1.3), ActivityRegion(1.8, 2.4)]
+    assert threshold is not None
+    assert all("YouTube refinement" in message for message in messages)
+
+
+def test_raw_activity_retains_short_and_quiet_sounds_instead_of_false_pauses(tmp_path) -> None:
+    path = tmp_path / "activity.wav"
+    samples = array("h")
+    for seconds, amplitude in ((0.5, 12000), (0.4, 300), (0.04, 12000), (0.5, 0)):
+        samples.extend(amplitude if index % 16 < 8 else -amplitude
+                       for index in range(round(seconds * 16000)))
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(16000)
+        output.writeframes(samples.tobytes())
+    regions, _ = scan_audio_activity(
+        path, 1.44, "balanced", lambda *_: None, lambda: False, raw=True,
+    )
+    assert len(regions) == 1
+    assert (regions[0].start, regions[0].end) == pytest.approx((0, 0.94))
+
+
+def test_raw_activity_scan_checks_cancellation(tmp_path: Path) -> None:
+    wav_path = tmp_path / "activity.wav"
+    _write_test_wav(wav_path)
+    with pytest.raises(AnalysisCancelled):
+        scan_audio_activity(
+            wav_path, 2.4, "balanced", lambda *_: None, lambda: True, raw=True,
+        )
+
+
+def test_raw_activity_end_never_rounds_beyond_video_duration(tmp_path: Path) -> None:
+    wav_path = tmp_path / "activity.wav"
+    _write_test_wav(wav_path)
+    regions, _ = scan_audio_activity(
+        wav_path, 1.23456, "balanced", lambda *_: None, lambda: False, raw=True,
+    )
+    assert regions == [ActivityRegion(0.5, 1.23456)]
 
 
 def test_silent_activity_scan_returns_no_suggestions(tmp_path: Path) -> None:
@@ -216,6 +269,101 @@ def test_video_activity_analysis_runs_end_to_end_without_model(tmp_path: Path) -
     assert result.transcript_regions == 0
     assert all(item.source == "Audio activity" for item in result.suggestions)
     assert all(item.caption == "" for item in result.suggestions)
+    assert result.refined_captions is None
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_refine_only_analysis_uses_audio_without_whisper_and_reports_separate_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty: bool,
+) -> None:
+    def extract(_media, _video, destination, _progress, _cancelled):
+        _write_test_wav(destination)
+
+    def forbidden_whisper(*_args, **_kwargs):
+        raise AssertionError("Refinement must not construct a Whisper manager or download models")
+
+    monkeypatch.setattr(analysis_module, "extract_analysis_audio", extract)
+    monkeypatch.setattr(analysis_module, "WhisperManager", forbidden_whisper)
+    cues = [] if empty else [SourceCaption(0.5, 2.4, "Hello there", "YouTube", (
+        CaptionFragment("Hello ", 0.5), CaptionFragment("there", 1.8),
+    ))]
+    original = [cue.to_dict() for cue in cues]
+    messages = []
+    with AnalysisDiagnostics(tmp_path / "diagnostics"):
+        result = analyze_video(
+            object(), tmp_path / "video.mp4", 2.4, tmp_path / "data",
+            sensitivity="balanced", use_whisper=False, model_key="tiny", language="auto",
+            progress=lambda message, _: messages.append(message), cancelled=lambda: False,
+            source_captions=cues, pause_threshold=0.4,
+        )
+    assert result.suggestions == []
+    assert result.refined_captions is not None
+    assert [row.text for row in result.refined_captions] == ([] if empty else ["Hello", "there"])
+    assert result.activity_regions == 2
+    assert result.transcript_regions == 0
+    assert result.model_name is None
+    assert [cue.to_dict() for cue in cues] == original
+    assert any("Refining YouTube" in message for message in messages)
+    events = [json.loads(line) for line in analysis_log_path(tmp_path / "diagnostics")
+              .read_text(encoding="utf-8").splitlines()]
+    configuration = next(event for event in events if event["event"] == "analysis_configuration")
+    assert configuration["refine_youtube"] is True
+    outcome = next(event for event in events if event["event"] == "analysis_results")
+    assert outcome["refined_captions"] == (0 if empty else 2)
+
+
+def test_normal_analysis_keeps_default_scan_and_whisper_output(tmp_path, monkeypatch) -> None:
+    calls = []
+    transcript = AnalysisSuggestion(0.5, 1, "Original Whisper", "Whisper", 0.8)
+    component = tmp_path / "installed-component"
+    component.write_bytes(b"test")
+
+    class FakeWhisper:
+        cli_path = component
+        models = {"tiny": {"name": "Fake tiny"}}
+
+        def __init__(self, *_):
+            pass
+
+        def model_path(self, _key):
+            return component
+
+        def transcribe(self, *_):
+            return [transcript], "en"
+
+    def scan(*_args, **kwargs):
+        calls.append(kwargs)
+        return [ActivityRegion(0.5, 1)], -30
+
+    monkeypatch.setattr(analysis_module, "WhisperManager", FakeWhisper)
+    monkeypatch.setattr(analysis_module, "extract_analysis_audio", lambda *_: None)
+    monkeypatch.setattr(analysis_module, "scan_audio_activity", scan)
+    monkeypatch.setattr(
+        analysis_module, "detect_hardware", lambda: HardwareProfile(4, None, None, "tiny", "test")
+    )
+    result = analyze_video(
+        object(), tmp_path / "video", 2, tmp_path,
+        sensitivity="balanced", use_whisper=True, model_key="tiny", language="en",
+        progress=lambda *_: None, cancelled=lambda: False,
+    )
+    assert calls == [{}]
+    assert result.suggestions == [transcript]
+    assert result.refined_captions is None
+    assert result.detected_language == "en"
+
+
+def test_refinement_shares_disk_checks_and_propagates_cancellation(tmp_path, monkeypatch) -> None:
+    arguments = dict(
+        sensitivity="balanced", use_whisper=False, model_key="tiny", language="auto",
+        progress=lambda *_: None, source_captions=[],
+    )
+    with pytest.raises(AnalysisCancelled):
+        analyze_video(object(), tmp_path / "video", 2, tmp_path, **arguments, cancelled=lambda: True)
+    monkeypatch.setattr(
+        analysis_module.shutil, "disk_usage", lambda _: shutil._ntuple_diskusage(1, 1, 0)
+    )
+    with pytest.raises(AnalysisError, match="free"):
+        analyze_video(object(), tmp_path / "video", 2, tmp_path, **arguments, cancelled=lambda: False)
 
 
 def test_whisper_setup_uses_verified_allowlist_and_cache(
@@ -277,12 +425,21 @@ def test_whisper_setup_uses_verified_allowlist_and_cache(
     )
     manager = WhisperManager(tmp_path / "installed", manifest)
     progress: list[str] = []
-    cli = manager.ensure_runtime(
-        lambda message, _value: progress.append(message), lambda: False
-    )
-    model = manager.ensure_model(
-        "tiny", lambda message, _value: progress.append(message), lambda: False
-    )
+    with AnalysisDiagnostics(tmp_path / "installed"):
+        cli = manager.ensure_runtime(
+            lambda message, _value: progress.append(message), lambda: False
+        )
+        model = manager.ensure_model(
+            "tiny", lambda message, _value: progress.append(message), lambda: False
+        )
+    events = [
+        json.loads(line) for line in analysis_log_path(tmp_path / "installed")
+        .read_text(encoding="utf-8").splitlines()
+    ]
+    assert [item["component"] for item in events if item["event"] == "component_download_verified"] == [
+        "Whisper CPU runtime", "Test model",
+    ]
+    assert any(item["event"] == "runtime_setup" for item in events)
 
     assert cli.read_bytes() == b"payload-whisper-cli.exe"
     assert model.read_bytes() == b"model data"
@@ -438,8 +595,16 @@ def test_download_total_deadline_is_enforced(
         )
 
 
-def test_whisper_parser_uses_lexical_token_bounds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("invalid_edge", [
+    None, "missing-first", "missing-last", "zero-first", "zero-last",
+    "nonfinite", "negative", "outside-segment", "backwards",
+])
+@pytest.mark.parametrize(("segment_bounds", "expected"), [
+    ((0, 12240), (0, 12)),
+    ((400, 5400), (0.25, 5.65)),
+])
+def test_whisper_parser_preserves_segment_envelope_instead_of_trusting_token_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_edge, segment_bounds, expected,
 ) -> None:
     wav_path = tmp_path / "source.wav"
     with wave.open(str(wav_path), "wb") as output:
@@ -448,25 +613,53 @@ def test_whisper_parser_uses_lexical_token_bounds(
         output.setframerate(16_000)
         output.writeframes(array("h", [0] * (16_000 * 12)).tobytes())
     manager = WhisperManager(tmp_path / "data", default_manifest_path())
+    (tmp_path / "model.bin").write_bytes(b"test model")
     monkeypatch.setattr(manager, "ensure_runtime", lambda *_args: tmp_path / "whisper-cli.exe")
     monkeypatch.setattr(manager, "ensure_model", lambda *_args: tmp_path / "model.bin")
 
     def write_transcript(command, *_args, **_kwargs):
+        assert "--print-progress" in command
+        assert "--no-prints" not in command
+        assert _kwargs["timeout"] >= 600
+        _kwargs["tick"](0)
+        _kwargs["output_line"]("main: processing 'source.wav' ...")
+        _kwargs["tick"](1)
+        _kwargs["output_line"]("whisper_print_progress_callback: progress =  50%")
+        _kwargs["tick"](2)
+        _kwargs["output_line"]("whisper_print_progress_callback: progress =  40%")
+        _kwargs["tick"](3)
         output_base = Path(command[command.index("--output-file") + 1])
+        tokens = [
+            {"text": " Hello", "offsets": {"from": 500, "to": 1500}, "p": 0.9},
+            {"text": " there", "offsets": {"from": 1600, "to": 3000}, "p": 0.8},
+            {"text": ".", "offsets": {"from": 3100, "to": 11990}, "p": 0.9},
+            {"text": "[_TT_612]", "offsets": {"from": 12240, "to": 12240}, "p": 0.2},
+        ]
+        if invalid_edge == "missing-first":
+            tokens[0].pop("offsets")
+        elif invalid_edge == "missing-last":
+            tokens[1].pop("offsets")
+        elif invalid_edge == "zero-first":
+            tokens[0]["offsets"]["to"] = 500
+        elif invalid_edge == "zero-last":
+            tokens[1]["offsets"]["from"] = 3000
+        elif invalid_edge == "nonfinite":
+            tokens[0]["offsets"]["from"] = float("nan")
+        elif invalid_edge == "negative":
+            tokens[0]["offsets"]["from"] = -1
+        elif invalid_edge == "outside-segment":
+            tokens[1]["offsets"]["to"] = 13000
+        elif invalid_edge == "backwards":
+            tokens[1]["offsets"] = {"from": 300, "to": 1000}
         output_base.with_suffix(".json").write_text(
             json.dumps(
                 {
                     "result": {"language": "en"},
                     "transcription": [
                         {
-                            "offsets": {"from": 0, "to": 12240},
+                            "offsets": {"from": segment_bounds[0], "to": segment_bounds[1]},
                             "text": "Hello there.",
-                            "tokens": [
-                                {"text": " Hello", "offsets": {"from": 500, "to": 1500}, "p": 0.9},
-                                {"text": " there", "offsets": {"from": 1600, "to": 3000}, "p": 0.8},
-                                {"text": ".", "offsets": {"from": 3100, "to": 11990}, "p": 0.9},
-                                {"text": "[_TT_612]", "offsets": {"from": 12240, "to": 12240}, "p": 0.2},
-                            ],
+                            "tokens": tokens,
                         }
                     ],
                 }
@@ -476,17 +669,75 @@ def test_whisper_parser_uses_lexical_token_bounds(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(analysis_module, "_run_cancellable", write_transcript)
+    progress = []
     suggestions, language = manager.transcribe(
         wav_path,
         tmp_path / "output",
         "base",
         "auto",
         HardwareProfile(4, 8 * 1024**3, 6 * 1024**3, "base", "test"),
-        lambda *_args: None,
+        lambda message, fraction: progress.append((message, fraction)),
         lambda: False,
     )
 
     assert language == "en"
-    assert suggestions == [
-        AnalysisSuggestion(0.42, 3.12, "Hello there.", "Whisper", 0.867)
-    ]
+    assert suggestions == [AnalysisSuggestion(*expected, "Hello there.", "Whisper", 0.867)]
+    assert any("Loading" in message and "elapsed" in message for message, _ in progress)
+    assert any("first audio block" in message for message, _ in progress)
+    measured = [fraction for message, fraction in progress if "% of audio" in message]
+    assert measured == [0.5, 0.5]
+    assert progress[-1][1] == 1
+
+
+def test_analysis_subprocess_streams_output_and_cancels_without_hanging(monkeypatch):
+    real_popen = subprocess.Popen
+    processes = []
+    lines = []
+    ticks = []
+
+    def start(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(analysis_module.subprocess, "Popen", start)
+    with pytest.raises(AnalysisCancelled):
+        analysis_module._run_cancellable(
+            [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(30)"],
+            "Test transcription", lambda: bool(lines),
+            output_line=lines.append, tick=ticks.append, timeout=5,
+        )
+    assert lines == ["ready\n"]
+    assert ticks
+    assert len(processes) == 1
+    assert processes[0].poll() is not None
+
+
+def test_analysis_subprocess_timeout_terminates_silent_worker(monkeypatch):
+    real_popen = subprocess.Popen
+    processes = []
+
+    def start(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(analysis_module.subprocess, "Popen", start)
+    with pytest.raises(AnalysisError, match="time limit"):
+        analysis_module._run_cancellable(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            "Test transcription", lambda: False, timeout=0.3,
+        )
+    assert processes[0].poll() is not None
+
+
+def test_analysis_subprocess_drains_both_pipes_and_preserves_failure_diagnostics():
+    with pytest.raises(AnalysisError, match="diagnostic"):
+        analysis_module._run_cancellable(
+            [
+                sys.executable, "-c",
+                "import sys; print('x' * 131072); "
+                "print('diagnostic', file=sys.stderr); sys.exit(3)",
+            ],
+            "Test transcription", lambda: False, timeout=5,
+        )

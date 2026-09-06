@@ -10,6 +10,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from choicer_voicer_pack_creator.diagnostics import (
+    diagnostic_event,
+    diagnostic_exception,
+    diagnostic_operation,
+)
 from choicer_voicer_pack_creator.models import PackProject
 
 _PATH_FIELDS = ("video_path", "backing_track_path", "icon_path", "source_pack_path")
@@ -83,8 +88,13 @@ class ProjectStore:
         return path.with_name(f"{path.name}.{label}-{stamp}-{uuid.uuid4().hex[:8]}")
 
     @staticmethod
+    @diagnostic_operation("project_save")
     def save(project: PackProject, path: Path) -> None:
         destination = path.resolve()
+        diagnostic_event(
+            "project_save_requested", path=destination, segment_count=len(project.segments),
+            source_caption_count=len(project.source_captions),
+        )
         destination.parent.mkdir(parents=True, exist_ok=True)
         data = project.to_dict()
         for field in _PATH_FIELDS:
@@ -101,38 +111,47 @@ class ProjectStore:
             try:
                 ProjectStore.load(destination)
                 destination_valid = True
-            except Exception:
+            except Exception as error:
+                diagnostic_exception("project_previous_validation_failed", error, path=destination)
                 destination_valid = False
         temporary = _stage_bytes(destination, payload)
         try:
             if destination_payload is not None and destination_valid:
                 _write_bytes_atomic(previous, destination_payload)
+                diagnostic_event("project_previous_saved", path=previous)
             elif destination_payload is not None:
-                _write_bytes_atomic(
-                    ProjectStore._forensic_path(destination, "corrupt"),
-                    destination_payload,
-                )
+                forensic = ProjectStore._forensic_path(destination, "corrupt")
+                _write_bytes_atomic(forensic, destination_payload)
+                diagnostic_event("project_corrupt_copy_preserved", path=forensic)
             try:
                 os.replace(temporary, destination)
-            except OSError:
+            except OSError as error:
+                diagnostic_exception("project_replace_failed", error, path=destination)
                 if destination_valid:
                     if prior_previous is None:
                         previous.unlink(missing_ok=True)
                     else:
                         _write_bytes_atomic(previous, prior_previous)
+                    diagnostic_event("project_previous_restored", path=previous)
                 raise
             if destination_payload is None and previous.is_file():
                 orphaned = ProjectStore._forensic_path(destination, "orphaned-previous")
                 with suppress(OSError):
                     os.replace(previous, orphaned)
+                    diagnostic_event("project_orphaned_previous_preserved", path=orphaned)
                     # The newly saved main project is valid. Preserve an undeletable sidecar
                     # rather than reporting the completed save as failed.
         finally:
             temporary.unlink(missing_ok=True)
+        diagnostic_event(
+            "project_saved", path=destination, bytes=len(payload), segment_count=len(project.segments),
+        )
 
     @staticmethod
+    @diagnostic_operation("project_load")
     def load(path: Path) -> PackProject:
         source = path.resolve()
+        diagnostic_event("project_load_requested", path=source)
         value: Any = json.loads(source.read_text(encoding="utf-8-sig"))
         if not isinstance(value, dict):
             raise ValueError("Project file must contain a JSON object")
@@ -145,7 +164,13 @@ class ProjectStore:
                     continue
                 for field in _SEGMENT_PATH_FIELDS:
                     segment[field] = _resolved_path(str(segment.get(field, "")), source.parent)
-        return PackProject.from_dict(value)
+        project = PackProject.from_dict(value)
+        diagnostic_event(
+            "project_loaded", path=source, segment_count=len(project.segments),
+            source_caption_count=len(project.source_captions),
+            has_analysis_review=project.analysis_review is not None,
+        )
+        return project
 
 
 @dataclass(slots=True)
@@ -167,7 +192,12 @@ class RecoveryStore:
     def previous_path(self) -> Path:
         return self.path.with_name(self.path.name + ".previous")
 
+    @diagnostic_operation("recovery_save")
     def save(self, project: PackProject, project_path: Path | None) -> None:
+        diagnostic_event(
+            "recovery_save_requested", path=self.path, project_path=project_path,
+            segment_count=len(project.segments), source_caption_count=len(project.source_captions),
+        )
         data = project.to_dict()
         base = project_path.resolve().parent if project_path else Path.cwd()
         for field in _PATH_FIELDS:
@@ -202,20 +232,24 @@ class RecoveryStore:
             if self.path.is_file():
                 try:
                     self._load_candidate(self.path)
-                except Exception:
-                    pass
+                except Exception as error:
+                    diagnostic_exception("recovery_previous_validation_failed", error, path=self.path)
                 else:
                     _write_bytes_atomic(self.previous_path, self.path.read_bytes())
+                    diagnostic_event("recovery_previous_saved", path=self.previous_path)
             try:
                 os.replace(temporary, self.path)
-            except OSError:
+            except OSError as error:
+                diagnostic_exception("recovery_replace_failed", error, path=self.path)
                 if prior_previous is None:
                     self.previous_path.unlink(missing_ok=True)
                 else:
                     _write_bytes_atomic(self.previous_path, prior_previous)
+                diagnostic_event("recovery_previous_restored", path=self.previous_path)
                 raise
         finally:
             temporary.unlink(missing_ok=True)
+        diagnostic_event("recovery_saved", path=self.path, bytes=len(payload))
 
     @staticmethod
     def _load_candidate(candidate: Path) -> RecoveryRecord:
@@ -240,20 +274,33 @@ class RecoveryStore:
             source_path=candidate,
         )
 
+    @diagnostic_operation("recovery_load")
     def load(self) -> RecoveryRecord | None:
+        diagnostic_event("recovery_load_requested", path=self.path)
         errors: list[str] = []
         for candidate in (self.path, self.previous_path):
             if not candidate.is_file():
                 continue
             try:
-                return self._load_candidate(candidate)
+                record = self._load_candidate(candidate)
+                diagnostic_event(
+                    "recovery_loaded", path=candidate, project_path=record.project_path,
+                    previous=candidate == self.previous_path,
+                    segment_count=len(record.project.segments),
+                    source_caption_count=len(record.project.source_captions),
+                )
+                return record
             except Exception as error:
+                diagnostic_exception("recovery_candidate_failed", error, path=candidate)
                 errors.append(f"{candidate}: {error}")
         if errors:
             raise ValueError("No valid recovery snapshot could be read:\n" + "\n".join(errors))
+        diagnostic_event("recovery_not_found", path=self.path)
         return None
 
+    @diagnostic_operation("recovery_clear")
     def clear(self) -> None:
+        diagnostic_event("recovery_clear_requested", path=self.path)
         for path in (
             self.path,
             self.previous_path,
@@ -267,7 +314,10 @@ class RecoveryStore:
             return False
         try:
             return ProjectStore.load(record.project_path).to_dict() == record.project.to_dict()
-        except Exception:
+        except Exception as error:
+            diagnostic_exception(
+                "recovery_redundancy_check_failed", error, project_path=record.project_path,
+            )
             return False
 
     def saved_project_changed(self, record: RecoveryRecord) -> bool:
@@ -275,6 +325,13 @@ class RecoveryStore:
             return False
         try:
             current_hash = _sha256(record.project_path) if record.project_path.is_file() else ""
-        except OSError:
+        except OSError as error:
+            diagnostic_exception(
+                "recovery_saved_project_check_failed", error, project_path=record.project_path,
+            )
             return True
-        return current_hash != record.saved_project_sha256
+        changed = current_hash != record.saved_project_sha256
+        diagnostic_event(
+            "recovery_saved_project_checked", project_path=record.project_path, changed=changed,
+        )
+        return changed

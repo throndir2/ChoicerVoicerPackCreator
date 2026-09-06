@@ -37,6 +37,7 @@ def live_editor(qtbot, tmp_path):
         None,
         settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat),
         recovery_store=RecoveryStore(tmp_path / "recovery.json"),
+        analysis_data_root=tmp_path / "analysis",
     )
     qtbot.addWidget(
         window, before_close_func=lambda widget: setattr(widget, "_automation_disconnected", True)
@@ -103,6 +104,19 @@ def test_live_operation_busy_state_and_modal_rejection(qtbot, live_editor):
         in_worker(qtbot, lambda: bridge.begin("Blocked"))
     dialog.close()
     assert not window._automation_active
+
+
+def test_nonmodal_backing_workflow_blocks_mcp_mutations(qtbot, live_editor):
+    window, bridge, _automation = live_editor
+    dialog = QDialog(window)
+    window._backing_dialog = dialog
+    try:
+        with pytest.raises(ValueError, match="backing-track"):
+            in_worker(qtbot, lambda: bridge.begin("Edit project"))
+        assert not window._automation_active
+    finally:
+        window._backing_dialog = None
+        dialog.close()
 
 
 def test_live_show_and_disconnect_preserve_unsaved_recovery(qtbot, live_editor):

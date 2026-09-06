@@ -5,10 +5,13 @@ import hashlib
 import json
 import math
 import os
+import queue
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -17,9 +20,9 @@ import wave
 import zipfile
 from array import array
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 try:
     with warnings.catch_warnings():
@@ -28,11 +31,19 @@ try:
 except ImportError:  # Removed from Python 3.13; retain the pure-Python fallback.
     _audio_rms = None
 
+from choicer_voicer_pack_creator.captions import pad_source_ranges, refine_captions
+from choicer_voicer_pack_creator.diagnostics import (
+    diagnostic_event,
+    diagnostic_exception,
+    diagnostic_text,
+)
 from choicer_voicer_pack_creator.media import MediaTools
+from choicer_voicer_pack_creator.models import SourceCaption
 
 ProgressCallback = Callable[[str, float | None], None]
 CancelCallback = Callable[[], bool]
 BUFFER_SIZE = 1024 * 1024
+DIAGNOSTIC_HEARTBEAT_SECONDS = 5.0
 ALLOWED_DOWNLOAD_HOSTS = {
     "github.com",
     "release-assets.githubusercontent.com",
@@ -87,6 +98,7 @@ class AnalysisResult:
     model_name: str | None
     detected_language: str | None
     hardware: HardwareProfile
+    refined_captions: list[SourceCaption] | None = None
 
 
 def default_manifest_path() -> Path:
@@ -99,6 +111,108 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(BUFFER_SIZE), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def download_verified(
+    url: str,
+    destination: Path,
+    expected_hash: str,
+    expected_bytes: int,
+    label: str,
+    progress: ProgressCallback,
+    cancelled: CancelCallback,
+) -> Path:
+    """Download a pinned optional component, retaining the shared verification policy."""
+    diagnostic_event(
+        "component_requested", component=label, destination=str(destination),
+        expected_bytes=expected_bytes, expected_sha256=expected_hash,
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file():
+        progress(f"Verifying cached {label}...", None)
+        if destination.stat().st_size == expected_bytes and sha256(destination) == expected_hash:
+            diagnostic_event("component_cache_verified", component=label)
+            progress(f"Using verified cached {label}.", 1.0)
+            return destination
+        diagnostic_event(
+            "component_cache_invalid", component=label, bytes=destination.stat().st_size,
+        )
+        destination.unlink()
+    partial = destination.with_name(destination.name + ".partial")
+    partial.unlink(missing_ok=True)
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "ChoicerVoicerPackCreator-analysis/0.4"},
+    )
+    diagnostic_event("component_download_started", component=label, url=url)
+    try:
+        transfer_deadline = time.monotonic() + max(
+            60.0, min(3600.0, 60.0 + expected_bytes / (128 * 1024))
+        )
+        with urllib.request.urlopen(request, timeout=10) as response, partial.open("wb") as output:
+            final_url = response.geturl()
+            parsed = urllib.parse.urlparse(final_url)
+            approved_https_host = bool(
+                parsed.hostname
+                and (
+                    parsed.hostname in ALLOWED_DOWNLOAD_HOSTS
+                    or parsed.hostname.endswith(ALLOWED_DOWNLOAD_HOST_SUFFIXES)
+                )
+            )
+            if parsed.scheme not in {"https", "file"} or (
+                parsed.scheme == "https" and not approved_https_host
+            ):
+                raise AnalysisError(f"{label} redirected to an unapproved host: {final_url}")
+            content_length = response.headers.get("Content-Length")
+            diagnostic_event(
+                "component_download_response", component=label,
+                host=parsed.hostname, content_length=content_length,
+            )
+            if content_length is not None and int(content_length) != expected_bytes:
+                raise AnalysisError(
+                    f"{label} reported {content_length} bytes; expected {expected_bytes}."
+                )
+            downloaded = 0
+            while True:
+                _check_cancel(cancelled)
+                if time.monotonic() > transfer_deadline:
+                    raise AnalysisError(f"{label} download exceeded its time limit")
+                try:
+                    chunk = response.read(min(BUFFER_SIZE, expected_bytes - downloaded + 1))
+                except (TimeoutError, OSError) as error:
+                    if cancelled():
+                        raise AnalysisCancelled("Video analysis was canceled") from None
+                    raise AnalysisError(f"{label} download failed: {error}") from error
+                if not chunk:
+                    break
+                if downloaded + len(chunk) > expected_bytes:
+                    raise AnalysisError(
+                        f"{label} exceeded its pinned size of {expected_bytes} bytes."
+                    )
+                output.write(chunk)
+                downloaded += len(chunk)
+                progress(
+                    f"Downloading {label} ({downloaded / 1024**2:.1f} / "
+                    f"{expected_bytes / 1024**2:.1f} MiB)…",
+                    min(1.0, downloaded / max(1, expected_bytes)),
+                )
+            output.flush()
+            os.fsync(output.fileno())
+        progress(f"Verifying downloaded {label}...", None)
+        _check_cancel(cancelled)
+        actual_hash = sha256(partial)
+        if partial.stat().st_size != expected_bytes or actual_hash != expected_hash:
+            raise AnalysisError(
+                f"{label} verification failed. Expected {expected_bytes} bytes / "
+                f"{expected_hash}, received {partial.stat().st_size} bytes / {actual_hash}."
+            )
+        os.replace(partial, destination)
+        diagnostic_event(
+            "component_download_verified", component=label, bytes=downloaded, sha256=actual_hash,
+        )
+        return destination
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def detect_hardware() -> HardwareProfile:
@@ -152,6 +266,7 @@ def detect_hardware() -> HardwareProfile:
 
 def _check_cancel(cancelled: CancelCallback) -> None:
     if cancelled():
+        diagnostic_event("cancellation_observed")
         raise AnalysisCancelled("Video analysis was canceled")
 
 
@@ -161,32 +276,123 @@ def _run_cancellable(
     cancelled: CancelCallback,
     *,
     cwd: Path | None = None,
+    output_line: Callable[[str], None] | None = None,
+    tick: Callable[[float], None] | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    startupinfo = MediaTools._startup_info()
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        startupinfo=startupinfo,
+    _check_cancel(cancelled)
+    diagnostic_event(
+        "process_starting", description=description, command=command,
+        cwd=str(cwd) if cwd else None, timeout_seconds=timeout,
     )
-    while True:
+    startupinfo = MediaTools._startup_info()
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            startupinfo=startupinfo,
+        )
+    except OSError as error:
+        diagnostic_exception(
+            "process_launch_failed", error, description=description,
+            winerror=getattr(error, "winerror", None), errno=error.errno,
+        )
+        raise
+    # Windows pipes need reader threads to report live output without blocking either stream.
+    messages: queue.Queue[tuple[str, str | OSError | None]] = queue.Queue()
+    captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
+
+    def read_stream(name: str, stream: IO[str]) -> None:
         try:
-            stdout, stderr = process.communicate(timeout=0.2)
-            break
-        except subprocess.TimeoutExpired:
-            if not cancelled():
+            for line in stream:
+                messages.put((name, line))
+        except OSError as error:
+            messages.put((name, error))
+        finally:
+            messages.put((name, None))
+
+    readers = [
+        threading.Thread(target=read_stream, args=(name, stream))
+        for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))
+        if stream is not None
+    ]
+    started = time.monotonic()
+    last_output = started
+    last_heartbeat = started
+    for reader in readers:
+        reader.start()
+    try:
+        diagnostic_event("process_started", description=description, pid=process.pid)
+        closed = 0
+        while closed < len(readers) or process.poll() is None:
+            _check_cancel(cancelled)
+            elapsed = time.monotonic() - started
+            if time.monotonic() - last_heartbeat >= DIAGNOSTIC_HEARTBEAT_SECONDS:
+                diagnostic_event(
+                    "process_heartbeat", description=description, pid=process.pid,
+                    process_elapsed_seconds=round(elapsed, 1),
+                    seconds_since_output=round(time.monotonic() - last_output, 1),
+                )
+                last_heartbeat = time.monotonic()
+            if timeout is not None and elapsed >= timeout:
+                diagnostic_event("process_timeout", description=description, pid=process.pid)
+                raise AnalysisError(
+                    f"{description} exceeded its {timeout / 60:.1f}-minute time limit. "
+                    "Try the Tiny model or a shorter video; existing drafts are unchanged."
+                )
+            if tick is not None:
+                tick(elapsed)
+            try:
+                name, message = messages.get(timeout=0.2)
+            except queue.Empty:
                 continue
+            if message is None:
+                closed += 1
+            elif isinstance(message, OSError):
+                raise AnalysisError(f"Could not read {description} output: {message}") from message
+            else:
+                last_output = time.monotonic()
+                captured[name].append(message)
+                if name == "stderr":
+                    diagnostic_event(
+                        "process_stderr", description=description, pid=process.pid,
+                        line=diagnostic_text(message.rstrip(), limit=2048),
+                    )
+                if output_line is not None:
+                    output_line(message)
+        process.wait()
+    finally:
+        termination = None
+        if process.poll() is None:
+            termination = "terminate"
             process.terminate()
             try:
-                process.communicate(timeout=2)
+                process.wait(timeout=2)
             except subprocess.TimeoutExpired:
+                termination = "kill"
                 process.kill()
-                process.communicate()
-            raise AnalysisCancelled("Video analysis was canceled") from None
+                process.wait()
+        for reader in readers:
+            reader.join()
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+        diagnostic_event(
+            "process_exited", description=description, pid=process.pid,
+            return_code=process.returncode, termination=termination,
+            return_code_hex=(
+                f"0x{process.returncode & 0xFFFFFFFF:08X}" if process.returncode is not None else None
+            ),
+            process_elapsed_seconds=round(time.monotonic() - started, 3),
+            stdout_lines=len(captured["stdout"]), stderr_lines=len(captured["stderr"]),
+        )
+    stdout, stderr = "".join(captured["stdout"]), "".join(captured["stderr"])
     completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
@@ -223,6 +429,7 @@ def extract_analysis_audio(
     _run_cancellable(command, "Decoding analysis audio", cancelled)
     if not destination.is_file() or destination.stat().st_size <= 44:
         raise AnalysisError("The source video did not produce usable analysis audio")
+    diagnostic_event("analysis_audio_ready", bytes=destination.stat().st_size)
 
 
 def _percentile_sorted(ordered: list[float], fraction: float) -> float:
@@ -243,8 +450,14 @@ def scan_audio_activity(
     sensitivity: str,
     progress: ProgressCallback,
     cancelled: CancelCallback,
+    *,
+    raw: bool = False,
 ) -> tuple[list[ActivityRegion], float | None]:
-    progress("Measuring deterministic audio activity…", 0.0)
+    message = (
+        "Measuring low-activity gaps for YouTube refinement…"
+        if raw else "Measuring deterministic audio activity…"
+    )
+    progress(message, 0.0)
     with wave.open(str(wav_path), "rb") as source:
         if source.getnchannels() != 1 or source.getsampwidth() != 2:
             raise AnalysisError("Analysis audio must be 16-bit mono PCM")
@@ -271,7 +484,8 @@ def scan_audio_activity(
                 normalized = math.sqrt(mean_square) / 32768.0
             levels.append(20.0 * math.log10(max(normalized, 1e-8)))
             if index % 250 == 0:
-                progress("Measuring deterministic audio activity…", index / total_windows)
+                progress(message, index / total_windows)
+    _check_cancel(cancelled)
     ordered_levels = sorted(levels)
     if not levels or max(levels) < -58.0:
         return [], None
@@ -283,16 +497,22 @@ def scan_audio_activity(
         sensitivity, 0.0
     )
     threshold = max(-58.0, min(-20.0, foreground - 3.0, threshold))
+    if raw:
+        # Quiet speech must not become a false pause merely because another sound is loud.
+        threshold = min(threshold, -45.0)
     active = [level >= threshold for level in levels]
 
-    max_gap = round(0.28 / 0.02)
+    max_gap = 0 if raw else round(0.28 / 0.02)
     index = 0
     while index < len(active):
+        _check_cancel(cancelled)
         if active[index]:
             index += 1
             continue
         gap_start = index
         while index < len(active) and not active[index]:
+            if index % 250 == 0:
+                _check_cancel(cancelled)
             index += 1
         if gap_start > 0 and index < len(active) and index - gap_start <= max_gap:
             active[gap_start:index] = [True] * (index - gap_start)
@@ -300,22 +520,33 @@ def scan_audio_activity(
     regions: list[ActivityRegion] = []
     index = 0
     while index < len(active):
+        _check_cancel(cancelled)
         if not active[index]:
             index += 1
             continue
         start_index = index
         while index < len(active) and active[index]:
+            if index % 250 == 0:
+                _check_cancel(cancelled)
             index += 1
         end_index = index
-        if (end_index - start_index) * 0.02 < 0.16:
+        if not raw and (end_index - start_index) * 0.02 < 0.16:
             continue
-        start = max(0.0, start_index * 0.02 - 0.10)
-        end = min(duration, end_index * 0.02 + 0.14)
-        if regions and start - regions[-1].end <= 0.08:
+        start = max(0.0, start_index * 0.02 - (0 if raw else 0.10))
+        end = min(duration, end_index * 0.02 + (0 if raw else 0.14))
+        if end <= start:
+            continue
+        if not raw and regions and start - regions[-1].end <= 0.08:
             regions[-1] = ActivityRegion(regions[-1].start, round(end, 3))
+        elif raw:
+            regions.append(ActivityRegion(start, end))
         else:
             regions.append(ActivityRegion(round(start, 3), round(end, 3)))
-    progress(f"Found {len(regions)} deterministic activity region(s).", 1.0)
+    progress(
+        f"Found {len(regions)} raw activity region(s) for YouTube refinement."
+        if raw else f"Found {len(regions)} deterministic activity region(s).",
+        1.0,
+    )
     return regions, round(threshold, 2)
 
 
@@ -369,81 +600,17 @@ class WhisperManager:
         progress: ProgressCallback,
         cancelled: CancelCallback,
     ) -> Path:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.is_file():
-            if destination.stat().st_size == expected_bytes and sha256(destination) == expected_hash:
-                progress(f"Using verified cached {label}.", 1.0)
-                return destination
-            destination.unlink()
-        partial = destination.with_name(destination.name + ".partial")
-        partial.unlink(missing_ok=True)
-        request = urllib.request.Request(
-            url,
-            headers={"User-Agent": "ChoicerVoicerPackCreator-analysis/0.4"},
+        return download_verified(
+            url, destination, expected_hash, expected_bytes, label, progress, cancelled,
         )
-        try:
-            transfer_deadline = time.monotonic() + max(
-                60.0, min(3600.0, 60.0 + expected_bytes / (128 * 1024))
-            )
-            with urllib.request.urlopen(request, timeout=10) as response, partial.open("wb") as output:
-                final_url = response.geturl()
-                parsed = urllib.parse.urlparse(final_url)
-                approved_https_host = bool(
-                    parsed.hostname
-                    and (
-                        parsed.hostname in ALLOWED_DOWNLOAD_HOSTS
-                        or parsed.hostname.endswith(ALLOWED_DOWNLOAD_HOST_SUFFIXES)
-                    )
-                )
-                if parsed.scheme not in {"https", "file"} or (
-                    parsed.scheme == "https" and not approved_https_host
-                ):
-                    raise AnalysisError(f"{label} redirected to an unapproved host: {final_url}")
-                content_length = response.headers.get("Content-Length")
-                if content_length is not None and int(content_length) != expected_bytes:
-                    raise AnalysisError(
-                        f"{label} reported {content_length} bytes; expected {expected_bytes}."
-                    )
-                downloaded = 0
-                while True:
-                    _check_cancel(cancelled)
-                    if time.monotonic() > transfer_deadline:
-                        raise AnalysisError(f"{label} download exceeded its time limit")
-                    try:
-                        chunk = response.read(min(BUFFER_SIZE, expected_bytes - downloaded + 1))
-                    except (TimeoutError, OSError) as error:
-                        if cancelled():
-                            raise AnalysisCancelled("Video analysis was canceled") from None
-                        raise AnalysisError(f"{label} download failed: {error}") from error
-                    if not chunk:
-                        break
-                    if downloaded + len(chunk) > expected_bytes:
-                        raise AnalysisError(
-                            f"{label} exceeded its pinned size of {expected_bytes} bytes."
-                        )
-                    output.write(chunk)
-                    downloaded += len(chunk)
-                    progress(
-                        f"Downloading {label} ({downloaded / 1024**2:.1f} / "
-                        f"{expected_bytes / 1024**2:.1f} MiB)…",
-                        min(1.0, downloaded / max(1, expected_bytes)),
-                    )
-                output.flush()
-                os.fsync(output.fileno())
-            actual_hash = sha256(partial)
-            if partial.stat().st_size != expected_bytes or actual_hash != expected_hash:
-                raise AnalysisError(
-                    f"{label} verification failed. Expected {expected_bytes} bytes / "
-                    f"{expected_hash}, received {partial.stat().st_size} bytes / {actual_hash}."
-                )
-            os.replace(partial, destination)
-            return destination
-        finally:
-            partial.unlink(missing_ok=True)
 
     def ensure_runtime(
         self, progress: ProgressCallback, cancelled: CancelCallback
     ) -> Path:
+        diagnostic_event(
+            "runtime_setup", build=self.runtime["build"], version=self.runtime["version"],
+            directory=str(self.runtime_dir),
+        )
         if sys.platform != "win32" or not sys.maxsize > 2**32:
             raise AnalysisError("Local Whisper setup currently requires 64-bit Windows")
         runtime_files = self.runtime.get("runtime_files")
@@ -485,9 +652,11 @@ class WhisperManager:
                         self.runtime_dir / license_name,
                     )
                 shutil.copy2(self.manifest_path, self.runtime_dir / self.manifest_path.name)
+                diagnostic_event("runtime_cache_verified", files=expected_files)
                 progress("Using verified local Whisper runtime.", 1.0)
                 return self.cli_path
-            except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                diagnostic_exception("runtime_cache_invalid", error)
                 shutil.rmtree(self.runtime_dir, ignore_errors=True)
 
         archive = self._download(
@@ -504,6 +673,7 @@ class WhisperManager:
         temporary = self.runtime_dir.with_name(self.runtime_dir.name + ".partial")
         shutil.rmtree(temporary, ignore_errors=True)
         try:
+            progress("Installing and verifying the Whisper CPU runtime...", None)
             temporary.mkdir(parents=True)
             root = str(self.runtime["archive_root"]).strip("/")
             with zipfile.ZipFile(archive) as package:
@@ -542,10 +712,18 @@ class WhisperManager:
                 [str(temporary / "whisper-cli.exe"), "--version"],
                 "Starting the Whisper CPU runtime",
                 cancelled,
+                timeout=30,
+            )
+            diagnostic_event(
+                "runtime_version_reported", output=diagnostic_text(result.stdout, limit=2048),
             )
             if str(self.runtime["version"]) not in result.stdout + result.stderr:
                 raise AnalysisError("The Whisper runtime version does not match its manifest")
             os.replace(temporary, self.runtime_dir)
+            diagnostic_event(
+                "runtime_installed", files=expected_files, cli=self.cli_path,
+                version=self.runtime["version"],
+            )
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
         progress("Whisper CPU runtime setup complete.", 1.0)
@@ -583,11 +761,13 @@ class WhisperManager:
     ) -> tuple[list[AnalysisSuggestion], str | None]:
         cli = self.ensure_runtime(progress, cancelled)
         model = self.ensure_model(model_key, progress, cancelled)
+        diagnostic_event("whisper_components_ready", runtime=str(cli), model=str(model))
+        with wave.open(str(wav_path), "rb") as audio_source:
+            audio_duration = audio_source.getnframes() / max(1, audio_source.getframerate())
         output_directory.mkdir(parents=True, exist_ok=True)
         output_base = output_directory / "whisper-transcript"
-        progress(
-            f"Transcribing locally with {self.models[model_key]['name']} on CPU…", None
-        )
+        model_name = self.models[model_key]["name"]
+        progress(f"Loading {model_name} on CPU; transcription starts after model loading...", None)
         command = [
             str(cli),
             "--model",
@@ -602,22 +782,61 @@ class WhisperManager:
             "--output-file",
             str(output_base),
             "--no-gpu",
-            "--no-prints",
+            "--print-progress",
             "--split-on-word",
             "--max-len",
             "120",
         ]
-        _run_cancellable(command, "Local Whisper transcription", cancelled)
+        diagnostic_event(
+            "whisper_transcription_starting", model=model_key, model_bytes=model.stat().st_size,
+            language=language, threads=hardware.cpu_threads, audio_duration_seconds=audio_duration,
+        )
+        percent: int | None = None
+        processing_audio = False
+        last_report: tuple[int, int | None, bool] | None = None
+
+        def on_output(line: str) -> None:
+            nonlocal percent, processing_audio
+            was_processing = processing_audio
+            match = re.search(r"whisper_print_progress_callback:\s*progress\s*=\s*(\d+)%", line)
+            if match:
+                percent = max(percent or 0, min(99, int(match.group(1))))
+                processing_audio = True
+            elif "main: processing " in line:
+                processing_audio = True
+            if processing_audio and not was_processing:
+                diagnostic_event("whisper_audio_processing_started")
+
+        def report_status(elapsed: float) -> None:
+            nonlocal last_report
+            state = (int(elapsed), percent, processing_audio)
+            if state == last_report:
+                return
+            last_report = state
+            elapsed_text = f"{int(elapsed) // 60}:{int(elapsed) % 60:02d} elapsed"
+            if percent is not None:
+                message = f"Whisper transcription: {percent}% of audio processed ({elapsed_text})."
+            elif processing_audio:
+                message = f"Whisper is processing the first audio block ({elapsed_text}); you can cancel."
+            else:
+                message = f"Loading {model_name} on CPU ({elapsed_text}); you can cancel."
+            progress(message, percent / 100 if percent is not None else None)
+
+        _run_cancellable(
+            command, "Local Whisper transcription", cancelled,
+            output_line=on_output, tick=report_status,
+            timeout=max(600, audio_duration * 30),
+        )
+        progress("Reading Whisper transcript and timestamps...", 0.99)
         output_path = output_base.with_suffix(".json")
         if not output_path.is_file():
             raise AnalysisError("Whisper did not produce its expected JSON transcript")
+        diagnostic_event("whisper_output_ready", bytes=output_path.stat().st_size)
         value: Any = json.loads(output_path.read_text(encoding="utf-8-sig"))
         if not isinstance(value, dict) or not isinstance(value.get("transcription"), list):
             raise AnalysisError("Whisper produced an unsupported JSON transcript")
         result = value.get("result", {})
         detected_language = str(result.get("language", "")).strip() or None
-        with wave.open(str(wav_path), "rb") as audio_source:
-            audio_duration = audio_source.getnframes() / max(1, audio_source.getframerate())
         suggestions: list[AnalysisSuggestion] = []
         for item in value["transcription"]:
             if not isinstance(item, dict):
@@ -630,29 +849,15 @@ class WhisperManager:
                 end = float(offsets["to"]) / 1000.0
             except (KeyError, TypeError, ValueError):
                 continue
+            if not math.isfinite(start) or not math.isfinite(end):
+                raise AnalysisError("Whisper produced a non-finite transcript timestamp")
             start = max(0.0, min(audio_duration, start))
             end = max(0.0, min(audio_duration, end))
             caption = " ".join(str(item.get("text", "")).split())
             if not caption or end - start < 0.05:
                 continue
-            lexical_tokens = [
-                token
-                for token in item.get("tokens", [])
-                if isinstance(token, dict)
-                and str(token.get("text", "")).strip()
-                and any(character.isalnum() for character in str(token.get("text", "")))
-                and not str(token.get("text", "")).startswith("[")
-                and isinstance(token.get("offsets"), dict)
-                and isinstance(token["offsets"].get("from"), (int, float))
-                and isinstance(token["offsets"].get("to"), (int, float))
-                and float(token["offsets"]["to"]) > float(token["offsets"]["from"])
-            ]
-            if lexical_tokens:
-                lexical_start = min(float(token["offsets"]["from"]) for token in lexical_tokens)
-                lexical_end = max(float(token["offsets"]["to"]) for token in lexical_tokens)
-                if lexical_end - lexical_start >= 50:
-                    start = max(0.0, lexical_start / 1000.0 - 0.08)
-                    end = min(audio_duration, lexical_end / 1000.0 + 0.12)
+            # Token offsets are estimates, not forced alignment. Even complete, monotonic
+            # lexical times can omit a final word; keep the segment envelope for review.
             probabilities = [
                 float(token["p"])
                 for token in item.get("tokens", [])
@@ -663,14 +868,25 @@ class WhisperManager:
             confidence = sum(probabilities) / len(probabilities) if probabilities else None
             suggestions.append(
                 AnalysisSuggestion(
-                    start=round(start, 3),
-                    end=round(end, 3),
+                    start=start,
+                    end=end,
                     caption=caption,
                     source="Whisper",
                     confidence=round(confidence, 3) if confidence is not None else None,
                 )
             )
+        padded = pad_source_ranges(
+            [(item.start, item.end) for item in suggestions], audio_duration,
+            check_cancel=lambda: _check_cancel(cancelled),
+        )
+        suggestions = [
+            replace(item, start=round(start, 3), end=min(audio_duration, round(end, 3)))
+            for item, (start, end) in zip(suggestions, padded, strict=True)
+        ]
         progress(f"Whisper produced {len(suggestions)} transcript region(s).", 1.0)
+        diagnostic_event(
+            "whisper_transcript_parsed", regions=len(suggestions), detected_language=detected_language,
+        )
         return suggestions, detected_language
 
 
@@ -727,12 +943,33 @@ def analyze_video(
     progress: ProgressCallback,
     cancelled: CancelCallback,
     manifest_path: Path | None = None,
+    source_captions: list[SourceCaption] | None = None,
+    pause_threshold: float = 0.4,
 ) -> AnalysisResult:
+    _check_cancel(cancelled)
+    if not math.isfinite(duration) or duration <= 0:
+        raise AnalysisError("Video analysis requires a finite, positive duration")
+    if source_captions is not None and (
+        isinstance(pause_threshold, bool) or not math.isfinite(pause_threshold)
+        or not 0.2 <= pause_threshold <= 1.0
+    ):
+        raise ValueError("Caption pause threshold must be between 0.2 and 1.0 seconds")
     hardware = detect_hardware()
+    diagnostic_event(
+        "analysis_configuration", source_video=str(video), duration_seconds=duration,
+        sensitivity=sensitivity, use_whisper=use_whisper, model=model_key, language=language,
+        cpu_threads=hardware.cpu_threads, memory_bytes=hardware.memory_bytes,
+        available_memory_bytes=hardware.available_memory_bytes,
+        refine_youtube=source_captions is not None, pause_threshold=pause_threshold,
+    )
     estimated_audio_bytes = max(1, math.ceil(duration * 16_000 * 2))
     temporary_root = Path(tempfile.gettempdir()).resolve()
     temporary_free = shutil.disk_usage(temporary_root).free
     required_temporary_disk = estimated_audio_bytes * 2 + (64 * 1024**2)
+    diagnostic_event(
+        "analysis_temporary_disk", directory=temporary_root, available_bytes=temporary_free,
+        required_bytes=required_temporary_disk,
+    )
     if temporary_free < required_temporary_disk:
         raise AnalysisError(
             f"Video analysis needs approximately {required_temporary_disk / 1024**2:.0f} MiB "
@@ -751,6 +988,10 @@ def analyze_video(
         while not persistent_root.exists() and persistent_root != persistent_root.parent:
             persistent_root = persistent_root.parent
         persistent_free = shutil.disk_usage(persistent_root).free
+        diagnostic_event(
+            "analysis_component_disk", directory=persistent_root,
+            available_bytes=persistent_free, required_bytes=persistent_required,
+        )
         if persistent_free < persistent_required:
             raise AnalysisError(
                 f"Local transcription setup needs approximately {persistent_required / 1024**2:.0f} "
@@ -770,9 +1011,26 @@ def analyze_video(
         temporary = Path(temporary_text)
         wav_path = temporary / "analysis.wav"
         extract_analysis_audio(media, video, wav_path, progress, cancelled)
-        activity, threshold = scan_audio_activity(
-            wav_path, duration, sensitivity, progress, cancelled
-        )
+        refined: list[SourceCaption] | None = None
+        if source_captions is not None:
+            activity, threshold = scan_audio_activity(
+                wav_path, duration, sensitivity, progress, cancelled, raw=True
+            )
+            progress("Refining YouTube fragments using measured audio pauses…", None)
+            refined = refine_captions(
+                source_captions, [(region.start, region.end) for region in activity], duration,
+                pause_threshold=pause_threshold, check_cancel=lambda: _check_cancel(cancelled),
+            )
+            progress(f"Prepared {len(refined)} Refined YouTube caption row(s).", 1.0)
+            # If both outputs were requested, retain the ordinary scan for Whisper suggestions.
+            if use_whisper:
+                activity, threshold = scan_audio_activity(
+                    wav_path, duration, sensitivity, progress, cancelled
+                )
+        else:
+            activity, threshold = scan_audio_activity(
+                wav_path, duration, sensitivity, progress, cancelled
+            )
         transcripts: list[AnalysisSuggestion] = []
         detected_language: str | None = None
         model_name: str | None = None
@@ -788,7 +1046,15 @@ def analyze_video(
                 cancelled,
             )
             model_name = str(manager.models[model_key]["name"])
-        suggestions = combine_suggestions(activity, transcripts)
+        suggestions = (
+            [] if source_captions is not None and not use_whisper
+            else combine_suggestions(activity, transcripts)
+        )
+        diagnostic_event(
+            "analysis_results", activity_regions=len(activity), transcript_regions=len(transcripts),
+            suggestions=len(suggestions), detected_language=detected_language,
+            refined_captions=len(refined) if refined is not None else None,
+        )
         return AnalysisResult(
             suggestions=suggestions,
             activity_regions=len(activity),
@@ -797,4 +1063,5 @@ def analyze_video(
             model_name=model_name,
             detected_language=detected_language,
             hardware=hardware,
+            refined_captions=refined,
         )

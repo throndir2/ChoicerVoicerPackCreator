@@ -262,10 +262,14 @@ Prepared per-segment audio files, backing tracks, and icon/still assets can be r
 absolute local paths and the supported project/segment fields. External segment audio is an
 **already-cut recording used in full**, not a full-length vocal stem to cut at the segment's
 timestamps. Source media and imported packs are not mutated. Preserve imported prompt recordings
-unless explicitly choosing source-video
-regeneration. There is **no built-in source separation, OCR, wiki/dialogue lookup, or video
-downloader**. Without a selected backing track, the exporter generates silence rather than using
-the original voices as backing audio.
+unless explicitly choosing source-video regeneration.
+
+The editor supports **YouTube import and local backing-track separation**, but these MCP tools
+do **not** expose those workflows yet. Use the editor for those operations, then save and open
+the project through MCP, or reference prepared local media/backing assets. `new_project` takes
+a local video path; it does not download a video or automatically generate a backing track.
+The MCP tools also do not provide OCR or wiki/dialogue lookup. Without a selected backing track,
+MCP export generates silence rather than using the original voices as backing audio.
 
 ## Privacy and untrusted content
 

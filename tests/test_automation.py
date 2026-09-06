@@ -12,7 +12,7 @@ from choicer_voicer_pack_creator.automation import (
     SegmentPatch,
 )
 from choicer_voicer_pack_creator.media import MediaInfo
-from choicer_voicer_pack_creator.models import PackProject, Segment
+from choicer_voicer_pack_creator.models import AnalysisReview, PackProject, Segment, SourceCaption
 from choicer_voicer_pack_creator.project_io import ProjectStore
 
 
@@ -160,6 +160,10 @@ def test_analysis_requires_download_consent_before_work(automation):
 
 
 def test_source_replacement_is_probed_and_invalid_paths_are_atomic(automation, tmp_path):
+    automation.access.current.project.source_url = "https://www.youtube.com/watch?v=test"
+    automation.access.current.project.caption_language = "en"
+    automation.access.current.project.source_captions = [SourceCaption(1, 2, "Draft", "YouTube")]
+    automation.access.current.project.analysis_review = AnalysisReview()
     before = automation.get_project()
     with pytest.raises(ValueError, match="absolute"):
         automation.update_project(ProjectPatch(video_path="relative.mp4"), before["revision"])
@@ -172,6 +176,21 @@ def test_source_replacement_is_probed_and_invalid_paths_are_atomic(automation, t
     assert updated["project"]["video_path"] == str(replacement)
     assert updated["project"]["video_duration"] == 10
     assert not updated["project"]["preserve_source_video"]
+    assert not updated["project"]["source_url"]
+    assert not updated["project"]["caption_language"]
+    assert not updated["project"]["source_captions"]
+    assert updated["project"]["analysis_review"] is None
+
+
+def test_metadata_edits_preserve_imported_caption_evidence(automation, tmp_path):
+    automation.access.current.project.source_captions = [SourceCaption(1, 2, "Draft", "YouTube")]
+    automation.access.current.project.analysis_review = AnalysisReview()
+    before = automation.get_project()
+    updated = automation.update_project(ProjectPatch(title="Changed"), before["revision"])
+    automation.save_project(updated["revision"], str(tmp_path / "captions.cvpack.json"))
+    saved = ProjectStore.load(tmp_path / "captions.cvpack.json")
+    assert saved.source_captions[0].text == "Draft"
+    assert saved.analysis_review == AnalysisReview()
 
 
 @pytest.mark.parametrize("invalid", [

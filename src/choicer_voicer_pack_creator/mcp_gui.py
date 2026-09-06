@@ -64,8 +64,10 @@ class EditorBridge(QObject):
         def apply() -> None:
             if QApplication.activeModalWidget() is not None:
                 raise ValueError("Close the editor's modal dialog before making MCP calls.")
-            if self.window._export_worker and self.window._export_worker.isRunning():
+            if self.window._export_worker is not None:
                 raise ValueError("Wait for the editor's current export to finish.")
+            if self.window._backing_dialog is not None:
+                raise ValueError("Close the backing-track workflow before making MCP calls.")
             self.window._commit_editors()
             self.window._automation_active = True
             self.window._set_busy(True, f"MCP: {label}")
@@ -92,7 +94,7 @@ class EditorBridge(QObject):
             if modal.isVisible():
                 QTimer.singleShot(100, self._disconnect)
                 return
-        if self.window._export_worker and self.window._export_worker.isRunning():
+        if self.window._export_worker is not None:
             QTimer.singleShot(100, self._disconnect)
             return
         if not self.window.close():

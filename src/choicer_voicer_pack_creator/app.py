@@ -3,25 +3,64 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import wave
 from array import array
 from collections.abc import Callable, Sequence
+from contextlib import ExitStack
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QCoreApplication, QLockFile, QStandardPaths, Qt, QTimer
+from PySide6.QtCore import (
+    QCoreApplication,
+    QLockFile,
+    QObject,
+    QStandardPaths,
+    Qt,
+    QTimer,
+    Signal,
+    Slot,
+    qInstallMessageHandler,
+    qVersion,
+)
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from choicer_voicer_pack_creator.analysis import (
-    WhisperManager,
-    default_manifest_path,
-    detect_hardware,
-    scan_audio_activity,
+from choicer_voicer_pack_creator.diagnostics import (
+    ApplicationDiagnostics,
+    diagnostic_event,
+    diagnostic_exception,
 )
-from choicer_voicer_pack_creator.media import MediaError, MediaTools
-from choicer_voicer_pack_creator.project_io import RecoveryStore
-from choicer_voicer_pack_creator.ui.main_window import MainWindow
-from choicer_voicer_pack_creator.ui.theme import APP_STYLESHEET
+
+if TYPE_CHECKING:
+    from choicer_voicer_pack_creator.ui.main_window import MainWindow
+
+
+class _DiagnosticNotifications(QObject):
+    failed = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: list[QMessageBox] = []
+        self.failed.connect(self.show_failure)
+
+    @Slot(str)
+    def show_failure(self, message: str) -> None:
+        box = QMessageBox(
+            QMessageBox.Icon.Warning, "Application diagnostics", message,
+            QMessageBox.StandardButton.Ok, QApplication.activeWindow(),
+        )
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.messages.append(box)
+        box.finished.connect(lambda _result: self.messages.remove(box))
+        box.open()
+
+
+def _qt_message(kind, context, message: str) -> None:
+    diagnostic_event(
+        "qt_message", level=kind.name, category=context.category,
+        file=context.file, line=context.line, message=message,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -43,23 +82,20 @@ def run_editor(
     QCoreApplication.setOrganizationName("ChoicerVoicerCommunity")
     QCoreApplication.setApplicationName("Choicer Voicer Pack Creator")
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeMenuBar, False)
-    app = QApplication(arguments)
-    app.setStyle("Fusion")
-    app.setStyleSheet(APP_STYLESHEET)
-    bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
-    icon_path = bundle_root / "assets" / "icon.svg"
-    if icon_path.is_file():
-        app.setWindowIcon(QIcon(str(icon_path)))
-
-    app_data: Path | None = None
+    app_data = Path(
+        QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
+    )
     instance_lock: QLockFile | None = None
     if not smoke_test:
-        app_data = Path(
-            QStandardPaths.writableLocation(
-                QStandardPaths.StandardLocation.AppLocalDataLocation
-            )
-        )
-        app_data.mkdir(parents=True, exist_ok=True)
+        try:
+            app_data.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            if start_automation is not None:
+                print(f"Application data is unavailable: {error}", file=sys.stderr)
+                return 2
+            app = QApplication(arguments)
+            QMessageBox.critical(None, "Application data is unavailable", str(error))
+            return 2
         instance_lock = QLockFile(str(app_data / "application-instance.lock"))
         if not instance_lock.tryLock(100):
             if start_automation is not None:
@@ -69,6 +105,7 @@ def run_editor(
                     file=sys.stderr,
                 )
                 return 3
+            app = QApplication(arguments)
             QMessageBox.warning(
                 None,
                 "Choicer Voicer Pack Creator is already running",
@@ -77,9 +114,80 @@ def run_editor(
             )
             return 3
 
+    startup_notices: list[str] = []
+    with ExitStack() as stack:
+        data_root = (
+            Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="cvpc-smoke-")))
+            if smoke_test else app_data
+        )
+        diagnostics = ApplicationDiagnostics(
+            data_root / "analysis",
+            on_error=None if smoke_test else startup_notices.append,
+        )
+        try:
+            stack.enter_context(diagnostics)
+        except OSError as error:
+            if start_automation is not None:
+                print(f"Diagnostic logging is unavailable: {error}", file=sys.stderr)
+                return 2
+            app = QApplication(arguments)
+            QMessageBox.critical(
+                None, "Diagnostic logging is unavailable",
+                f"{error}\n\nCheck disk space and access to:\n{diagnostics.path.parent}",
+            )
+            return 2
+        previous_qt_handler = qInstallMessageHandler(_qt_message)
+        stack.callback(qInstallMessageHandler, previous_qt_handler)
+        diagnostic_event(
+            "application_initializing", qt_version=qVersion(), smoke_test=smoke_test,
+            data_root=data_root, log_directory=diagnostics.path.parent,
+        )
+        app = QApplication(arguments)
+        notifications = _DiagnosticNotifications()
+        if not smoke_test:
+            diagnostics.on_error = notifications.failed.emit
+            for message in startup_notices:
+                notifications.failed.emit(message)
+        heartbeat = QTimer()
+        heartbeat.setInterval(5000)
+        heartbeat.timeout.connect(lambda: diagnostic_event("application_heartbeat"))
+        heartbeat.start()
+        stack.callback(heartbeat.stop)
+        diagnostics.exit_code = _run_application(
+            arguments, app, data_root, smoke_test=smoke_test,
+            start_automation=start_automation,
+        )
+        return diagnostics.exit_code
+
+
+def _run_application(
+    arguments: list[str], app: QApplication, app_data: Path, *, smoke_test: bool,
+    start_automation: Callable[[MainWindow], object] | None = None,
+) -> int:
+    # Import optional/native workflows after the diagnostic sink and exception hooks exist.
+    from choicer_voicer_pack_creator.analysis import (
+        WhisperManager,
+        default_manifest_path,
+        detect_hardware,
+        scan_audio_activity,
+    )
+    from choicer_voicer_pack_creator.media import MediaError, MediaTools
+    from choicer_voicer_pack_creator.project_io import RecoveryStore
+    from choicer_voicer_pack_creator.ui.main_window import MainWindow
+    from choicer_voicer_pack_creator.ui.theme import APP_STYLESHEET
+    from choicer_voicer_pack_creator.youtube import youtube_runtime_path
+
+    app.setStyle("Fusion")
+    app.setStyleSheet(APP_STYLESHEET)
+    bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+    icon_path = bundle_root / "assets" / "icon.svg"
+    if icon_path.is_file():
+        app.setWindowIcon(QIcon(str(icon_path)))
+    diagnostic_event("media_tools_initializing")
     try:
         media = MediaTools()
     except MediaError as error:
+        diagnostic_exception("media_tools_unavailable", error)
         if start_automation is not None:
             print(f"FFmpeg is unavailable: {error}", file=sys.stderr)
             return 2
@@ -91,9 +199,19 @@ def run_editor(
             "instead use a compatible ffmpeg/ffprobe pair on PATH.",
         )
         return 2
+    diagnostic_event("media_tools_ready", ffmpeg=media.ffmpeg, ffprobe=media.ffprobe)
 
     smoke_report = os.environ.get("CHOICER_VOICER_SMOKE_REPORT")
     if smoke_report:
+        import yt_dlp_ejs.yt.solver as youtube_solver
+
+        from choicer_voicer_pack_creator.youtube import _run_youtube_stage, _YouTubeRequest
+
+        youtube_runtime = youtube_runtime_path()
+        youtube_runtime_version = media.run(
+            [str(youtube_runtime), "--version"], "Checking YouTube JavaScript runtime"
+        ).stdout
+        solver_root = Path(youtube_solver.__file__).parent
         version = media.run([media.ffmpeg, "-version"], "Reading FFmpeg version").stdout
         analysis_manifest = default_manifest_path()
         whisper_license = analysis_manifest.parent / "WhisperCpp-MIT.txt"
@@ -101,6 +219,7 @@ def run_editor(
         analysis_manager = WhisperManager(Path(smoke_report).parent / "analysis-smoke")
         hardware = detect_hardware()
         activity_probe = Path(smoke_report).with_name("analysis-activity-smoke.wav")
+        youtube_probe_path = Path(smoke_report).with_name("youtube-worker-smoke.mp4")
         try:
             samples = array(
                 "h",
@@ -119,8 +238,19 @@ def run_editor(
                 lambda *_args: None,
                 lambda: False,
             )
+            media.run([
+                media.ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=s=32x32:r=10",
+                "-i", str(activity_probe), "-t", "1", "-c:v", "mpeg4", "-c:a", "aac",
+                str(youtube_probe_path),
+            ], "Creating YouTube worker smoke fixture")
+            youtube_probe = _run_youtube_stage(
+                _YouTubeRequest(activity_probe.parent, "", media.ffmpeg, youtube_runtime),
+                "probe", (media, youtube_probe_path), [],
+                lambda *_args: None, lambda: False,
+            )
         finally:
             activity_probe.unlink(missing_ok=True)
+            youtube_probe_path.unlink(missing_ok=True)
         Path(smoke_report).write_text(
             json.dumps(
                 {
@@ -137,6 +267,12 @@ def run_editor(
                     "analysis_cpu_threads": hardware.cpu_threads,
                     "activity_scan_regions": len(activity_regions),
                     "activity_scan_threshold_db": activity_threshold,
+                    "youtube_runtime": str(youtube_runtime),
+                    "youtube_runtime_version": youtube_runtime_version.splitlines()[0],
+                    "youtube_worker_probe_duration": youtube_probe.duration,
+                    "youtube_ejs_present": all(
+                        (solver_root / name).is_file() for name in ("core.min.js", "lib.min.js")
+                    ),
                 },
                 indent=2,
             )
@@ -146,18 +282,27 @@ def run_editor(
     paths = [item for item in arguments[1:] if not item.startswith("--")]
     initial_path = Path(paths[0]).resolve() if paths else None
     recovery_store = None
-    if app_data is not None:
+    if not smoke_test:
         recovery_store = RecoveryStore(app_data / "recovery-v2.json")
     window = MainWindow(
         media,
         initial_path,
         recovery_store=recovery_store,
-        analysis_data_root=app_data / "analysis" if app_data is not None else None,
+        analysis_data_root=app_data / "analysis",
     )
     window.show()
     if start_automation is not None:
         window.automation_runtime = start_automation(window)
+    diagnostic_event("main_window_ready", initial_path=initial_path)
     if smoke_test:
         window.dirty = False
         QTimer.singleShot(350, app.quit)
+    elif start_automation is None:
+        result_argument = next(
+            (item.split("=", 1)[1] for item in arguments if item.startswith("--update-result=")),
+            None,
+        )
+        QTimer.singleShot(
+            0, lambda: window.updater.startup(Path(result_argument) if result_argument else None)
+        )
     return app.exec()

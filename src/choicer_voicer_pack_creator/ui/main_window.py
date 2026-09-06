@@ -4,6 +4,7 @@ import getpass
 from pathlib import Path
 
 from PySide6.QtCore import (
+    QItemSelectionModel,
     QSettings,
     QSignalBlocker,
     QStandardPaths,
@@ -14,13 +15,13 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QKeySequence
+from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
-from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QSplitter,
@@ -46,6 +48,8 @@ from PySide6.QtWidgets import (
 
 from choicer_voicer_pack_creator import __version__
 from choicer_voicer_pack_creator.analysis import AnalysisSuggestion
+from choicer_voicer_pack_creator.diagnostics import diagnostic_event, diagnostic_exception
+from choicer_voicer_pack_creator.export_progress import ExportProgress, format_time
 from choicer_voicer_pack_creator.exporter import (
     ExportResult,
     PackExporter,
@@ -53,16 +57,25 @@ from choicer_voicer_pack_creator.exporter import (
     sha256,
 )
 from choicer_voicer_pack_creator.media import MediaTools
-from choicer_voicer_pack_creator.models import PackProject, Segment
+from choicer_voicer_pack_creator.models import AnalysisReview, PackProject, Segment
 from choicer_voicer_pack_creator.pack_io import PackImporter
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
 from choicer_voicer_pack_creator.timeline_audit import (
     TimelineOverlap,
     audit_timeline_overlaps,
 )
-from choicer_voicer_pack_creator.ui.analysis_dialog import AnalysisDialog
+from choicer_voicer_pack_creator.ui.analysis_dialog import (
+    AnalysisDialog,
+    open_diagnostic_logs,
+    save_diagnostic_logs,
+)
+from choicer_voicer_pack_creator.ui.backing_dialog import BackingDialog
 from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
+from choicer_voicer_pack_creator.ui.export_dialog import ExportProgressDialog
+from choicer_voicer_pack_creator.ui.subtitles import SubtitleVideoWidget
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
+from choicer_voicer_pack_creator.ui.update_controller import UpdateController
+from choicer_voicer_pack_creator.ui.youtube_dialog import YouTubeDialog
 
 
 class WaveformWorker(QThread):
@@ -77,21 +90,31 @@ class WaveformWorker(QThread):
         self.duration = duration
 
     def run(self) -> None:
+        diagnostic_event(
+            "waveform_worker_started", request_id=self.request_id,
+            path=self.path, duration_seconds=self.duration,
+        )
         try:
             if self.isInterruptionRequested():
+                diagnostic_event("waveform_worker_canceled", request_id=self.request_id)
                 return
             peaks = self.media.waveform_peaks(
                 Path(self.path), self.duration, cancelled=self.isInterruptionRequested
             )
             if self.isInterruptionRequested():
+                diagnostic_event("waveform_worker_canceled", request_id=self.request_id)
                 return
+            diagnostic_event(
+                "waveform_worker_completed", request_id=self.request_id, peaks=len(peaks),
+            )
             self.completed.emit(self.request_id, self.path, self.duration, peaks)
         except Exception as error:
+            diagnostic_exception("waveform_worker_failed", error, request_id=self.request_id)
             self.failed.emit(self.request_id, self.path, str(error))
 
 
 class ExportWorker(QThread):
-    progress = Signal(str)
+    progress = Signal(object)
     completed = Signal(object)
     failed = Signal(str)
 
@@ -111,14 +134,8 @@ class ExportWorker(QThread):
             )
             self.completed.emit(result)
         except Exception as error:
+            diagnostic_exception("export_worker_failed", error)
             self.failed.emit(str(error))
-
-
-def format_time(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    minutes = int(seconds // 60)
-    remainder = seconds - minutes * 60
-    return f"{minutes:02d}:{remainder:06.3f}"
 
 
 class MainWindow(QMainWindow):
@@ -165,6 +182,8 @@ class MainWindow(QMainWindow):
         self._waveform_workers: list[WaveformWorker] = []
         self._waveform_request_id = 0
         self._export_worker: ExportWorker | None = None
+        self._export_dialog: ExportProgressDialog | None = None
+        self._backing_dialog: BackingDialog | None = None
         self._restoring_layout = False
         self._layout_restored = False
         self._range_edit_record: tuple[str, float, float, bool] | None = None
@@ -206,12 +225,16 @@ class MainWindow(QMainWindow):
         self.action_new = QAction("New from Video…", self)
         self.action_new.setShortcut(QKeySequence.StandardKey.New)
         self.action_new.triggered.connect(self.new_from_video)
+        self.action_youtube = QAction("New from YouTube…", self)
+        self.action_youtube.triggered.connect(self.new_from_youtube)
         self.action_open = QAction("Open Project…", self)
         self.action_open.setShortcut(QKeySequence.StandardKey.Open)
         self.action_open.triggered.connect(self.open_project)
         self.action_import = QAction("Import Existing Pack…", self)
         self.action_import.setShortcut(QKeySequence("Ctrl+I"))
         self.action_import.triggered.connect(self.import_pack)
+        self.action_import_zip = QAction("Import Pack ZIP...", self)
+        self.action_import_zip.triggered.connect(self.import_pack_zip)
         self.action_save = QAction("Save Project", self)
         self.action_save.setShortcut(QKeySequence.StandardKey.Save)
         self.action_save.triggered.connect(self.save_project)
@@ -228,6 +251,8 @@ class MainWindow(QMainWindow):
         self.action_analyze = QAction("Analyze Video && Suggest Segments…", self)
         self.action_analyze.setShortcut(QKeySequence("Ctrl+Shift+R"))
         self.action_analyze.triggered.connect(lambda: self.open_analysis_dialog())
+        self.action_backing = QAction("Generate Backing Track...", self)
+        self.action_backing.triggered.connect(lambda: self.generate_backing_track())
 
         self.action_add = QAction("Add Segment", self)
         self.action_add.setShortcut(QKeySequence("Ctrl+Shift+A"))
@@ -235,15 +260,29 @@ class MainWindow(QMainWindow):
         self.action_split = QAction("Split at Playhead", self)
         self.action_split.setShortcut(QKeySequence("Ctrl+Shift+S"))
         self.action_split.triggered.connect(self.split_segment)
+        self.action_combine = QAction("Combine Selected Segments", self)
+        self.action_combine.setShortcut(QKeySequence("Ctrl+Shift+M"))
+        self.action_combine.setToolTip(
+            "Select multiple rows with Ctrl or Shift, then combine their ranges and lines."
+        )
+        self.action_combine.triggered.connect(self.combine_segments)
         self.action_delete = QAction("Delete Segment", self)
-        self.action_delete.setShortcut(QKeySequence("Ctrl+Delete"))
+        self.action_delete.setShortcuts(
+            [QKeySequence(Qt.Key.Key_Backspace), QKeySequence("Ctrl+Delete")]
+        )
+        self.action_delete.setAutoRepeat(False)
         self.action_delete.triggered.connect(self.delete_segment)
         self.action_duplicate = QAction("Duplicate Segment", self)
         self.action_duplicate.setShortcut(QKeySequence("Ctrl+D"))
         self.action_duplicate.triggered.connect(self.duplicate_segment)
 
         file_menu = self.menuBar().addMenu("&File")
-        file_menu.addActions([self.action_new, self.action_open, self.action_import])
+        file_menu.addActions(
+            [
+                self.action_new, self.action_youtube, self.action_open,
+                self.action_import, self.action_import_zip,
+            ]
+        )
         file_menu.addSeparator()
         file_menu.addActions([self.action_save, self.action_save_as, self.action_restore_previous])
         file_menu.addSeparator()
@@ -252,20 +291,35 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.action_exit)
         edit_menu = self.menuBar().addMenu("&Segments")
         edit_menu.addActions(
-            [self.action_add, self.action_split, self.action_duplicate, self.action_delete]
+            [
+                self.action_add, self.action_split, self.action_combine,
+                self.action_duplicate, self.action_delete,
+            ]
         )
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self.action_analyze)
+        tools_menu.addAction(self.action_backing)
         help_menu = self.menuBar().addMenu("&Help")
         self.action_mcp_help = help_menu.addAction("LLM / MCP Help")
         self.action_mcp_help.triggered.connect(self.show_mcp_help)
+        self.updater = UpdateController(self, help_menu)
+        self.action_logs = help_menu.addAction("Open Diagnostic Logs...")
+        self.action_logs.triggered.connect(
+            lambda: open_diagnostic_logs(self, self.analysis_data_root)
+        )
+        self.action_save_logs = help_menu.addAction("Save Diagnostic Bundle...")
+        self.action_save_logs.triggered.connect(
+            lambda: save_diagnostic_logs(self, self.analysis_data_root)
+        )
         about = help_menu.addAction("About")
         about.triggered.connect(self.show_about)
 
     def _build_ui(self) -> None:
         toolbar = QToolBar("Main", self)
         toolbar.setMovable(False)
-        toolbar.addActions([self.action_new, self.action_open, self.action_import])
+        toolbar.addActions(
+            [self.action_new, self.action_youtube, self.action_open, self.action_import]
+        )
         toolbar.addSeparator()
         toolbar.addActions([self.action_save, self.action_export])
         self.addToolBar(toolbar)
@@ -277,25 +331,34 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         splitter = QSplitter(Qt.Orientation.Horizontal, root)
+        splitter.setObjectName("editorSplitter")
         splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(9)
+        splitter.setHandleWidth(1)
         self.editor_splitter = splitter
         root_layout.addWidget(splitter, 1)
 
         left = QFrame(splitter)
         left.setFrameShape(QFrame.Shape.StyledPanel)
+        left.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(7, 7, 7, 7)
         left_layout.setSpacing(7)
 
-        self.video_widget = QVideoWidget(left)
+        self.video_widget = SubtitleVideoWidget(left)
+        self.video_widget.setObjectName("videoPreview")
         self.video_widget.setMinimumHeight(320)
-        self.video_widget.setStyleSheet("background: #000; border: 1px solid #26384d;")
+        self.video_widget.setStyleSheet(
+            "QGraphicsView#videoPreview { background: #000; border: 1px solid #26384d; }"
+        )
         left_layout.addWidget(self.video_widget, 1)
 
         transport = QHBoxLayout()
         self.play_button = QPushButton("▶ Play")
+        self.play_button.setToolTip("Play / pause (Space)")
         self.play_button.clicked.connect(self.toggle_playback)
+        self.play_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
+        self.play_shortcut.setAutoRepeat(False)
+        self.play_shortcut.activated.connect(self.toggle_playback)
         transport.addWidget(self.play_button)
         self.stop_button = QPushButton("■")
         self.stop_button.setToolTip("Stop and return to the start")
@@ -320,6 +383,7 @@ class MainWindow(QMainWindow):
 
         self.timeline = TimelineWidget(left)
         self.timeline.setToolTip(
+            "Drag the white playback line or its top arrow to scrub. "
             "Drag IN/OUT handles to trim, drag inside the highlighted waveform range to move it, "
             "or drag across empty waveform space to define a range. Segment blocks can also be "
             "moved by their center or trimmed by their edges."
@@ -332,6 +396,7 @@ class MainWindow(QMainWindow):
         self.timeline.zoom_changed.connect(self._timeline_zoom_changed)
         left_layout.addWidget(self.timeline)
         timeline_hint = QLabel(
+            "Drag the white playback line or its top arrow to scrub. "
             "Drag the waveform highlight or its IN/OUT handles to edit a range. "
             "Drag a segment block to move it, or drag its edges to trim."
         )
@@ -380,7 +445,7 @@ class MainWindow(QMainWindow):
         right = QWidget(splitter)
         right.setMinimumWidth(420)
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(6, 0, 0, 0)
+        right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
 
         self.inspector_splitter = QSplitter(Qt.Orientation.Vertical, right)
@@ -413,6 +478,12 @@ class MainWindow(QMainWindow):
             self.choose_backing_track, self.clear_backing_track
         )
         project_form.addRow("Backing", backing_row)
+        self.generate_backing_button = QPushButton("Generate backing...")
+        self.generate_backing_button.setToolTip(
+            "Create music/effects backing from the video without changing dialogue or prompt files."
+        )
+        self.generate_backing_button.clicked.connect(lambda: self.generate_backing_track())
+        project_form.addRow("", self.generate_backing_button)
         self.icon_path_label, icon_row = self._path_controls(self.choose_icon, self.clear_icon)
         project_form.addRow("Icon", icon_row)
 
@@ -458,7 +529,8 @@ class MainWindow(QMainWindow):
             ["#", "In", "Out", "Speaker(s)", "Line", "Audio"]
         )
         self.segment_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.segment_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.segment_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        self.segment_table.setToolTip("Use Ctrl-click or Shift-click to select segments to combine.")
         self.segment_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.segment_table.setAlternatingRowColors(True)
         self.segment_table.verticalHeader().hide()
@@ -470,6 +542,9 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.segment_table.itemSelectionChanged.connect(self._table_selection_changed)
+        self.segment_table.cellClicked.connect(
+            lambda _row, _column: self.select_segment(self.selected_segment_id)
+        )
         self.segment_table.cellDoubleClicked.connect(lambda _row, _column: self.preview_segment())
         segment_layout.addWidget(self.segment_table, 1)
         row_buttons = QHBoxLayout()
@@ -483,6 +558,13 @@ class MainWindow(QMainWindow):
                 button.setObjectName("danger")
             button.clicked.connect(handler)
             row_buttons.addWidget(button)
+        self.combine_button = QPushButton("Combine")
+        self.combine_button.setToolTip(self.action_combine.toolTip())
+        self.combine_button.clicked.connect(self.action_combine.trigger)
+        self.action_combine.changed.connect(
+            lambda: self.combine_button.setEnabled(self.action_combine.isEnabled())
+        )
+        row_buttons.addWidget(self.combine_button)
         row_buttons.addStretch()
         segment_layout.addLayout(row_buttons)
         self.segments_section.set_content(segment_content)
@@ -542,6 +624,7 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(left)
         splitter.addWidget(right)
+        splitter.setCollapsible(0, True)
         splitter.setStretchFactor(0, 7)
         splitter.setStretchFactor(1, 3)
         splitter.splitterMoved.connect(self._schedule_layout_save)
@@ -620,6 +703,8 @@ class MainWindow(QMainWindow):
             editor_state = self.settings.value("layout/editorSplitterV1")
             if editor_state is None or not self.editor_splitter.restoreState(editor_state):
                 self.editor_splitter.setSizes([1030, 470])
+            # Saved splitter states also restore the old handle width.
+            self.editor_splitter.setHandleWidth(1)
 
             inspector_state = self.settings.value("layout/inspectorSplitterV1")
             if inspector_state is None or not self.inspector_splitter.restoreState(
@@ -742,7 +827,7 @@ class MainWindow(QMainWindow):
         self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(0.8)
         self.player.setAudioOutput(self.audio_output)
-        self.player.setVideoOutput(self.video_widget)
+        self.player.setVideoSink(self.video_widget.videoSink())
         self.video_widget.videoSink().videoFrameChanged.connect(self._video_frame_changed)
         self.player.positionChanged.connect(self._player_position_changed)
         self.player.durationChanged.connect(self._player_duration_changed)
@@ -878,6 +963,7 @@ class MainWindow(QMainWindow):
         )
 
     def new_from_video(self) -> None:
+        diagnostic_event("new_video_requested")
         if not self._maybe_save():
             return
         path, _ = QFileDialog.getOpenFileName(
@@ -905,11 +991,64 @@ class MainWindow(QMainWindow):
             video_duration=info.duration,
         )
         self._set_project(project, None, mark_dirty=True)
+        diagnostic_event("video_import_ready", source=source, duration_seconds=info.duration)
         self.statusBar().showMessage(f"Loaded {source.name}. Mark a range and add the first segment.")
-        QTimer.singleShot(0, lambda: self.open_analysis_dialog(initial_scan=True))
+        QTimer.singleShot(0, lambda: self._finish_new_import(project))
 
-    def open_analysis_dialog(self, *, initial_scan: bool = False) -> None:
+    def new_from_youtube(self) -> None:
+        diagnostic_event("youtube_import_dialog_requested")
+        if not self._maybe_save():
+            return
+        dialog = YouTubeDialog(
+            self.media, str(self.settings.value("lastYouTubeDir", "")), self,
+            data_root=self.analysis_data_root,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.download_result is None:
+            diagnostic_event("youtube_import_dialog_dismissed")
+            return
+        result = dialog.download_result
+        self.settings.setValue("lastYouTubeDir", str(result.video_path.parent.parent))
+        project = PackProject(
+            title=result.title,
+            authors=[getpass.getuser()],
+            video_path=str(result.video_path),
+            video_duration=result.duration,
+            source_url=result.url,
+            caption_language=result.language,
+            source_captions=list(result.captions),
+            import_warnings=list(result.warnings),
+        )
+        self._set_project(project, None, mark_dirty=True)
+        diagnostic_event(
+            "youtube_import_ready", video=result.video_path, duration_seconds=result.duration,
+            caption_count=len(result.captions), warning_count=len(result.warnings),
+        )
+        self.statusBar().showMessage(
+            f"Downloaded {result.title}; {len(result.captions)} caption(s) ready for review."
+        )
+        if result.warnings:
+            diagnostic_event("youtube_import_notes_shown", warnings=result.warnings)
+            QMessageBox.warning(self, "YouTube import notes", "\n\n".join(result.warnings))
+        diagnostic_event("youtube_analysis_handoff_scheduled")
+        QTimer.singleShot(0, lambda: self._finish_new_import(project))
+
+    def _finish_new_import(self, project: PackProject) -> None:
+        if self.project is not project:
+            diagnostic_event("new_import_handoff_skipped", reason="project_changed")
+            return
+        if not project.backing_track_path:
+            self.generate_backing_track()
+        if self.project is project:
+            self.open_analysis_dialog(initial_scan=True, auto_start=True)
+
+    def open_analysis_dialog(
+        self, *, initial_scan: bool = False, auto_start: bool = False
+    ) -> None:
+        diagnostic_event(
+            "analysis_dialog_requested", initial_scan=initial_scan, auto_start=auto_start,
+        )
         if not self.project.video_path or not Path(self.project.video_path).is_file():
+            diagnostic_event("analysis_dialog_blocked", reason="missing_source_video")
             QMessageBox.information(
                 self,
                 "No source video",
@@ -924,10 +1063,26 @@ class MainWindow(QMainWindow):
             len(self.project.segments),
             self,
             initial_scan=initial_scan,
+            source_captions=self.project.source_captions,
+            caption_language=self.project.caption_language,
+            auto_start=auto_start,
+            youtube_import=bool(self.project.source_url),
+            review=self.project.analysis_review,
         )
         dialog.suggestions_accepted.connect(self._add_analysis_suggestions)
         dialog.preview_requested.connect(self._preview_analysis_range)
+        dialog.review_changed.connect(self._save_analysis_review)
         dialog.exec()
+        diagnostic_event("analysis_dialog_closed")
+
+    @Slot(object)
+    def _save_analysis_review(self, value: object) -> None:
+        if not isinstance(value, AnalysisReview):
+            QMessageBox.critical(self, "Could not keep analysis draft", "Analysis review data was invalid.")
+            return
+        if value != self.project.analysis_review:
+            self.project.analysis_review = value
+            self._set_dirty(True)
 
     @Slot(float, float)
     def _preview_analysis_range(self, start: float, end: float) -> None:
@@ -974,9 +1129,11 @@ class MainWindow(QMainWindow):
             existing_ranges.add(key)
             added.append(segment)
         if not added:
+            diagnostic_event("analysis_suggestions_applied", added=0, requested=len(value))
             self.statusBar().showMessage("No new analysis suggestions were added.")
             return
         self.project.sort_segments()
+        diagnostic_event("analysis_suggestions_applied", added=len(added), requested=len(value))
         self._set_dirty(True)
         self.segments_section.set_collapsed(False)
         self.selected_section.set_collapsed(False)
@@ -1001,16 +1158,25 @@ class MainWindow(QMainWindow):
 
     def open_path(self, path: Path) -> None:
         try:
-            if path.is_dir():
-                result = self.importer.import_folder(path)
+            if path.is_dir() or path.suffix.casefold() == ".zip":
+                result = (
+                    self.importer.import_folder(path) if path.is_dir()
+                    else self.importer.import_zip(
+                        path, self.analysis_data_root.parent / "imported-packs",
+                    )
+                )
                 self._set_project(result.project, None, mark_dirty=True)
                 self._show_import_warnings(result.warnings)
+                self._show_pack_recovery_hint()
             else:
                 project = ProjectStore.load(path)
                 self._set_project(project, path.resolve(), mark_dirty=False)
                 self.settings.setValue("lastProjectDir", str(path.resolve().parent))
         except Exception as error:
-            previous = ProjectStore.previous_path(path) if not path.is_dir() else None
+            previous = (
+                ProjectStore.previous_path(path)
+                if not path.is_dir() and path.suffix.casefold() != ".zip" else None
+            )
             if previous and previous.is_file():
                 answer = QMessageBox.question(
                     self,
@@ -1055,8 +1221,30 @@ class MainWindow(QMainWindow):
         self.settings.setValue("lastPackDir", str(Path(folder).parent))
         self._set_project(result.project, None, mark_dirty=True)
         self._show_import_warnings(result.warnings)
+        self._show_pack_recovery_hint()
+
+    def import_pack_zip(self) -> None:
+        if not self._maybe_save():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import an existing Choicer Voicer pack ZIP",
+            str(self.settings.value("lastPackDir", "")),
+            "Choicer Voicer packs (*.zip)",
+        )
+        if not path:
+            return
+        self.settings.setValue("lastPackDir", str(Path(path).parent))
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self.open_path(Path(path))
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _show_pack_recovery_hint(self) -> None:
         self.statusBar().showMessage(
-            f"Imported {len(result.project.segments)} segments. Existing prompt media will be preserved."
+            f"Imported {len(self.project.segments)} segments with existing prompt media. "
+            "Missing music? Use Generate backing, then Save Project As and export to a new location."
         )
 
     def save_project(self, save_as: bool = False) -> bool:
@@ -1141,8 +1329,7 @@ class MainWindow(QMainWindow):
             self.readme_edit.setPlainText(project.readme)
             self.video_path_label.setText(project.video_path or "No video loaded")
             self.video_path_label.setToolTip(project.video_path)
-            self.backing_path_label.setText(Path(project.backing_track_path).name if project.backing_track_path else "None")
-            self.backing_path_label.setToolTip(project.backing_track_path)
+            self._refresh_backing_controls()
             self.icon_path_label.setText(Path(project.icon_path).name if project.icon_path else "Generated from video")
             self.icon_path_label.setToolTip(project.icon_path)
             self.head_pad_spin.setValue(project.head_padding)
@@ -1161,7 +1348,7 @@ class MainWindow(QMainWindow):
                 self.timeline.set_waveform([])
             self.timeline.set_segments(project.segments)
             self.timeline.set_marks(self.mark_in_spin.value(), self.mark_out_spin.value())
-            self._refresh_table(self.selected_segment_id or None)
+            self._refresh_table(self.selected_segment_id)
             self._sync_selected_editor()
         finally:
             self._syncing = False
@@ -1171,6 +1358,7 @@ class MainWindow(QMainWindow):
                 self._start_waveform(project.video_path, project.video_duration)
             else:
                 self.player.setSource(QUrl())
+        self.video_widget.set_position(self.current_position())
         self._set_dirty(mark_dirty)
         self._refresh_validation_label()
 
@@ -1241,6 +1429,7 @@ class MainWindow(QMainWindow):
 
     def seek(self, seconds: float) -> None:
         target_ms = int(max(0.0, seconds) * 1000)
+        self.video_widget.set_position(target_ms / 1000.0)
         if (
             self.player.playbackState() == QMediaPlayer.PlaybackState.StoppedState
             or self._stopped_seek_active
@@ -1288,6 +1477,7 @@ class MainWindow(QMainWindow):
         self.player.pause()
         self.audio_output.setMuted(self._stopped_seek_audio_was_muted)
         self.timeline.set_playhead(target_ms / 1000.0)
+        self.video_widget.set_position(target_ms / 1000.0)
         self._playback_state_changed(self.player.playbackState())
 
     @Slot()
@@ -1319,6 +1509,9 @@ class MainWindow(QMainWindow):
     def _player_position_changed(self, milliseconds: int) -> None:
         position = milliseconds / 1000.0
         self.timeline.set_playhead(position)
+        self.video_widget.set_position(
+            self._stopped_seek_target_ms / 1000.0 if self._stopped_seek_active else position
+        )
         if not self._slider_dragging and self.project.video_duration > 0:
             self.seek_slider.setValue(int(position / self.project.video_duration * 100_000))
         self.position_label.setText(
@@ -1327,6 +1520,26 @@ class MainWindow(QMainWindow):
         if self._preview_end is not None and position >= self._preview_end:
             self.player.pause()
             self._preview_end = None
+        self._follow_playback_segment(position)
+
+    def _follow_playback_segment(self, position: float) -> None:
+        if (
+            self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState
+            or self._stopped_seek_active
+            or self._preview_end is not None
+            or self._range_edit_record is not None
+            or self._syncing
+            or len(self._selected_table_ids()) > 1
+        ):
+            return
+        # Follow the latest start, keeping simultaneous-speaker selections stable.
+        segment = max(
+            (item for item in self.project.segments if item.start <= position < item.end),
+            key=lambda item: (item.start, item.id == self.selected_segment_id),
+            default=None,
+        )
+        if segment is not None and segment.id != self.selected_segment_id:
+            self._show_selected_segment(segment)
 
     def _player_duration_changed(self, milliseconds: int) -> None:
         if milliseconds <= 0:
@@ -1346,8 +1559,11 @@ class MainWindow(QMainWindow):
             and not self._stopped_seek_active
             else "▶ Play"
         )
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self._follow_playback_segment(self.current_position())
 
     def _player_error(self, _error: QMediaPlayer.Error, message: str) -> None:
+        diagnostic_event("video_player_error", error_code=_error.name, message=message)
         self._reset_transport_state()
         if message:
             self.statusBar().showMessage(f"Video preview error: {message}")
@@ -1461,6 +1677,45 @@ class MainWindow(QMainWindow):
             "Segment duplicated at the same timestamp—useful for simultaneous speakers."
         )
 
+    def combine_segments(self) -> None:
+        identifiers = self._selected_table_ids()
+        selected = sorted(
+            (segment for segment in self.project.segments if segment.id in identifiers),
+            key=lambda segment: (segment.start, segment.end),
+        )
+        images = list(dict.fromkeys(segment.image_path for segment in selected if segment.image_path))
+        discard_other_images = False
+        if len(images) > 1 and all(
+            segment.audio_mode == "video" and segment.source_range_known for segment in selected
+        ):
+            answer = QMessageBox.question(
+                self,
+                "Choose the combined still image",
+                f"The selected segments use different still images. Keep {Path(images[0]).name}, "
+                "the first custom still in timeline order, for the combined segment?\n\n"
+                "The other still images will no longer be attached to these segments. "
+                "No image files will be deleted.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            discard_other_images = True
+        try:
+            combined = self.project.combine_segments(
+                identifiers, discard_other_images=discard_other_images
+            )
+        except ValueError as error:
+            QMessageBox.information(self, "Cannot combine segments", str(error))
+            return
+        self._set_dirty(True)
+        self._refresh_table(combined.id)
+        self.select_segment(combined.id)
+        self.statusBar().showMessage(
+            f"Combined {len(selected)} segments. Lines and speakers were joined in timeline order; "
+            "the source-video range includes any gaps."
+        )
+
     def delete_segment(self) -> None:
         segment = self.selected_segment()
         if segment is None:
@@ -1502,9 +1757,15 @@ class MainWindow(QMainWindow):
         if not segment:
             return
         self.prompt_player.stop()
-        self.selected_segment_id = segment_id
-        self.timeline.set_selected(segment_id)
-        self._select_table_row(segment_id)
+        self._show_selected_segment(segment)
+        self._preview_end = None
+        self.seek(segment.start)
+
+    def _show_selected_segment(self, segment: Segment) -> None:
+        self.selected_segment_id = segment.id
+        self.timeline.set_selected(segment.id)
+        self._select_table_row(segment.id)
+        self._update_combine_action()
         self._sync_selected_editor()
         self._syncing = True
         try:
@@ -1513,8 +1774,6 @@ class MainWindow(QMainWindow):
         finally:
             self._syncing = False
         self.timeline.set_marks(segment.start, segment.end, segment.id)
-        self._preview_end = None
-        self.seek(segment.start)
 
     def selected_segment(self) -> Segment | None:
         return self.project.segment_by_id(self.selected_segment_id)
@@ -1543,6 +1802,7 @@ class MainWindow(QMainWindow):
         if not segment:
             return
         segment.start, segment.end = start, end
+        self.video_widget.set_segments(self.project.segments)
         self.selected_segment_id = segment_id
         self._set_dirty(True)
         row = self._row_for_segment(segment_id)
@@ -1678,10 +1938,13 @@ class MainWindow(QMainWindow):
             self._clear_recovery_snapshot()
 
     def _refresh_table(self, selected_id: str | None = None) -> None:
-        selected = selected_id if selected_id is not None else self.selected_segment_id
+        selected = self._selected_table_ids()
+        if selected_id is not None or len(selected) < 2:
+            selected = [selected_id if selected_id is not None else self.selected_segment_id]
         timeline_warnings = audit_timeline_overlaps(self.project.segments)
         self.segment_table.blockSignals(True)
         try:
+            self.segment_table.clearSelection()
             self.segment_table.setRowCount(len(self.project.segments))
             for row, segment in enumerate(self.project.segments):
                 values = (
@@ -1699,12 +1962,20 @@ class MainWindow(QMainWindow):
                     if column in {4, 5}:
                         item.setToolTip(value)
                     self.segment_table.setItem(row, column, item)
+                if segment.id in selected:
+                    self.segment_table.selectionModel().select(
+                        self.segment_table.model().index(row, 0),
+                        QItemSelectionModel.SelectionFlag.Select
+                        | QItemSelectionModel.SelectionFlag.Rows,
+                    )
             self._apply_timeline_review_highlights(timeline_warnings)
         finally:
             self.segment_table.blockSignals(False)
         self.timeline.set_segments(self.project.segments)
-        if selected:
-            self._select_table_row(selected)
+        self.video_widget.set_segments(self.project.segments)
+        if selected_id is None:
+            self._table_selection_changed()
+        self._update_combine_action()
         self._refresh_validation_label()
 
     def _apply_timeline_review_highlights(self, warnings: list[TimelineOverlap]) -> None:
@@ -1748,19 +2019,40 @@ class MainWindow(QMainWindow):
             item = self.segment_table.item(row, 0)
             if item and item.data(Qt.ItemDataRole.UserRole) == segment_id:
                 with QSignalBlocker(self.segment_table):
-                    self.segment_table.selectRow(row)
+                    self.segment_table.selectionModel().setCurrentIndex(
+                        self.segment_table.model().index(row, 0),
+                        QItemSelectionModel.SelectionFlag.ClearAndSelect
+                        | QItemSelectionModel.SelectionFlag.Rows,
+                    )
+                self.segment_table.scrollToItem(item)
                 return
 
     def _table_selection_changed(self) -> None:
         if self._syncing:
             return
-        selected = self.segment_table.selectedItems()
-        if not selected:
-            return
-        row = selected[0].row()
-        identifier = self.segment_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        if identifier and identifier != self.selected_segment_id:
-            self.select_segment(str(identifier))
+        identifiers = self._selected_table_ids()
+        self._update_combine_action()
+        if len(identifiers) == 1:
+            if identifiers[0] != self.selected_segment_id:
+                self.select_segment(identifiers[0])
+        else:
+            self.prompt_player.stop()
+            self._preview_end = None
+            self.selected_segment_id = ""
+            self.timeline.set_selected("")
+            self.timeline.set_marks(self.mark_in_spin.value(), self.mark_out_spin.value())
+            self._sync_selected_editor()
+
+    def _selected_table_ids(self) -> list[str]:
+        return [
+            str(self.segment_table.item(index.row(), 0).data(Qt.ItemDataRole.UserRole))
+            for index in self.segment_table.selectionModel().selectedRows()
+        ]
+
+    def _update_combine_action(self) -> None:
+        self.action_combine.setEnabled(
+            self.editor_splitter.isEnabled() and len(self._selected_table_ids()) >= 2
+        )
 
     def _sync_selected_editor(self) -> None:
         segment = self.selected_segment()
@@ -1778,7 +2070,11 @@ class MainWindow(QMainWindow):
                 self.caption_edit.clear()
                 self.segment_audio_label.setText("None")
                 self.segment_image_label.setText("Generated from video")
+                count = len(self._selected_table_ids())
                 self.segment_audio_help.setText(
+                    f"{count} segments selected. Use Combine to join their ranges and lines, "
+                    "or select a single segment to edit it."
+                    if count > 1 else
                     "Select a segment to edit its range, prompt source, and still image."
                 )
                 return
@@ -1830,6 +2126,10 @@ class MainWindow(QMainWindow):
                 item.strip() for item in self.speakers_edit.text().split(",") if item.strip()
             )
         )
+        row = self._row_for_segment(segment.id)
+        if row >= 0:
+            self.segment_table.item(row, 3).setText(", ".join(segment.characters))
+        self.video_widget.set_segments(self.project.segments)
         self._set_dirty(True)
         self._refresh_validation_label()
 
@@ -1840,6 +2140,7 @@ class MainWindow(QMainWindow):
         if not segment:
             return
         segment.caption = self.caption_edit.toPlainText()
+        self.video_widget.set_segments(self.project.segments)
         self._set_dirty(True)
         row = self._row_for_segment(segment.id)
         if row >= 0:
@@ -1917,6 +2218,7 @@ class MainWindow(QMainWindow):
                 )
             segment.caption = self.caption_edit.toPlainText()
         if self.project.to_dict() != before:
+            self.video_widget.set_segments(self.project.segments)
             self._set_dirty(True)
 
     def choose_source_video(self) -> None:
@@ -1940,6 +2242,11 @@ class MainWindow(QMainWindow):
         self._reset_transport_state()
         self.player.stop()
         self.prompt_player.stop()
+        if str(source) != self.project.video_path:
+            self.project.source_url = ""
+            self.project.caption_language = ""
+            self.project.source_captions = []
+            self.project.analysis_review = None
         self.project.video_path = str(source)
         self.project.video_duration = info.duration
         self.project.preserve_source_video = (
@@ -1993,6 +2300,10 @@ class MainWindow(QMainWindow):
         self._cancel_waveform_workers()
         self.player.setSource(QUrl())
         self.project.video_path = ""
+        self.project.source_url = ""
+        self.project.caption_language = ""
+        self.project.source_captions = []
+        self.project.analysis_review = None
         self.project.video_duration = 0.0
         self.project.preserve_source_video = False
         self.video_path_label.setText("No video loaded")
@@ -2013,15 +2324,82 @@ class MainWindow(QMainWindow):
         )
         if path:
             self.project.backing_track_path = str(Path(path).resolve())
-            self.backing_path_label.setText(Path(path).name)
-            self.backing_path_label.setToolTip(path)
+            self._refresh_backing_controls()
             self._set_dirty(True)
 
     def clear_backing_track(self) -> None:
         self.project.backing_track_path = ""
-        self.backing_path_label.setText("None")
-        self.backing_path_label.setToolTip("")
+        self._refresh_backing_controls()
         self._set_dirty(True)
+
+    def _refresh_backing_controls(self) -> None:
+        path = self.project.backing_track_path
+        self.backing_path_label.setText(Path(path).name if path else "None (no music)")
+        self.backing_path_label.setToolTip(path or "Generate backing to keep music under recordings.")
+        self.generate_backing_button.setText("Regenerate backing..." if path else "Generate backing...")
+
+    def generate_backing_track(self) -> bool:
+        if self._backing_dialog is not None or self._export_worker is not None:
+            QMessageBox.information(
+                self, "Media operation running", "Wait for the current media operation to finish.",
+            )
+            return False
+        self._commit_editors()
+        project = self.project
+        source = Path(project.video_path)
+        if not project.video_path or not source.is_file():
+            QMessageBox.warning(
+                self, "Source video needed",
+                "Open or relink the source video first. For an exported pack, import its folder "
+                "or ZIP to use the included dub_video.ogv without changing your dialogue.",
+            )
+            return False
+        if project.backing_track_path:
+            answer = QMessageBox.question(
+                self,
+                "Regenerate backing track?",
+                "Generate new backing from the video? Only this project's backing selection will "
+                "change after successful generation. The existing backing file, captions, speakers, "
+                "timings and prompt files will be preserved.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+        self.player.pause()
+        try:
+            dialog = BackingDialog(
+                self.media, source.resolve(), self.analysis_data_root.parent / "backing", self,
+            )
+            self._backing_dialog = dialog
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            result = dialog.backing_path
+        except Exception as error:
+            diagnostic_exception("backing_generation_failed", error)
+            QMessageBox.critical(self, "Could not generate backing", str(error))
+            return False
+        finally:
+            self._backing_dialog = None
+        if not accepted or result is None:
+            self.statusBar().showMessage(
+                "Backing was not changed. Your dialogue is safe; generate backing later from Tools."
+            )
+            return False
+        if self.project is not project or Path(project.video_path).resolve() != source.resolve():
+            diagnostic_event("backing_result_not_applied", reason="source_or_project_changed")
+            QMessageBox.warning(
+                self, "Project changed",
+                f"The source project changed during generation. Backing was saved at {result}, "
+                "but was not attached to the new project.",
+            )
+            return False
+        project.backing_track_path = str(result)
+        self._refresh_backing_controls()
+        self._set_dirty(True)
+        self.statusBar().showMessage(
+            "Backing generated; dialogue and prompts preserved. Save the project, then re-export."
+        )
+        return True
 
     def choose_icon(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -2101,6 +2479,10 @@ class MainWindow(QMainWindow):
     # ---------- Export and status ----------
 
     def export_pack(self) -> None:
+        if self._export_dialog is not None:
+            self._export_dialog.raise_()
+            self._export_dialog.activateWindow()
+            return
         self._commit_editors()
         if self.project.import_warnings:
             answer = QMessageBox.warning(
@@ -2122,6 +2504,8 @@ class MainWindow(QMainWindow):
                 "Project is not ready",
                 "Fix these items before exporting:\n\n" + "\n".join(f"• {item}" for item in errors),
             )
+            return
+        if not self._confirm_backing_export():
             return
         destination = QFileDialog.getExistingDirectory(
             self,
@@ -2149,37 +2533,68 @@ class MainWindow(QMainWindow):
         self._set_busy(True, "Starting validated export…")
         worker = ExportWorker(self.exporter, self.project, output_parent)
         self._export_worker = worker
-        worker.progress.connect(self.progress_label.setText)
+        dialog = ExportProgressDialog(output_folder, self)
+        self._export_dialog = dialog
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.finished.connect(self._export_dialog_closed)
+        worker.progress.connect(self._export_progress)
+        worker.progress.connect(dialog.report_progress)
         worker.completed.connect(self._export_completed)
         worker.failed.connect(self._export_failed)
+        worker.finished.connect(self._export_finished)
         worker.finished.connect(worker.deleteLater)
+        dialog.show()
         worker.start()
 
     @Slot(object)
+    def _export_progress(self, update: ExportProgress) -> None:
+        self.progress_label.setText(update.message.splitlines()[0])
+
+    def _confirm_backing_export(self) -> bool:
+        if self.project.backing_track_path:
+            return True
+        box = QMessageBox(self)
+        box.setWindowTitle("This pack has no backing music")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(
+            "Without a backing track, dubbed playback will contain only the players' recordings. "
+            "Generate music/effects backing from the video before exporting?"
+        )
+        generate = box.addButton("Generate backing", QMessageBox.ButtonRole.AcceptRole)
+        silent = box.addButton("Export without music", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(generate)
+        box.exec()
+        if box.clickedButton() is generate:
+            return self.generate_backing_track()
+        return box.clickedButton() is silent
+
+    @Slot(object)
     def _export_completed(self, value: object) -> None:
-        self._set_busy(False, "Export complete")
-        self._export_worker = None
         result = value
         if not isinstance(result, ExportResult):
             self._export_failed("Exporter returned an unexpected result")
             return
-        message = (
-            f"Validated pack folder:\n{result.pack_path}\n\n"
-            f"Validated ZIP:\n{result.zip_path}\n\n"
-            f"{result.validation['clip_count']} prompts · {result.validation['file_count']} files"
-        )
-        if result.warnings:
-            message += "\n\nCleanup notes:\n" + "\n".join(
-                f"• {warning}" for warning in result.warnings
-            )
+        if self._export_dialog is not None:
+            self._export_dialog.show_result(result)
         self.statusBar().showMessage(f"Exported {result.pack_path.name}")
-        QMessageBox.information(self, "Pack exported", message)
 
     @Slot(str)
     def _export_failed(self, message: str) -> None:
-        self._set_busy(False, "Export failed")
+        if self._export_dialog is not None:
+            self._export_dialog.show_error(message)
+        self.statusBar().showMessage("Export failed")
+
+    @Slot()
+    def _export_finished(self) -> None:
+        if self._export_dialog is not None:
+            self._export_dialog.worker_finished()
+            self._set_busy(False, self._export_dialog.progress_label.text())
         self._export_worker = None
-        QMessageBox.critical(self, "Export failed", message)
+
+    @Slot(int)
+    def _export_dialog_closed(self, _result: int) -> None:
+        self._export_dialog = None
 
     def _set_busy(self, busy: bool, message: str) -> None:
         self.progress_label.setText(message)
@@ -2188,20 +2603,25 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(busy)
         for action in (
             self.action_new,
+            self.action_youtube,
             self.action_open,
             self.action_import,
+            self.action_import_zip,
             self.action_save,
             self.action_save_as,
             self.action_restore_previous,
             self.action_analyze,
+            self.action_backing,
             self.action_export,
             self.action_add,
             self.action_split,
+            self.action_combine,
             self.action_delete,
             self.action_duplicate,
         ):
             action.setEnabled(not busy)
         self.editor_splitter.setEnabled(not busy)
+        self._update_combine_action()
 
     def _refresh_validation_label(self) -> None:
         errors = self.project.validate()
@@ -2301,12 +2721,20 @@ class MainWindow(QMainWindow):
         McpHelpDialog(self).exec()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        diagnostic_event("window_close_requested", dirty=self.dirty)
         if self._automation_active:
             self.statusBar().showMessage("Wait for the current MCP operation to finish before closing.")
             event.ignore()
             return
-        if self._export_worker and self._export_worker.isRunning():
+        if not self.updater.can_close():
+            event.ignore()
+            return
+        if self._export_worker is not None:
             QMessageBox.information(self, "Export running", "Wait for the current export to finish.")
+            event.ignore()
+            return
+        if self._backing_dialog is not None:
+            self._backing_dialog.reject()
             event.ignore()
             return
         if not self._automation_disconnected and not self._maybe_save():
@@ -2328,6 +2756,10 @@ class MainWindow(QMainWindow):
                 )
                 event.ignore()
                 return
+        if not self.updater.install_on_close():
+            event.ignore()
+            return
         if self._discard_recovery_on_transition:
             self._clear_recovery_snapshot()
+        diagnostic_event("window_close_accepted")
         event.accept()

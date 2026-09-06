@@ -23,6 +23,7 @@ from choicer_voicer_pack_creator.automation import (
     Seconds,
     SegmentPatch,
 )
+from choicer_voicer_pack_creator.export_progress import ExportProgress
 
 T = TypeVar("T")
 INSTRUCTIONS = (
@@ -158,10 +159,10 @@ def create_server(
         """
         step = 0
 
-        def progress(message: str) -> None:
+        def progress(update: ExportProgress) -> None:
             nonlocal step
             step += 1
-            from_thread.run(ctx.report_progress, step, None, message)
+            from_thread.run(ctx.report_progress, step, None, update.message)
 
         return await invoke(
             "Export pack", automation.export_pack, output_parent, expected_revision, overwrite, progress

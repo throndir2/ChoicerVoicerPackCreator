@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -126,3 +127,82 @@ def test_packaged_mcp_smoke_initializes_lists_and_calls_help(
         assert result["help_characters"] > 0
     assert calls[:3] == ["start", "initialize", "list"]
     assert calls[-2:] == ["close", "stop"]
+
+
+@pytest.mark.parametrize("update_smoke", [False, True])
+def test_main_checks_editor_youtube_mcp_both_separation_entrypoints_and_optional_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, update_smoke: bool
+) -> None:
+    application = tmp_path / "portable app"
+    executable = application / SMOKE.EXECUTABLE
+    mcp_executable = application / SMOKE.MCP_NAME
+    resources = application / "_internal" / "choicer_voicer_pack_creator" / "resources"
+    for path in (
+        executable,
+        mcp_executable,
+        application / "bin" / "ffmpeg.exe",
+        application / "bin" / "ffprobe.exe",
+        resources / "mcp-help.md",
+        application / "licenses" / "python" / "mcp" / "METADATA.txt",
+        *[
+            application / "licenses" / package / "LICENSE"
+            for package in ("yt-dlp", "yt-dlp-ejs", "deno")
+        ],
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("smoke fixture", encoding="utf-8")
+    report = {
+        "ffmpeg": str(application / "bin" / "ffmpeg.exe"),
+        "ffprobe": str(application / "bin" / "ffprobe.exe"),
+        "version": "n9.0.1-11-ge47273f4d9-20260901",
+        "analysis_manifest": str(resources / "whisper-analysis-windows-x64.json"),
+        "analysis_manifest_present": True,
+        "analysis_licenses_present": True,
+        "whisper_runtime_build": "b4938",
+        "whisper_models": ["base", "tiny"],
+        "analysis_cpu_threads": 1,
+        "activity_scan_regions": 1,
+        "activity_scan_threshold_db": -40,
+        "youtube_runtime": str(application / "_internal" / "runtime" / "deno" / "deno.exe"),
+        "youtube_runtime_version": "deno 2.9.6 (stable, release, x86_64-pc-windows-msvc)",
+        "youtube_ejs_present": True,
+        "youtube_worker_probe_duration": 1.0,
+    }
+    calls = []
+
+    def smoke_editor(command, *, env, timeout, check):
+        assert command == [str(executable), "--smoke-test"]
+        assert timeout == 30 and check is False
+        calls.append(("editor", executable))
+        Path(env["CHOICER_VOICER_SMOKE_REPORT"]).write_text(json.dumps(report), encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    async def smoke_mcp(path, environment):
+        assert path == mcp_executable
+        assert "CHOICER_VOICER_SMOKE_REPORT" in environment
+        calls.append(("mcp", path))
+        return {"mode": "headless"}
+
+    monkeypatch.setattr(SMOKE, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        SMOKE.sys, "argv",
+        [str(SCRIPT_PATH), str(executable), *(["--update-smoke"] if update_smoke else [])],
+    )
+    monkeypatch.setattr(
+        SMOKE, "verify_installation",
+        lambda directory, version: calls.append(("verify", directory, version)),
+    )
+    monkeypatch.setattr(SMOKE.subprocess, "run", smoke_editor)
+    monkeypatch.setattr(SMOKE, "smoke_mcp", smoke_mcp)
+    monkeypatch.setattr(SMOKE, "smoke_separation", lambda path: calls.append(("separation", path)))
+    monkeypatch.setattr(SMOKE, "smoke_update", lambda path: calls.append(("update", path)))
+
+    assert SMOKE.main() == 0
+    assert calls == [
+        ("verify", application, SMOKE.APP_VERSION),
+        ("editor", executable),
+        ("mcp", mcp_executable),
+        ("separation", executable),
+        ("separation", mcp_executable),
+        *([("update", executable)] if update_smoke else []),
+    ]

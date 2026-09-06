@@ -13,6 +13,7 @@ from typing import Annotated, Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from choicer_voicer_pack_creator.analysis import analyze_video
+from choicer_voicer_pack_creator.export_progress import ExportProgress
 from choicer_voicer_pack_creator.exporter import (
     PackExporter,
     is_same_or_within,
@@ -264,6 +265,11 @@ class PackAutomation:
             if not info.has_audio or not math.isfinite(info.duration) or info.duration <= 0:
                 raise ValueError("Source must have video, audio, and a finite positive duration.")
             fields["video_path"] = str(source)
+            if str(source) != updated.project.video_path:
+                updated.project.source_url = ""
+                updated.project.caption_language = ""
+                updated.project.source_captions = []
+                updated.project.analysis_review = None
             updated.project.video_duration = info.duration
             fields.setdefault("preserve_source_video", False)
         for name in ("backing_track_path", "icon_path"):
@@ -367,7 +373,7 @@ class PackAutomation:
         output_parent: str,
         expected_revision: str,
         overwrite: bool = False,
-        progress: Callable[[str], None] | None = None,
+        progress: Callable[[ExportProgress], None] | None = None,
     ) -> dict[str, Any]:
         snapshot = self.access.snapshot()
         require_revision(snapshot, expected_revision)

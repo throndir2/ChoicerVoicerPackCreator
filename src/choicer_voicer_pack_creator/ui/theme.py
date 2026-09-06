@@ -60,8 +60,8 @@ QPushButton {
 QPushButton:hover { background: #1c3047; border-color: #49cddd; }
 QPushButton:pressed { background: #102030; }
 QPushButton:disabled { color: #617086; background: #111720; border-color: #202a38; }
-QPushButton#primary { background: #087a8d; border-color: #33d1df; color: white; }
-QPushButton#primary:hover { background: #0994aa; }
+QPushButton#primary:enabled { background: #087a8d; border-color: #33d1df; color: white; }
+QPushButton#primary:enabled:hover { background: #0994aa; }
 QPushButton#danger { color: #ff9999; border-color: #733b47; }
 QPushButton#danger:hover { background: #512832; }
 QTableWidget {
@@ -97,6 +97,14 @@ QSplitter::handle:horizontal {
 }
 QSplitter::handle:vertical:hover { border-top-color: #55cfe0; }
 QSplitter::handle:horizontal:hover { border-left-color: #55cfe0; }
+QSplitter#editorSplitter::handle, QSplitter#transcriptSplitter::handle {
+    margin: 0;
+    border: 0;
+    background: #2b3d52;
+}
+QSplitter#editorSplitter::handle:hover, QSplitter#transcriptSplitter::handle:hover {
+    background: #55cfe0;
+}
 QLabel#muted { color: #7f91a8; }
 QLabel#path { color: #8ea2ba; font-size: 9pt; }
 QProgressBar { background: #111b28; border: 1px solid #2a3c52; border-radius: 4px; text-align: center; }
