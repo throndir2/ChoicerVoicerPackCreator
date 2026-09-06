@@ -7,7 +7,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import (
+    QEvent,
     QItemSelectionModel,
+    QObject,
     QSettings,
     QSignalBlocker,
     QStandardPaths,
@@ -17,9 +19,10 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QDropEvent, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -88,6 +91,9 @@ from choicer_voicer_pack_creator.ui.tasks_panel import TasksPanel
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
 from choicer_voicer_pack_creator.ui.update_controller import UpdateController
 from choicer_voicer_pack_creator.ui.youtube_dialog import YouTubeDialog
+
+VIDEO_EXTENSIONS = (".mp4", ".mkv", ".mov", ".webm", ".ogv", ".avi")
+VIDEO_FILE_FILTER = f"Video files ({' '.join('*' + ext for ext in VIDEO_EXTENSIONS)});;All files (*)"
 
 
 class WaveformWorker(JobWorker):
@@ -1113,7 +1119,7 @@ class ProjectEditor(QWidget):
             self,
             "Choose source video",
             str(self.settings.value("lastVideoDir", "")),
-            "Video files (*.mp4 *.mkv *.mov *.webm *.ogv *.avi);;All files (*)",
+            VIDEO_FILE_FILTER,
         )
         if not path:
             return None
@@ -2289,7 +2295,7 @@ class ProjectEditor(QWidget):
             self,
             "Choose source video",
             str(Path(self.project.video_path).parent if self.project.video_path else ""),
-            "Video files (*.mp4 *.mkv *.mov *.webm *.ogv *.avi);;All files (*)",
+            VIDEO_FILE_FILTER,
         )
         if not path:
             return
@@ -2913,6 +2919,10 @@ class MainWindow(QMainWindow):
         editor = self.add_project(PackProject(authors=[getpass.getuser()]), dirty=False)
         self._initial_editor_id = editor.session.id
         self.updater = UpdateController(self, editor.help_menu)
+        self.setAcceptDrops(True)
+        # Intercept file URLs before child text editors can insert them as text.
+        QApplication.instance().installEventFilter(self)
+        self.tabs.setToolTip("Drop videos or .cvpack.json projects to open them in separate tabs.")
         if initial_path:
             QTimer.singleShot(0, lambda: self.open_path(initial_path))
         if recovery_store:
@@ -2957,6 +2967,61 @@ class MainWindow(QMainWindow):
 
     def statusBar(self) -> QStatusBar:  # noqa: N802
         return self.active_editor.statusBar()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if (
+            event.type() not in {
+                QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop,
+            }
+            or not isinstance(event, QDropEvent)
+            or not isinstance(watched, QWidget)
+            or watched.window() is not self
+            or not event.mimeData().hasUrls()
+        ):
+            return super().eventFilter(watched, event)
+
+        urls = event.mimeData().urls()
+        paths = [Path(url.toLocalFile()) for url in urls if url.isLocalFile()]
+        if (
+            self._closing
+            or not event.possibleActions() & Qt.DropAction.CopyAction
+            or len(paths) != len(urls)
+            or not paths
+            or any(
+                path.suffix.casefold() not in (*VIDEO_EXTENSIONS, ".json") or not path.is_file()
+                for path in paths
+            )
+        ):
+            event.ignore()
+            self.statusBar().showMessage(
+                "Drop local video files or Pack Creator projects (.cvpack.json). "
+                "All dropped items must be supported files; folders and web links are not supported.",
+                5000,
+            )
+            return True
+
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+        if event.type() == QEvent.Type.Drop:
+            # Finish the native drop before replacing the initial empty editor/tab.
+            QTimer.singleShot(0, lambda: self._open_dropped_paths(paths))
+        else:
+            self.statusBar().showMessage("Drop to open each file in its own project tab.", 5000)
+        return True
+
+    def _open_dropped_paths(self, paths: list[Path]) -> None:
+        if self._closing:
+            self.notice("Could not open dropped files", "The workspace is closing.")
+            return
+        for path in paths:
+            try:
+                if path.suffix.casefold() in VIDEO_EXTENSIONS:
+                    self.new_from_video(path)
+                else:
+                    self.open_path(path)
+            except (OSError, ValueError, RuntimeError) as error:
+                diagnostic_exception("file_drop_open_failed", error, path=path)
+                self.notice("Could not open dropped file", f"{path}\n\n{error}")
 
     def add_project(
         self, project: PackProject, path: Path | None = None, *,

@@ -242,6 +242,14 @@ dirty state. Switching tabs pauses the previous audible preview without cancelli
 The tab's `*`, `[working]`, and `[!]` indicators show unsaved edits, work in progress, and errors.
 Completion does not select a different tab.
 
+Drag local video files (MP4, MKV, MOV, WebM, OGV, or AVI) or saved `.cvpack.json` projects
+anywhere in the main editor window to open each in its own tab, without replacing existing
+work or discarding unsaved edits. Dropping an already-open project focuses its tab instead
+of opening a duplicate. Videos use the same background import and initial processing as
+**New from Video**. Drops over text fields also open tabs rather than inserting file paths;
+ordinary text dragging still edits text. Folders, web links, and other file types are not
+accepted; if a drop mixes supported and unsupported items, none are opened.
+
 **Tools > Tasks** shows the shared dock. Filter it to all projects or the current project, inspect
 stage progress and elapsed time, cancel supported work, reopen review/details, or open a successful
 output. CPU, I/O, and network budgets bound concurrent work; jobs sharing output files or inference
