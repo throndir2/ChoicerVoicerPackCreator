@@ -36,7 +36,7 @@ from choicer_voicer_pack_creator.diagnostics import (
 )
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import SourceCaption
-from choicer_voicer_pack_creator.operations import OperationCancelled
+from choicer_voicer_pack_creator.operations import OperationCancelled, critical_stage
 from choicer_voicer_pack_creator.process_worker import (
     ProcessWorkerCancelled,
     ProcessWorkerError,
@@ -805,18 +805,19 @@ def download_youtube(
         _check_cancel(cancelled)
         folder = destination / f"YouTube-{parse_qs(urlsplit(url).query)['v'][0]}-{uuid.uuid4().hex[:8]}"
         # Publish only our unique staging directory, never an existing user's media folder.
-        with diagnostic_operation("youtube_publish", source=stage, destination=folder):
-            stage.rename(folder)
-        result = YouTubeDownload(
-            folder / video.name, str(info.get("title") or "YouTube video"),
-            media_info.duration, url,
-            track.language if track else (language if language != "auto" else ""),
-            captions, notes,
-        )
-        diagnostic_event(
-            "youtube_download_ready", path=result.video_path, duration=result.duration,
-            caption_count=len(captions), warning_count=len(notes),
-            needs_transcription=not captions,
-        )
-        progress("YouTube video ready", 1.0)
-        return result
+        with critical_stage("Publishing downloaded video; cancellation is deferred..."):
+            with diagnostic_operation("youtube_publish", source=stage, destination=folder):
+                stage.rename(folder)
+            result = YouTubeDownload(
+                folder / video.name, str(info.get("title") or "YouTube video"),
+                media_info.duration, url,
+                track.language if track else (language if language != "auto" else ""),
+                captions, notes,
+            )
+            diagnostic_event(
+                "youtube_download_ready", path=result.video_path, duration=result.duration,
+                caption_count=len(captions), warning_count=len(notes),
+                needs_transcription=not captions,
+            )
+            progress("YouTube video ready", 1.0)
+            return result
