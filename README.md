@@ -41,6 +41,7 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Imports existing Choicer Voicer pack folders and preserves their prompt audio and still images.
 - Lets an imported segment switch back to source-video audio when its cut needs to be regenerated.
 - Saves a relocatable editable `.cvpack.json` project (media beside the project is stored by relative path).
+- Reopens the last 10 saved or opened projects from **File > Open Recent**, even after restarting.
 - Atomically exports a game-ready folder and sharing ZIP.
 - Validates metadata, references, inventory, PNG signatures, timestamps, codecs, complete media decoding, and ZIP CRC before publishing.
 - Checks public GitHub releases and offers verified, in-place Windows updates without replacing
@@ -116,8 +117,8 @@ This is a **portable application folder**, not an installer. To use or share it:
 3. Run `Choicer Voicer Pack Creator.exe`.
 
 The receiving computer does not need Python, FFmpeg, FFprobe, Godot, administrator access, or an
-installation step. The folder can be moved or deleted as a unit. The app stores recent-directory and
-layout preferences in the current Windows user's settings. While edits are unsaved, local
+installation step. The folder can be moved or deleted as a unit. The app stores recent-project,
+recent-directory, and layout preferences in the current Windows user's settings. While edits are unsaved, local
 application data also contains project recovery metadata, captions, and absolute media references;
 source media itself is never copied there. A folder-based package is used instead of a
 self-extracting single EXE for faster startup, simpler antivirus behavior, and replaceable LGPL
@@ -191,6 +192,14 @@ If `py` is unavailable, invoke your installed Python executable directly.
 9. Review the generated backing, or choose a custom clean backing track and icon.
 10. Save the editable project.
 11. Choose **Export Pack + ZIP** and select an output directory.
+
+**File > Open Recent** remembers the last 10 successfully opened or saved projects, newest first.
+Opening or saving the same project moves it to the top without duplicates; **Save Project As**
+also remembers the new copy. Entries show the filename and folder so similarly named projects
+can be distinguished. Unsaved new projects, source videos, and imported packs are not added until
+saved as an editable project. **Clear Recent Projects** clears only the list, not any files.
+If a project has moved or is unavailable, reopening it reports the usual error; use **Open Project**
+to find its new location. Switching projects still prompts you to save or discard unsaved edits.
 
 Export opens a progress dialog with the current operation, total and current-step elapsed
 time, and a scrollable activity history. It reports video conversion, each prompt's audio
