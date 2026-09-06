@@ -105,5 +105,27 @@ class LiveJobs:
                 resource_class="cpu", resource_keys=keys, read_paths=reads, write_paths=writes,
                 source_snapshot={"project_id": snapshot.project_id, "revision": snapshot.revision},
             )
+            if kind == "export":
+                from choicer_voicer_pack_creator.exporter import ExportResult
+                from choicer_voicer_pack_creator.ui.export_dialog import ExportProgressDialog
+
+                dialog = ExportProgressDialog(parent, self.bridge.window, background=True)
+                dialog.close_button.setObjectName("exportDetailsClose")
+                handle.detail.connect(dialog.report_progress)
+
+                def completed(result):
+                    dialog.show_result(ExportResult(
+                        Path(result["pack_path"]), Path(result["zip_path"]),
+                        result["validation"], result["file_hashes"], result["warnings"],
+                    ))
+
+                def finished():
+                    if handle.record.state != "succeeded":
+                        dialog.show_error(handle.record.error or handle.record.state)
+                    dialog.worker_finished()
+
+                handle.completed.connect(completed)
+                handle.finished.connect(finished)
+                self.bridge.window.tasks_panel.register_detail(handle.id, dialog)
             return describe_job(handle.record)
         return self.bridge.call(submit)

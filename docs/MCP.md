@@ -202,8 +202,9 @@ the application's own rendered window, **not the desktop**. `get_frame` still re
 **source-media frame**, not a UI screenshot. UI images/text can reach the model provider too.
 
 `ui_interact(selector, action, project_id?, text?, index?, key?)` accepts `click`, `type`, `key`,
-or `select`. Selection uses zero-based tab/table/combobox indices; typing replaces editable
-text and commits by moving focus. Tab selection uses real mouse events on the tab bar.
+`select`, or `close_tab`. Selection/closing uses zero-based tab/table/combobox indices;
+typing replaces editable text using Qt input (line fields commit by moving focus).
+Tab selection and closing use real mouse events on the tab bar.
 Actions are queued so opening a modal does not trap a request: read `get_ui_state.actions`
 for the returned `action_id` reaching `completed` or `failed` (a modal can leave it `running`).
 Acceptance is not proof the intended workflow finished; inspect widgets, Tasks, and projects.
@@ -211,7 +212,12 @@ Acceptance is not proof the intended workflow finished; inspect widgets, Tasks, 
 Stable selectors: `projectTabs`, `projectTitle`, `segmentCaption`, `segmentsTable`,
 `saveProject`, `exportProject`, `analyzeProject`, `tasksDock`, `taskProjectFilter`, `tasksTable`,
 `taskLog`, `taskShowProject`, `taskCancel`, `taskRetry`, `taskOpenOutput`, `taskDetails`.
+Export details expose `exportDetailsClose`; project-close decisions expose
+`projectCloseKeepProcessing`, `projectCloseCancelTasks`, `projectCloseKeepOpen`,
+`projectCloseSave`, `projectCloseDiscard`, and `projectCloseCancel`.
 Editor selectors are scoped to the visible `project_id`; select that tab before typing.
+Closed/discarded document IDs retire after their tasks finish; retained background documents
+keep their identity. Reopening a retired document creates a new identity.
 Allowed keys: `Enter`, `Escape`, `Tab`, `Backspace`, `Space`, `Delete`.
 Unknown selectors, disabled/hidden widgets and modal-blocked targets fail explicitly.
 Native OS file dialogs are not an unconstrained automation endpoint: a human must dismiss

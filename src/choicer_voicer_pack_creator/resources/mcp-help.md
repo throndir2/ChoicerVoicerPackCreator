@@ -111,13 +111,16 @@ content, never the desktop. `get_frame` is SOURCE MEDIA, not a UI screenshot.
 These images and UI text may be sent to the client's model provider.
 
 `ui_interact(selector, action, project_id?, text?, index?, key?)` queues real
-application-local Qt input: click/type/key/select. Type replaces editable text;
-select uses a zero-based tab/table/combobox index. Poll `get_ui_state.actions`
+application-local Qt input: click/type/key/select/close_tab. Type replaces editable
+text; select/close_tab use zero-based indices. Poll `get_ui_state.actions`
 for the returned action_id; queued acceptance is not completed interaction.
 Select a project's real tab before sending its project-scoped field input.
 Selectors include projectTabs, projectTitle, segmentCaption, segmentsTable,
 saveProject/exportProject/analyzeProject, tasksDock/tasksTable/taskLog,
 taskProjectFilter/taskShowProject/taskCancel/taskRetry/taskOpenOutput/taskDetails.
+Details expose exportDetailsClose. Close decisions expose projectCloseKeepProcessing,
+projectCloseCancelTasks, projectCloseKeepOpen, projectCloseSave, projectCloseDiscard,
+and projectCloseCancel.
 Keys are Enter/Escape/Tab/Backspace/Space/Delete. Disabled, hidden, unknown or
 modal-blocked targets fail. Dismiss native file dialogs manually; use semantic
 tools for authorized paths. No arbitrary evaluation/member calls, clipboard,

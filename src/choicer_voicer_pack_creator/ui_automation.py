@@ -24,6 +24,13 @@ SELECTORS = frozenset({
     "saveProject", "exportProject", "analyzeProject",
     "tasksDock", "taskProjectFilter", "tasksTable", "taskLog",
     "taskShowProject", "taskCancel", "taskRetry", "taskOpenOutput", "taskDetails",
+    "exportDetailsClose",
+    "projectCloseKeepProcessing", "projectCloseCancelTasks", "projectCloseKeepOpen",
+    "projectCloseSave", "projectCloseDiscard", "projectCloseCancel",
+})
+EDITOR_SELECTORS = frozenset({
+    "projectTitle", "segmentCaption", "segmentsTable",
+    "saveProject", "exportProject", "analyzeProject",
 })
 KEYS = {
     "Enter": Qt.Key.Key_Return, "Escape": Qt.Key.Key_Escape,
@@ -50,11 +57,14 @@ class UIAutomation:
         editor = window.editor_for_project(project_id) if project_id else window.active_editor
         if project_id and editor is not window.active_editor:
             raise ValueError("Project is not the visible tab. Select it through projectTabs first.")
-        roots = [editor, window] if editor is not None else [window]
+        roots = [editor] if selector in EDITOR_SELECTORS and editor is not None else [window]
         for root in roots:
-            target = root.findChild(QObject, selector)
-            if target is not None:
-                return target
+            targets = root.findChildren(QObject, selector)
+            if targets:
+                return next(
+                    (target for target in targets
+                     if isinstance(target, QWidget) and target.isVisible()), targets[0]
+                )
         raise ValueError(f"Widget is unavailable: {selector}")
 
     def _belongs(self, widget: QWidget) -> bool:
@@ -99,7 +109,7 @@ class UIAutomation:
             editor = window.active_editor
             widgets = []
             for selector in sorted(SELECTORS):
-                roots = [editor, window] if editor is not None else [window]
+                roots = [editor] if selector in EDITOR_SELECTORS and editor is not None else [window]
                 target = next(
                     (item for root in roots
                      if (item := root.findChild(QObject, selector)) is not None), None
@@ -135,7 +145,7 @@ class UIAutomation:
         return self.bridge.call(capture)
 
     def interact(
-        self, selector: str, action: Literal["click", "type", "key", "select"],
+        self, selector: str, action: Literal["click", "type", "key", "select", "close_tab"],
         project_id: str | None = None, text: str | None = None,
         index: int | None = None, key: str | None = None,
     ) -> dict[str, str]:
@@ -159,9 +169,11 @@ class UIAutomation:
             elif action == "key":
                 if not isinstance(target, QWidget) or key not in KEYS:
                     raise ValueError(f"Allowed keys: {', '.join(KEYS)}")
-            elif action == "select":
+            elif action in {"select", "close_tab"}:
                 if not isinstance(target, (QTabWidget, QTableWidget, QComboBox)):
                     raise ValueError("Selection requires tabs, a table, or a combobox.")
+                if action == "close_tab" and not isinstance(target, QTabWidget):
+                    raise ValueError("close_tab requires projectTabs.")
                 count = target.rowCount() if isinstance(target, QTableWidget) else target.count()
                 if index is None or not 0 <= index < count:
                     raise ValueError("Selection index is outside the available items.")
@@ -173,6 +185,16 @@ class UIAutomation:
             def perform() -> None:
                 record["state"] = "running"
                 try:
+                    if not target.isVisible() or not target.isEnabled():
+                        raise ValueError("Target became hidden or disabled before input.")
+                    if project_id and self.bridge.window.active_editor.session.id != project_id:
+                        raise ValueError("The active project changed before input.")
+                    modal = QApplication.activeModalWidget()
+                    if modal is not None and (
+                        not isinstance(target, QWidget)
+                        or (target is not modal and not modal.isAncestorOf(target))
+                    ):
+                        raise ValueError("A modal window blocked the target before input.")
                     # A queued input may enter a nested modal event loop. Never hold an MCP
                     # request waiting for it; subsequent state calls report its real status.
                     if isinstance(target, QAction):
@@ -186,15 +208,31 @@ class UIAutomation:
                     elif action == "type":
                         target.setFocus()
                         QTest.keyClick(target, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
-                        # QTest.keyClicks is ASCII-only. Input-method events deliver Unicode
-                        # locally, without touching the clipboard or OS-wide input.
-                        from PySide6.QtGui import QInputMethodEvent
-                        event = QInputMethodEvent()
-                        event.setCommitString(text)
-                        QApplication.sendEvent(target, event)
-                        QTest.keyClick(target, Qt.Key.Key_Tab)
+                        if all(" " <= char <= "~" for char in text):
+                            if text:
+                                QTest.keyClicks(target, text)
+                            else:
+                                QTest.keyClick(target, Qt.Key.Key_Backspace)
+                        else:
+                            # Qt's keyClicks is ASCII-only; use normal input-method events
+                            # for Unicode/newlines, never the clipboard or OS-wide input.
+                            from PySide6.QtGui import QInputMethodEvent
+                            event = QInputMethodEvent()
+                            event.setCommitString(text)
+                            QApplication.sendEvent(target, event)
+                        if isinstance(target, QLineEdit):
+                            QTest.keyClick(target, Qt.Key.Key_Tab)
                     elif action == "key":
                         QTest.keyClick(target, KEYS[key])
+                    elif action == "close_tab":
+                        from PySide6.QtWidgets import QTabBar
+                        bar = target.tabBar()
+                        button = bar.tabButton(index, QTabBar.ButtonPosition.RightSide)
+                        if button is None:
+                            button = bar.tabButton(index, QTabBar.ButtonPosition.LeftSide)
+                        if button is None:
+                            raise ValueError("The tab has no close button.")
+                        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
                     elif action == "select" and isinstance(target, QTabWidget):
                         bar = target.tabBar()
                         QTest.mouseClick(bar, Qt.MouseButton.LeftButton,

@@ -87,8 +87,7 @@ class EditorBridge(QObject):
             if modal.isVisible():
                 QTimer.singleShot(100, self._disconnect)
                 return
-        if not self.window.close():
-            QTimer.singleShot(100, self._disconnect)
+        self.window.close()
 
 
 class EditorProjectAccess:
@@ -101,6 +100,8 @@ class EditorProjectAccess:
     def _editor(self):
         window = self.bridge.window
         if self.project_id is not None:
+            if self.project_id not in window.editors:
+                raise ValueError(f"Unknown project_id: {self.project_id}")
             return window.editor_for_project(self.project_id)
         if window.active_editor is None:
             raise ValueError("No active project. Create or open a project first.")
@@ -144,7 +145,7 @@ class EditorProjectAccess:
                 for editor in window.editors.values():
                     if editor.project_path == snapshot.path:
                         return self.activate(editor.session.id)
-            editor = window.add_project(snapshot.project, snapshot.path, snapshot.dirty)
+            editor = window.add_project(snapshot.project, snapshot.path, dirty=snapshot.dirty)
             editor._saved_project_hash = snapshot.saved_hash
             if snapshot.dirty:
                 editor._write_recovery_snapshot()

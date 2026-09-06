@@ -5,7 +5,7 @@ from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QSettings, QThread, QTimer
+from PySide6.QtCore import QSettings, QThread
 from PySide6.QtWidgets import QDialog
 
 from choicer_voicer_pack_creator.automation import PackAutomation, ProjectPatch, SegmentPatch
@@ -39,10 +39,8 @@ def live_editor(qtbot, tmp_path):
         recovery_store=RecoveryStore(tmp_path / "recovery.json"),
         analysis_data_root=tmp_path / "analysis",
     )
-    qtbot.addWidget(
-        window, before_close_func=lambda widget: setattr(widget, "_automation_disconnected", True)
-    )
     window.show()
+    qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
     segment = Segment(1, 2, "Original", ["Actor"])
     window._set_project(
         PackProject(title="Live", authors=["Tester"], video_duration=10, segments=[segment]),
@@ -53,8 +51,12 @@ def live_editor(qtbot, tmp_path):
     automation = PackAutomation(EditorProjectAccess(bridge), tmp_path)
     yield window, bridge, automation
     window._automation_active = False
-    window.dirty = False
+    window._automation_disconnected = True
     window.close()
+    qtbot.waitUntil(lambda: not window.isVisible(), timeout=10000)
+    qtbot.waitUntil(lambda: not window.job_manager.active_jobs(), timeout=10000)
+    window.deleteLater()
+    qtbot.wait(1)
 
 
 def test_live_tools_edit_real_widgets_and_preserve_human_edits(qtbot, live_editor, tmp_path):
@@ -70,7 +72,8 @@ def test_live_tools_edit_real_widgets_and_preserve_human_edits(qtbot, live_edito
     assert window.segment_table.rowCount() == 2
     assert window.caption_edit.toPlainText() == "LLM correction"
     assert window.dirty
-    assert window.recovery_store.load().project.segments[0].caption == "LLM correction"
+    qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
+    assert window.active_editor.recovery_store.load().project.segments[0].caption == "LLM correction"
     window.title_edit.setText("Human title")
     with pytest.raises(ValueError, match="Project changed"):
         in_worker(qtbot, lambda: automation.update_project(
@@ -83,7 +86,8 @@ def test_live_tools_edit_real_widgets_and_preserve_human_edits(qtbot, live_edito
     ))
     assert not window.dirty
     assert window.project_path == Path(saved["project_path"])
-    assert window.recovery_store.load() is None
+    qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
+    assert window.active_editor.recovery_store.load() is None
     assert ProjectStore.load(window.project_path).title == "Human title"
     assert window._recent_project_paths() == [window.project_path]
 
@@ -103,14 +107,13 @@ def test_live_project_open_updates_recent_projects_but_edits_do_not(qtbot, live_
     assert window._recent_project_paths() == []
 
 
-def test_live_operation_busy_state_and_modal_rejection(qtbot, live_editor):
+def test_live_operation_does_not_globally_disable_editor(qtbot, live_editor):
     window, bridge, _automation = live_editor
     in_worker(qtbot, lambda: bridge.begin("Test operation"))
-    assert window._automation_active
-    assert not window.action_export.isEnabled()
-    assert not window.recent_projects_menu.menuAction().isEnabled()
-    assert not window.editor_splitter.isEnabled()
-    assert not window.close()
+    assert not window._automation_active
+    assert window.action_export.isEnabled()
+    assert window.recent_projects_menu.menuAction().isEnabled()
+    assert window.editor_splitter.isEnabled()
     in_worker(qtbot, bridge.end)
     assert window.action_export.isEnabled()
     assert window.recent_projects_menu.menuAction().isEnabled()
@@ -124,13 +127,13 @@ def test_live_operation_busy_state_and_modal_rejection(qtbot, live_editor):
     assert not window._automation_active
 
 
-def test_nonmodal_backing_workflow_blocks_mcp_mutations(qtbot, live_editor):
+def test_nonmodal_backing_workflow_does_not_block_other_projects(qtbot, live_editor):
     window, bridge, _automation = live_editor
     dialog = QDialog(window)
     window._backing_dialog = dialog
     try:
-        with pytest.raises(ValueError, match="backing-track"):
-            in_worker(qtbot, lambda: bridge.begin("Edit project"))
+        window.add_project(PackProject(title="Other"), dirty=False)
+        in_worker(qtbot, lambda: bridge.begin("Edit other project"))
         assert not window._automation_active
     finally:
         window._backing_dialog = None
@@ -145,7 +148,7 @@ def test_live_show_and_disconnect_preserve_unsaved_recovery(qtbot, live_editor):
     window._set_dirty(True)
     bridge.disconnected.emit()
     qtbot.waitUntil(lambda: not window.isVisible())
-    assert window.recovery_store.load() is not None
+    assert window.active_editor.recovery_store.load() is not None
 
 
 def test_live_inspection_preserves_structured_names_and_padding(qtbot, live_editor):
@@ -184,11 +187,187 @@ def test_focusing_unchanged_fields_does_not_dirty_project_on_mcp_call(qtbot, liv
     assert window.project.title == "Updated"
 
 
-def test_disconnect_during_recovery_question_does_not_discard_record(qtbot, live_editor):
+def test_disconnect_preserves_each_documents_recovery(qtbot, live_editor):
     window, bridge, _automation = live_editor
-    qtbot.wait(1)
-    window.recovery_store.save(PackProject(title="Recover me"), None)
-    QTimer.singleShot(25, bridge.disconnected.emit)
-    window._offer_recovery()
-    assert not window.isVisible()
-    assert window.recovery_store.load().project.title == "Recover me"
+    first = window.active_editor
+    first._set_dirty(True)
+    second = window.add_project(PackProject(title="Recover second"), dirty=True)
+    bridge.disconnected.emit()
+    qtbot.waitUntil(lambda: not window.isVisible())
+    assert first.recovery_store.load().project.title == "Live"
+    assert second.recovery_store.load().project.title == "Recover second"
+
+
+def test_bound_live_edit_targets_original_document_after_tab_switch(qtbot, live_editor):
+    window, _bridge, automation = live_editor
+    first = in_worker(qtbot, automation.get_project)
+    bound = in_worker(qtbot, automation.for_project)
+    second = window.add_project(PackProject(title="Second", authors=["Tester"]), dirty=False)
+    updated = in_worker(qtbot, lambda: bound.update_project(
+        ProjectPatch(title="First edited"), first["revision"]
+    ))
+    assert updated["project_id"] == first["project_id"]
+    assert window.active_editor is second
+    assert second.project.title == "Second"
+    assert window.editor_for_project(first["project_id"]).title_edit.text() == "First edited"
+    with pytest.raises(ValueError, match="Unknown project_id"):
+        in_worker(qtbot, lambda: automation.for_project("unknown"))
+
+
+def test_mcp_save_does_not_clear_newer_edits_or_steal_tab(
+    qtbot, live_editor, tmp_path, monkeypatch,
+):
+    window, _bridge, automation = live_editor
+    bound = in_worker(qtbot, automation.for_project)
+    before = in_worker(qtbot, bound.get_project)
+    started, release = threading.Event(), threading.Event()
+    save = ProjectStore.save
+
+    def slow_save(project, path):
+        started.set()
+        assert release.wait(10)
+        save(project, path)
+
+    monkeypatch.setattr(ProjectStore, "save", slow_save)
+    result = Future()
+    path = tmp_path / "snapshot.cvpack.json"
+
+    def run():
+        try:
+            result.set_result(bound.save_project(before["revision"], str(path)))
+        except Exception as error:
+            result.set_exception(error)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        qtbot.waitUntil(started.is_set)
+        window.title_edit.selectAll()
+        qtbot.keyClicks(window.title_edit, "Newer draft")
+        other = window.add_project(PackProject(title="Other"), dirty=False)
+    finally:
+        release.set()
+    qtbot.waitUntil(result.done)
+    thread.join(timeout=2)
+    saved = result.result()
+    assert saved["dirty"]
+    assert saved["project"]["title"] == "Newer draft"
+    assert ProjectStore.load(path).title == "Live"
+    assert window.active_editor is other
+
+
+def test_ui_hooks_use_real_fields_tabs_and_window_image(qtbot, live_editor):
+    from choicer_voicer_pack_creator.ui_automation import UIAutomation
+
+    window, bridge, automation = live_editor
+    hooks = UIAutomation(bridge)
+    first = window.active_editor
+    second = window.add_project(PackProject(title="Second"), dirty=False)
+    state = in_worker(qtbot, hooks.state)
+    assert state["visible"]
+    assert state["active_project_id"] == second.session.id
+    png = in_worker(qtbot, hooks.screenshot)
+    assert png.startswith(b"\x89PNG")
+    with pytest.raises(ValueError, match="allowlisted"):
+        in_worker(qtbot, lambda: hooks.interact("__dict__", "click"))
+    with pytest.raises(ValueError, match="not the visible"):
+        in_worker(qtbot, lambda: hooks.interact(
+            "projectTitle", "type", first.session.id, "Must not change"
+        ))
+    first_index = window.tabs.indexOf(first)
+    action = in_worker(qtbot, lambda: hooks.interact("projectTabs", "select", index=first_index))
+    qtbot.waitUntil(lambda: window.active_editor is first)
+    assert action["state"] == "queued"
+    in_worker(qtbot, lambda: hooks.interact("projectTitle", "type", first.session.id, "UI title"))
+    qtbot.waitUntil(lambda: first.title_edit.text() == "UI title")
+    in_worker(qtbot, lambda: hooks.interact(
+        "segmentCaption", "type", first.session.id, "UI caption"
+    ))
+    qtbot.waitUntil(lambda: first.project.segments[0].caption == "UI caption")
+    assert second.project.title == "Second"
+    assert in_worker(qtbot, automation.get_project)["project"]["title"] == "UI title"
+    state = in_worker(qtbot, hooks.state)
+    assert all(item["state"] == "completed" for item in state["actions"])
+
+
+def test_background_job_capture_cancel_and_edits_do_not_cross_projects(qtbot, live_editor):
+    from choicer_voicer_pack_creator.mcp_jobs import LiveJobs
+
+    window, bridge, automation = live_editor
+    jobs = LiveJobs(bridge)
+    first = window.active_editor
+    release = threading.Event()
+
+    def work(ctx):
+        while not release.wait(0.01):
+            ctx.check_cancelled()
+        return {"revision": "snapshot"}
+
+    handles = [
+        window.job_manager.submit(first.session.id, "analysis", "Held scan", work)
+        for _ in range(window.job_manager.limits["cpu"] + 1)
+    ]
+    try:
+        qtbot.waitUntil(lambda: handles[-1].record.state == "waiting")
+        waiting = in_worker(qtbot, lambda: jobs.cancel(handles[-1].id))
+        assert waiting["state"] == "cancelled"
+        running = in_worker(qtbot, lambda: jobs.cancel(handles[0].id))
+        assert running["cancel_requested"]
+        second = window.add_project(PackProject(title="Second"), dirty=False)
+        current = in_worker(qtbot, automation.get_project)
+        in_worker(qtbot, lambda: automation.for_project(second.session.id).update_project(
+            ProjectPatch(title="Second edited"), current["revision"]
+        ))
+        qtbot.waitUntil(lambda: handles[0].record.state == "cancelled")
+        assert window.active_editor is second
+        assert first.project.title == "Live"
+        assert second.project.title == "Second edited"
+        records = in_worker(qtbot, lambda: jobs.list(first.session.id))["jobs"]
+        assert all(record["project_id"] == first.session.id for record in records)
+    finally:
+        release.set()
+    qtbot.waitUntil(lambda: all(not handle.record.active for handle in handles))
+
+
+def test_analysis_job_keeps_submitted_snapshot_without_applying_stale_result(
+    qtbot, live_editor, tmp_path, monkeypatch,
+):
+    from choicer_voicer_pack_creator.mcp_jobs import LiveJobs
+
+    window, bridge, automation = live_editor
+    source = tmp_path / "dummy-source.mp4"
+    source.write_bytes(b"Only used by deterministic snapshot test")
+    first = window.active_editor
+    first.project.video_path = str(source)
+    before = in_worker(qtbot, automation.get_project)
+    release = threading.Event()
+
+    def analyze(frozen, *args):
+        snapshot = frozen.access.snapshot()
+        while not release.wait(0.01):
+            args[-1]()  # Exercise the scheduler's cancellation callback.
+        return {"project_id": snapshot.project_id, "revision": snapshot.revision,
+                "title": snapshot.project.title}
+
+    monkeypatch.setattr(PackAutomation, "analyze", analyze)
+    jobs = LiveJobs(bridge)
+    bound = in_worker(qtbot, automation.for_project)
+    record = in_worker(qtbot, lambda: jobs.start(bound, "analysis", before["revision"]))
+    try:
+        qtbot.waitUntil(lambda: window.job_manager.handle(record["job_id"]).record.state == "running")
+        first.title_edit.selectAll()
+        qtbot.keyClicks(first.title_edit, "Newer title")
+        second = window.add_project(PackProject(title="Second"), dirty=False)
+    finally:
+        release.set()
+    qtbot.waitUntil(lambda: not window.job_manager.handle(record["job_id"]).record.active)
+    result = in_worker(qtbot, lambda: jobs.get(record["job_id"]))
+    assert result["state"] == "succeeded"
+    assert result["result"] == {
+        "project_id": before["project_id"], "revision": before["revision"], "title": "Live",
+    }
+    assert first.project.title == "Newer title"
+    assert first.dirty
+    assert window.active_editor is second
+    with pytest.raises(ValueError, match="Project changed"):
+        in_worker(qtbot, lambda: jobs.start(bound, "analysis", before["revision"]))
