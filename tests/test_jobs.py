@@ -319,3 +319,57 @@ def test_shutdown_manager_is_retired_on_its_owner_thread(qtbot):
     del manager
     assert reference() is None
     assert destroyed_on == [owner_thread]
+
+
+def test_shutdown_from_running_notification_releases_unstarted_job(qtbot, manager, tmp_path):
+    executed = []
+    handle = manager.submit(
+        "one", "export", "Starting", lambda context: executed.append(True),
+        write_paths=[tmp_path],
+    )
+    handle.state_changed.connect(
+        lambda state: manager.shutdown(wait=True) if state == "running" else None,
+    )
+    manager._schedule()
+    assert handle.record.state == "cancelled"
+    assert not manager.active_jobs()
+    assert not any(manager._running.values())
+    assert not executed
+
+    other = JobManager()
+    try:
+        following = other.submit("two", "export", "Next", lambda ctx: 42, write_paths=[tmp_path])
+        finish(qtbot, other)
+        assert following.record.result == 42
+    finally:
+        other.shutdown(wait=True)
+        other.deleteLater()
+        QCoreApplication.sendPostedEvents(other, QEvent.Type.DeferredDelete)
+
+
+def test_rejected_executor_admission_never_runs_or_leaks_reservations(
+    qtbot, manager, tmp_path, monkeypatch,
+):
+    queued = []
+    executed = []
+
+    def rejected(function, *args):
+        queued.append(lambda: function(*args))
+        raise RuntimeError("executor rejected submission")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(manager._executor, "submit", rejected)
+        handle = manager.submit(
+            "one", "export", "Rejected", lambda context: executed.append(True),
+            write_paths=[tmp_path],
+        )
+        manager._schedule()
+    assert handle.record.state == "failed"
+    assert "executor rejected submission" in handle.record.error
+    assert not manager.active_jobs()
+    assert not any(manager._running.values())
+    queued[0]()
+    assert not executed
+    following = manager.submit("two", "export", "Next", lambda ctx: 42, write_paths=[tmp_path])
+    finish(qtbot, manager)
+    assert following.record.result == 42

@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import copy_context
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event, Lock
 from typing import Any
@@ -127,6 +127,8 @@ class _Task:
     requests: tuple
     dependencies: tuple[str, ...]
     lease: str | None = None
+    admission: Event = field(default_factory=Event)
+    rejected: bool = False
 
 
 class JobManager(QObject):
@@ -232,7 +234,7 @@ class JobManager(QObject):
         record = handle._record = replace(previous, **changes)
         if record.state != previous.state:
             handle.state_changed.emit(record.state)
-        self.changed.emit(record)
+        self.changed.emit(handle.record)
 
     def cancel(self, job_id: str) -> None:
         self._assert_thread()
@@ -279,8 +281,18 @@ class JobManager(QObject):
             task.lease = token
             self._running[resource] += 1
             self._update(handle, state="running", message="Starting", started_at=time.time())
+            # Direct Qt listeners may cancel or shut down the executor while the
+            # starting state is being announced, before any worker was admitted.
+            if self._closed or handle._cancel.is_set():
+                self._reject_start(task, "cancelled", None)
+                continue
             context = copy_context()
-            self._executor.submit(context.run, self._execute, task)
+            try:
+                self._executor.submit(context.run, self._execute, task)
+            except Exception as error:
+                self._reject_start(task, "failed", f"{type(error).__name__}: {error}")
+            else:
+                task.admission.set()
         if not self.active_jobs():
             self._timer.stop()
 
@@ -288,7 +300,21 @@ class JobManager(QObject):
         if handle.record.state != "waiting" or handle.record.message != message:
             self._update(handle, state="waiting", message=message)
 
+    def _reject_start(self, task: _Task, state: str, error: str | None) -> None:
+        task.rejected = True
+        task.admission.set()
+        if task.lease is not None:
+            leases.release(task.lease)
+            task.lease = None
+        self._running[task.handle.record.resource_class] -= 1
+        self._finish(task.handle, state, None, error)
+
     def _execute(self, task: _Task) -> None:
+        # submit() can fail after putting work on the executor's internal queue.
+        # Such a work item must never execute application code or release twice.
+        task.admission.wait()
+        if task.rejected:
+            return
         context = JobContext(task.handle, self)
         state, result, error = "succeeded", None, None
         try:
