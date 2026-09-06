@@ -9,6 +9,7 @@ from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QDockWidget,
     QFileDialog,
     QLineEdit,
     QMessageBox,
@@ -69,7 +70,7 @@ def send_drop(target, mime, actions=Qt.DropAction.CopyAction | Qt.DropAction.Mov
 
 @pytest.mark.parametrize("target", [
     "window", "tabs", "video_widget", "timeline", "title_edit", "readme_edit",
-    "caption_edit", "table", "tasks",
+    "caption_edit", "table",
 ])
 def test_project_drop_opens_tab_without_editing_drop_target(
     workspace, qtbot, tmp_path, target,
@@ -88,7 +89,6 @@ def test_project_drop_opens_tab_without_editing_drop_target(
         "readme_edit": original.readme_edit.viewport(),
         "caption_edit": original.caption_edit.viewport(),
         "table": original.segment_table.viewport(),
-        "tasks": workspace.tasks_panel.table.viewport(),
     }
     mime = QMimeData()
     mime.setUrls([QUrl.fromLocalFile(str(path))])
@@ -254,6 +254,43 @@ def test_failed_drop_import_reports_error_and_preserves_other_edits(
     assert path.read_text(encoding="utf-8") == "invalid"
 
 
+@pytest.mark.parametrize("kind", ["update-check", "export", "analysis"])
+@pytest.mark.parametrize("failed", [False, True])
+def test_background_jobs_do_not_open_tasks_or_resize_editor(workspace, qtbot, kind, failed):
+    editor = workspace.active_editor
+    tasks = workspace.tasks_window
+    QApplication.processEvents()
+    geometry = workspace.tabs.geometry()
+    assert not workspace.findChildren(QDockWidget)
+    assert not tasks.isVisible()
+    assert not tasks._timer.isActive()
+
+    def work(_context):
+        if failed:
+            raise RuntimeError("Synthetic task failure")
+
+    project_id = None if kind == "update-check" else editor.session.id
+    job = workspace.job_manager.submit(project_id, kind, "Background task", work)
+    qtbot.waitUntil(lambda: not job.record.active)
+    assert job.record.state == ("failed" if failed else "succeeded")
+    assert not tasks.isVisible()
+    assert not tasks._timer.isActive()
+    assert tasks.table.rowCount() == 0
+    assert workspace.tabs.geometry() == geometry
+    assert workspace.active_editor is editor
+    if failed and project_id is not None:
+        assert "[!]" in workspace.tabs.tabText(workspace.tabs.indexOf(editor))
+    tasks.show_action.trigger()
+    assert tasks.isVisible()
+    assert tasks.table.rowCount() == 1
+    assert tasks.table.item(0, 2).text() == job.record.state.capitalize()
+    tasks.table.selectRow(0)
+    if failed:
+        assert "Synthetic task failure" in tasks.details.toPlainText()
+    tasks.close()
+    assert not tasks._timer.isActive()
+
+
 def test_running_project_does_not_block_edit_save_or_open(workspace, qtbot, tmp_path):
     window = workspace
     a = window.active_editor
@@ -267,10 +304,25 @@ def test_running_project_does_not_block_edit_save_or_open(workspace, qtbot, tmp_
 
     job = window.job_manager.submit(a.session.id, "export", "Export A", export)
     qtbot.waitUntil(lambda: job.record.state == "running")
+    assert "[working]" in window.tabs.tabText(window.tabs.indexOf(a))
+    tasks = window.tasks_window
+    geometry = window.tabs.geometry()
+    tasks.show_action.trigger()
+    assert tasks.isVisible() and tasks.isWindow() and not tasks.isModal()
+    assert QApplication.activeModalWidget() is None
+    assert tasks._timer.isActive()
+    assert window.tabs.geometry() == geometry
+    tasks.table.selectRow(0)
+    qtbot.keyClick(tasks.table, Qt.Key.Key_Return)
+    assert not job.record.cancel_requested
     b = window.add_project(PackProject(title="B", authors=["Author"]), dirty=False)
     b.title_edit.selectAll()
     qtbot.keyClicks(b.title_edit, "B edited")
     assert b.dirty and b.project.title == "B edited"
+    tasks.close()
+    assert not tasks.isVisible()
+    assert not tasks._timer.isActive()
+    assert job.record.active and not job.record.cancel_requested
     destination = tmp_path / "B.cvpack.json"
     assert window.save_editor(b, destination=destination)
     qtbot.waitUntil(lambda: destination.is_file() and not b.dirty)
@@ -289,6 +341,37 @@ def test_running_project_does_not_block_edit_save_or_open(workspace, qtbot, tmp_
     release.set()
     qtbot.waitUntil(lambda: not job.record.active)
     assert window.active_editor is b
+    assert not tasks.isVisible()
+    assert "[working]" not in window.tabs.tabText(window.tabs.indexOf(a))
+    tasks.show_action.trigger()
+    tasks.show_action.trigger()
+    assert window.findChildren(QDialog, "tasksWindow") == [tasks]
+    assert tasks.table.rowCount() == len(window.job_manager.tasks())
+    assert window.active_editor is b
+    tasks.close()
+
+
+def test_tasks_restore_only_hidden_project_tabs(workspace, qtbot):
+    first = workspace.active_editor
+    first._set_project(PackProject(title="Origin"), None, False)
+    job = workspace.job_manager.submit(first.session.id, "analysis", "Scan", lambda _ctx: None)
+    qtbot.waitUntil(lambda: not job.record.active)
+    second = workspace.add_project(PackProject(title="Other"), dirty=False)
+    tasks = workspace.tasks_window
+    tasks.show_action.trigger()
+    tasks.table.selectRow(0)
+    assert not tasks.restore_button.isEnabled()
+    tasks._restore_project()
+    assert workspace.active_editor is second
+    workspace._hide_editor(first, retain=True)
+    tasks.refresh()
+    assert tasks.restore_button.isEnabled()
+    tasks.restore_button.click()
+    assert workspace.active_editor is first
+    assert workspace.tabs.indexOf(first) >= 0
+    assert not first.session.hidden
+    assert not tasks.restore_button.isEnabled()
+    tasks.close()
 
 
 def test_tabs_keep_selection_range_and_zoom(workspace):
@@ -440,7 +523,8 @@ def test_tasks_retry_uses_origin_and_rejects_superseded_source(
     record = jobs()[0]
     assert record.kind == kind and record.state == "failed"
     other = workspace.add_project(PackProject(title="Other"), dirty=False)
-    panel = workspace.tasks_panel
+    panel = workspace.tasks_window
+    panel.show_action.trigger()
     row = next(
         row for row in range(panel.table.rowCount())
         if panel.table.item(row, 0).data(Qt.ItemDataRole.UserRole) == record.id
@@ -476,7 +560,7 @@ def test_fresh_native_layout_keeps_task_and_segment_rows_clickable(workspace, qt
         for index in range(6)
     ]
     detail = QDialog(workspace)
-    workspace.tasks_panel.register_detail(jobs[-1].id, detail)
+    workspace.tasks_window.register_detail(jobs[-1].id, detail)
     available = workspace.screen().availableGeometry()
     workspace.resize(min(1500, available.width() - 40), min(850, available.height() - 80))
     qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
@@ -484,14 +568,19 @@ def test_fresh_native_layout_keeps_task_and_segment_rows_clickable(workspace, qt
     assert workspace.height() <= available.height()
     scrollbar = editor.editor_scroll.verticalScrollBar()
     assert scrollbar.objectName() == "projectEditorScrollbar"
-    assert scrollbar.isVisible()
-    qtbot.mouseClick(scrollbar, Qt.MouseButton.LeftButton, pos=scrollbar.rect().center())
-    qtbot.keyClick(scrollbar, Qt.Key.Key_Home)
-    assert scrollbar.value() == 0
-    qtbot.keyClick(scrollbar, Qt.Key.Key_PageDown)
-    assert scrollbar.value() > 0
-    qtbot.keyClick(scrollbar, Qt.Key.Key_Home)
-    for table in (workspace.tasks_panel.table, editor.segment_table):
+    if scrollbar.isVisible():
+        qtbot.mouseClick(scrollbar, Qt.MouseButton.LeftButton, pos=scrollbar.rect().center())
+        qtbot.keyClick(scrollbar, Qt.Key.Key_Home)
+        assert scrollbar.value() == 0
+        qtbot.keyClick(scrollbar, Qt.Key.Key_PageDown)
+        assert scrollbar.value() > 0
+        qtbot.keyClick(scrollbar, Qt.Key.Key_Home)
+    for table in (editor.segment_table, workspace.tasks_window.table):
+        if table is workspace.tasks_window.table:
+            geometry = workspace.tabs.geometry()
+            workspace.tasks_window.show_action.trigger()
+            QApplication.processEvents()
+            assert workspace.tabs.geometry() == geometry
         assert table.viewport().height() >= 2 * table.verticalHeader().defaultSectionSize(), (
             table.objectName(), table.size(), table.viewport().size(), workspace.size(), available
         )
@@ -507,16 +596,16 @@ def test_fresh_native_layout_keeps_task_and_segment_rows_clickable(workspace, qt
         )
         qtbot.mouseClick(table.viewport(), Qt.MouseButton.LeftButton, pos=rectangle.center())
         assert table.currentRow() == table.rowCount() - 1
-    assert workspace.tasks_panel.detail_button.isEnabled()
-    assert workspace.tasks_panel.details.visibleRegion().boundingRect().height() >= 32, (
-        workspace.tasks_panel.geometry(), workspace.tasks_panel.minimumSizeHint(),
-        workspace.tasks_panel.widget().geometry(), workspace.tasks_panel.widget().minimumSizeHint(),
-        workspace.tasks_panel.table.geometry(), workspace.tasks_panel.details.geometry(),
-        workspace.tasks_panel.details.minimumHeight(),
+    assert workspace.tasks_window.detail_button.isEnabled()
+    assert workspace.tasks_window.details.visibleRegion().boundingRect().height() >= 32, (
+        workspace.tasks_window.geometry(), workspace.tasks_window.minimumSizeHint(),
+        workspace.tasks_window.table.geometry(), workspace.tasks_window.details.geometry(),
+        workspace.tasks_window.details.minimumHeight(),
     )
-    qtbot.mouseClick(workspace.tasks_panel.detail_button, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(workspace.tasks_window.detail_button, Qt.MouseButton.LeftButton)
     assert detail.isVisible()
     detail.close()
+    workspace.tasks_window.close()
     QApplication.processEvents()
     root = editor.editor_splitter.parentWidget()
     assert root.grab().toImage().pixelColor(2, 2).name() == "#080d14"
@@ -887,13 +976,13 @@ def test_close_keeps_qobjects_alive_until_operation_cleanup_finishes(
     assert worker.job_handle.record.active
     assert not completed_on
     if not close_workspace:
-        workspace.tasks_panel.refresh()
-        for row in range(workspace.tasks_panel.table.rowCount()):
-            if workspace.tasks_panel.table.item(row, 0).data(Qt.ItemDataRole.UserRole) == worker.job_handle.id:
-                workspace.tasks_panel.table.selectRow(row)
+        workspace.tasks_window.show_action.trigger()
+        for row in range(workspace.tasks_window.table.rowCount()):
+            if workspace.tasks_window.table.item(row, 0).data(Qt.ItemDataRole.UserRole) == worker.job_handle.id:
+                workspace.tasks_window.table.selectRow(row)
                 break
-        assert not workspace.tasks_panel.project_button.isEnabled()
-        workspace.tasks_panel._show_project()
+        assert not workspace.tasks_window.restore_button.isEnabled()
+        workspace.tasks_window._restore_project()
         assert workspace.tabs.indexOf(editor) == -1
     cleanup_release.set()
     qtbot.waitUntil(lambda: bool(completed_on))
@@ -999,11 +1088,10 @@ def test_cancelling_queued_close_save_keeps_workspace_open_and_retryable(
     qtbot.mouseClick(box.button(QMessageBox.StandardButton.Save), Qt.MouseButton.LeftButton)
     save = next(record for record in workspace.job_manager.tasks(editor.session.id) if record.kind == "save")
     assert save.active and save.state != "running"
-    workspace.tasks_panel.show()
-    workspace.tasks_panel.refresh()
-    workspace.tasks_panel.table.selectRow(0)
-    qtbot.waitUntil(workspace.tasks_panel.cancel_button.isVisible)
-    qtbot.mouseClick(workspace.tasks_panel.cancel_button, Qt.MouseButton.LeftButton)
+    workspace.tasks_window.show_action.trigger()
+    workspace.tasks_window.table.selectRow(0)
+    qtbot.waitUntil(workspace.tasks_window.cancel_button.isVisible)
+    qtbot.mouseClick(workspace.tasks_window.cancel_button, Qt.MouseButton.LeftButton)
     qtbot.waitUntil(lambda: workspace.job_manager.handle(save.id).record.state == "cancelled")
     qtbot.waitUntil(lambda: not workspace._closing)
     assert editor.dirty and workspace.isVisible()

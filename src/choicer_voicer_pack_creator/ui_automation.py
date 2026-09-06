@@ -30,8 +30,8 @@ T = TypeVar("T")
 SELECTORS = frozenset({
     "projectTabs", "projectTitle", "segmentCaption", "segmentsTable",
     "saveProject", "exportProject", "analyzeProject",
-    "tasksDock", "taskProjectFilter", "tasksTable", "taskLog",
-    "taskShowProject", "taskCancel", "taskRetry", "taskOpenOutput", "taskDetails",
+    "showTasks", "tasksWindow", "taskProjectFilter", "tasksTable", "taskLog",
+    "taskRestoreProject", "taskCancel", "taskRetry", "taskOpenOutput", "taskDetails",
     "exportDetailsClose",
     "projectCloseKeepProcessing", "projectCloseCancelTasks", "projectCloseKeepOpen",
     "projectCloseSave", "projectCloseDiscard", "projectCloseCancel",
@@ -53,7 +53,7 @@ KEYS = {
     "Up": Qt.Key.Key_Up, "Down": Qt.Key.Key_Down,
 }
 TASK_ACTIONS = frozenset({
-    "taskShowProject", "taskCancel", "taskRetry", "taskOpenOutput", "taskDetails",
+    "taskRestoreProject", "taskCancel", "taskRetry", "taskOpenOutput", "taskDetails",
 })
 
 
@@ -295,7 +295,7 @@ class UIAutomation:
             editor_id = editor.session.id if selector in EDITOR_SELECTORS else None
             caption_id = editor.selected_segment_id if selector == "segmentCaption" else None
             task_id = (
-                self.bridge.window.tasks_panel._selected_id() if selector in TASK_ACTIONS else None
+                self.bridge.window.tasks_window._selected_id() if selector in TASK_ACTIONS else None
             )
             record = {"action_id": uuid4().hex, "selector": selector, "state": "queued"}
             self._actions.append(record)
@@ -312,7 +312,7 @@ class UIAutomation:
                 if caption_id is not None and editor.selected_segment_id != caption_id:
                     raise ValueError("The selected segment changed before typing.")
                 if selector in TASK_ACTIONS and (
-                    self.bridge.window.tasks_panel._selected_id() != task_id
+                    self.bridge.window.tasks_window._selected_id() != task_id
                 ):
                     raise ValueError("The selected task changed before input.")
                 if tab is not None and target.indexOf(tab) < 0:

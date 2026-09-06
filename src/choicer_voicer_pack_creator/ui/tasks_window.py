@@ -6,10 +6,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
-    QDockWidget,
+    QDialog,
     QHBoxLayout,
     QHeaderView,
     QPlainTextEdit,
@@ -27,10 +27,17 @@ if TYPE_CHECKING:
     from choicer_voicer_pack_creator.ui.main_window import MainWindow
 
 
-class TasksPanel(QDockWidget):
+class TasksWindow(QDialog):
     def __init__(self, manager: JobManager, workspace: MainWindow) -> None:
-        super().__init__("Tasks", workspace)
-        self.setObjectName("tasksDock")
+        super().__init__(workspace)
+        self.setWindowTitle("Tasks")
+        self.setObjectName("tasksWindow")
+        self.setModal(False)
+        self.setSizeGripEnabled(True)
+        self.resize(1100, 420)
+        self.show_action = QAction("Tasks", self)
+        self.show_action.setObjectName("showTasks")
+        self.show_action.triggered.connect(self.show_tasks)
         self.manager = manager
         self.workspace = workspace
         self.project_id: str | None = None
@@ -42,19 +49,18 @@ class TasksPanel(QDockWidget):
         self._details: dict[str, QWidget] = {}
         self._retry: dict[str, Callable[[], None]] = {}
         self._retry_available: dict[str, Callable[[], bool]] = {}
-        self._shown_for_task = False
-        content = QWidget(self)
-        layout = QVBoxLayout(content)
+        layout = QVBoxLayout(self)
         controls = QHBoxLayout()
         self.filter = QComboBox()
         self.filter.setObjectName("taskProjectFilter")
         self.filter.addItems(["All projects", "Current project"])
         self.filter.currentIndexChanged.connect(self.refresh)
         controls.addWidget(self.filter)
-        self.project_button = QPushButton("Show project")
-        self.project_button.setObjectName("taskShowProject")
-        self.project_button.clicked.connect(self._show_project)
-        controls.addWidget(self.project_button)
+        self.restore_button = QPushButton("Restore tab")
+        self.restore_button.setObjectName("taskRestoreProject")
+        self.restore_button.setToolTip("Restore a tab closed with Keep processing.")
+        self.restore_button.clicked.connect(self._restore_project)
+        controls.addWidget(self.restore_button)
         self.cancel_button = QPushButton("Cancel task")
         self.cancel_button.setObjectName("taskCancel")
         self.cancel_button.clicked.connect(self._cancel)
@@ -71,6 +77,11 @@ class TasksPanel(QDockWidget):
         self.detail_button.setObjectName("taskDetails")
         self.detail_button.clicked.connect(self._show_details)
         controls.addWidget(self.detail_button)
+        for button in (
+            self.restore_button, self.cancel_button, self.retry_button,
+            self.output_button, self.detail_button,
+        ):
+            button.setAutoDefault(False)
         controls.addStretch()
         layout.addLayout(controls)
         self.table = ReadableTableWidget(0, 5)
@@ -81,24 +92,32 @@ class TasksPanel(QDockWidget):
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.table.itemSelectionChanged.connect(self._selection_changed)
-        layout.addWidget(self.table)
+        layout.addWidget(self.table, 1)
         self.details = QPlainTextEdit()
         self.details.setObjectName("taskLog")
         self.details.setReadOnly(True)
         self.details.setMaximumHeight(65)
         self.details.setMinimumHeight(32)
         layout.addWidget(self.details)
-        self.setWidget(content)
         manager.changed.connect(self._changed)
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self.refresh)
-        self._timer.start()
-        self.refresh()
+        self._selection_changed()
+
+    def show_tasks(self) -> None:
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def showEvent(self, event) -> None:  # noqa: N802
-        self.setMinimumHeight(self.minimumSizeHint().height())
         super().showEvent(event)
+        self.refresh()
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        self._timer.stop()
+        super().hideEvent(event)
 
     def register_detail(self, job_id: str, widget: QWidget) -> None:
         self._details[job_id] = widget
@@ -124,13 +143,6 @@ class TasksPanel(QDockWidget):
     def _changed(self, record: JobRecord) -> None:
         if record.kind in {"recovery", "workspace"} and record.state not in {"failed", "blocked"}:
             return
-        if not self._shown_for_task and record.kind not in {"save", "recovery", "workspace"}:
-            self._shown_for_task = True
-            self.show()
-            self.workspace.resizeDocks(
-                [self], [max(260, self.minimumSizeHint().height())], Qt.Orientation.Vertical,
-            )
-        previous = self._records.get(record.id)
         self._records[record.id] = record
         if record.state == "running" and record.id not in self._starts:
             self._starts[record.id] = time.monotonic()
@@ -145,14 +157,15 @@ class TasksPanel(QDockWidget):
             del logs[:-300]
         if record.project_id in self.workspace.editors:
             editor = self.workspace.editors[record.project_id]
+            self._project_names[record.project_id] = editor.project.title
             if record.state in {"failed", "blocked"}:
                 editor.session.attention = record.error or record.message
-            elif previous is None or previous.active:
-                self.workspace.refresh_tabs()
         self.refresh()
         self.workspace.refresh_tabs()
 
     def refresh(self) -> None:
+        if not self.isVisible():
+            return
         selected = self._selected_id()
         records = [
             record for record in self.manager.tasks()
@@ -212,7 +225,7 @@ class TasksPanel(QDockWidget):
         record = self._records.get(job_id)
         available = bool(record and self._project_available(record))
         self.cancel_button.setEnabled(bool(record and record.active and not record.cancel_requested))
-        self.project_button.setEnabled(available and record.project_id is not None)
+        self.restore_button.setEnabled(bool(record and self._can_restore_project(record)))
         self.output_button.setEnabled(bool(record and self._output(record)))
         self.detail_button.setEnabled(available and job_id in self._details)
         self.retry_button.setEnabled(bool(
@@ -226,14 +239,21 @@ class TasksPanel(QDockWidget):
             session.id == record.project_id for session in self.workspace.project_sessions
         )
 
+    def _can_restore_project(self, record: JobRecord) -> bool:
+        editor = self.workspace.editors.get(record.project_id)
+        return bool(
+            editor is not None and self._project_available(record)
+            and self.workspace.tabs.indexOf(editor) < 0
+        )
+
     def _cancel(self) -> None:
         job_id = self._selected_id()
         if job_id is not None:
             self.manager.cancel(job_id)
 
-    def _show_project(self) -> None:
+    def _restore_project(self) -> None:
         record = self._records.get(self._selected_id())
-        if record and record.project_id is not None and self._project_available(record):
+        if record and self._can_restore_project(record):
             self.workspace.focus_project(record.project_id)
 
     def _open_output(self) -> None:

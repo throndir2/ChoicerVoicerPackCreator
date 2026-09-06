@@ -35,7 +35,7 @@ def test_workspace_youtube_hides_without_cancel_and_emits_async_completion(
     details = {}
     host = QDialog()
     qtbot.addWidget(host)
-    host.workspace = SimpleNamespace(tasks_panel=SimpleNamespace(
+    host.workspace = SimpleNamespace(tasks_window=SimpleNamespace(
         register_detail=lambda job_id, widget: details.__setitem__(job_id, widget),
     ))
     dialog = youtube_dialog.YouTubeDialog(

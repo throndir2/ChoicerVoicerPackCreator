@@ -43,7 +43,7 @@ def test_workspace_backing_download_consent_survives_hidden_review(qtbot, tmp_pa
     details = {}
     host = QDialog()
     qtbot.addWidget(host)
-    host.workspace = SimpleNamespace(tasks_panel=SimpleNamespace(
+    host.workspace = SimpleNamespace(tasks_window=SimpleNamespace(
         register_detail=lambda job_id, widget: details.__setitem__(job_id, widget),
     ))
     dialog = backing_dialog.BackingDialog(

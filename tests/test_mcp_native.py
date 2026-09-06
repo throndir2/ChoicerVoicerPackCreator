@@ -216,6 +216,7 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
             assert (await call("get_project", project_id=a["project_id"]))["revision"] == a["revision"]
             assert (await call("get_project", project_id=b["project_id"]))["revision"] == b["revision"]
 
+            await interact("showTasks", "click")
             task_table = next(
                 item for item in (await state())["widgets"] if item["selector"] == "tasksTable"
             )
@@ -223,6 +224,7 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
             await interact("tasksTable", "select", index=export_row)
             await interact("taskDetails", "click")
             await interact("exportDetailsClose", "click")
+            await interact("tasksWindow", "key", key="Escape")
             assert not (await call("get_job", job_id=export["job_id"]))["cancel_requested"]
             await interact("projectTitle", "reveal", project_id=c["project_id"])
             await interact("projectTitle", "click", project_id=c["project_id"])
@@ -255,6 +257,7 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
                     if running["state"] == "running" and running["message"] != "Starting":
                         break
                     await anyio.sleep(0.02)
+            await interact("showTasks", "click")
             task_table = next(
                 item for item in (await state())["widgets"] if item["selector"] == "tasksTable"
             )
@@ -262,6 +265,7 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
                 "tasksTable", "select", index=task_table["row_ids"].index(cancel_export["job_id"])
             )
             await interact("taskCancel", "click")
+            await interact("tasksWindow", "key", key="Escape")
             cancelled = await call("get_job", job_id=cancel_export["job_id"])
             assert cancelled["cancel_requested"]
             cancelled = await terminal(cancel_export["job_id"])

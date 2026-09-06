@@ -152,6 +152,6 @@ class LiveJobs:
 
                 handle.completed.connect(completed)
                 handle.finished.connect(finished)
-                self.bridge.window.tasks_panel.register_detail(handle.id, dialog)
+                self.bridge.window.tasks_window.register_detail(handle.id, dialog)
             return describe_job(handle.record)
         return self.bridge.call(submit)

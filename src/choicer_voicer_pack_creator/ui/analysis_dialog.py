@@ -81,14 +81,14 @@ def register_job_detail(
     available: Callable[[], bool] | None = None,
 ) -> None:
     workspace = getattr(dialog.parentWidget(), "workspace", None)
-    panel = getattr(workspace, "tasks_panel", None)
-    if panel is not None and worker.job_handle is not None:
-        panel.register_detail(worker.job_handle.id, dialog)
-        if retry is not None and available is not None and hasattr(panel, "register_retry"):
+    tasks = getattr(workspace, "tasks_window", None)
+    if tasks is not None and worker.job_handle is not None:
+        tasks.register_detail(worker.job_handle.id, dialog)
+        if retry is not None and available is not None and hasattr(tasks, "register_retry"):
             current = _current_dialog_request(dialog)
             job_id = worker.job_handle.id
-            panel.register_retry(job_id, retry, available=lambda: current() and available())
-            dialog.destroyed.connect(lambda: panel.unregister_retry(job_id))
+            tasks.register_retry(job_id, retry, available=lambda: current() and available())
+            dialog.destroyed.connect(lambda: tasks.unregister_retry(job_id))
 
 
 def _job_manager_for(parent: QWidget):
