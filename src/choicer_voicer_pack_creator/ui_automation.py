@@ -37,6 +37,9 @@ KEYS = {
     "Tab": Qt.Key.Key_Tab, "Backspace": Qt.Key.Key_Backspace,
     "Space": Qt.Key.Key_Space, "Delete": Qt.Key.Key_Delete,
 }
+TASK_ACTIONS = frozenset({
+    "taskShowProject", "taskCancel", "taskRetry", "taskOpenOutput", "taskDetails",
+})
 
 
 class Bridge(Protocol):
@@ -179,6 +182,19 @@ class UIAutomation:
                     raise ValueError("Selection index is outside the available items.")
             elif action != "click":
                 raise ValueError("Unsupported UI action.")
+            tab = target.widget(index) if isinstance(target, QTabWidget) and index is not None else None
+            row_id = None
+            if isinstance(target, QTableWidget) and action == "select":
+                item = target.item(index, 0)
+                if item is None or item.data(Qt.ItemDataRole.UserRole) is None:
+                    raise ValueError("The selected row has no stable identity.")
+                row_id = item.data(Qt.ItemDataRole.UserRole)
+            editor = self.bridge.window.active_editor
+            editor_id = editor.session.id if selector in EDITOR_SELECTORS else None
+            caption_id = editor.selected_segment_id if selector == "segmentCaption" else None
+            task_id = (
+                self.bridge.window.tasks_panel._selected_id() if selector in TASK_ACTIONS else None
+            )
             record = {"action_id": uuid4().hex, "selector": selector, "state": "queued"}
             self._actions.append(record)
 
@@ -189,6 +205,17 @@ class UIAutomation:
                         raise ValueError("Target became hidden or disabled before input.")
                     if project_id and self.bridge.window.active_editor.session.id != project_id:
                         raise ValueError("The active project changed before input.")
+                    if editor_id and self.bridge.window.active_editor.session.id != editor_id:
+                        raise ValueError("The active project changed before input.")
+                    if caption_id is not None and editor.selected_segment_id != caption_id:
+                        raise ValueError("The selected segment changed before typing.")
+                    if selector in TASK_ACTIONS and (
+                        self.bridge.window.tasks_panel._selected_id() != task_id
+                    ):
+                        raise ValueError("The selected task changed before input.")
+                    tab_index = target.indexOf(tab) if tab is not None else None
+                    if tab_index is not None and tab_index < 0:
+                        raise ValueError("The target tab closed before input.")
                     modal = QApplication.activeModalWidget()
                     if modal is not None and (
                         not isinstance(target, QWidget)
@@ -227,20 +254,24 @@ class UIAutomation:
                     elif action == "close_tab":
                         from PySide6.QtWidgets import QTabBar
                         bar = target.tabBar()
-                        button = bar.tabButton(index, QTabBar.ButtonPosition.RightSide)
+                        button = bar.tabButton(tab_index, QTabBar.ButtonPosition.RightSide)
                         if button is None:
-                            button = bar.tabButton(index, QTabBar.ButtonPosition.LeftSide)
+                            button = bar.tabButton(tab_index, QTabBar.ButtonPosition.LeftSide)
                         if button is None:
                             raise ValueError("The tab has no close button.")
                         QTest.mouseClick(button, Qt.MouseButton.LeftButton)
                     elif action == "select" and isinstance(target, QTabWidget):
                         bar = target.tabBar()
                         QTest.mouseClick(bar, Qt.MouseButton.LeftButton,
-                                         pos=bar.tabRect(index).center())
+                                         pos=bar.tabRect(tab_index).center())
                     elif action == "select" and isinstance(target, QTableWidget):
-                        item = target.item(index, 0)
+                        item = next((
+                            target.item(row, 0) for row in range(target.rowCount())
+                            if target.item(row, 0) is not None
+                            and target.item(row, 0).data(Qt.ItemDataRole.UserRole) == row_id
+                        ), None)
                         if item is None:
-                            raise ValueError("Selected row has no visible item.")
+                            raise ValueError("Selected row is no longer available.")
                         target.scrollToItem(item)
                         QTest.mouseClick(target.viewport(), Qt.MouseButton.LeftButton,
                                          pos=target.visualItemRect(item).center())

@@ -371,3 +371,40 @@ def test_analysis_job_keeps_submitted_snapshot_without_applying_stale_result(
     assert window.active_editor is second
     with pytest.raises(ValueError, match="Project changed"):
         in_worker(qtbot, lambda: jobs.start(bound, "analysis", before["revision"]))
+
+
+def test_queued_tab_close_keeps_identity_when_tabs_reorder(qtbot, live_editor):
+    from choicer_voicer_pack_creator.ui_automation import UIAutomation
+
+    window, bridge, _automation = live_editor
+    hooks = UIAutomation(bridge)
+    first = window.active_editor
+    second = window.add_project(PackProject(title="Second"), dirty=False)
+    window.focus_project(first.session.id)
+    index = window.tabs.indexOf(first)
+    accepted = hooks.interact("projectTabs", "close_tab", first.session.id, index=index)
+    window.tabs.tabBar().moveTab(index, window.tabs.indexOf(second))
+    qtbot.waitUntil(lambda: window.tabs.indexOf(first) < 0)
+    assert window.tabs.indexOf(second) >= 0
+    record = next(item for item in hooks.state()["actions"] if item["action_id"] == accepted["action_id"])
+    assert record["state"] == "completed"
+
+
+def test_queued_caption_input_rejects_changed_segment_selection(qtbot, live_editor):
+    from choicer_voicer_pack_creator.ui_automation import UIAutomation
+
+    window, bridge, _automation = live_editor
+    hooks = UIAutomation(bridge)
+    editor = window.active_editor
+    first = editor.project.segments[0]
+    second = Segment(3, 4, "Second caption", ["Tester"])
+    editor.project.segments.append(second)
+    editor._refresh_table(first.id)
+    accepted = hooks.interact("segmentCaption", "type", text="Must not apply")
+    editor.select_segment(second.id)
+    qtbot.waitUntil(lambda: hooks.state()["actions"][-1]["state"] == "failed")
+    record = hooks.state()["actions"][-1]
+    assert record["action_id"] == accepted["action_id"]
+    assert "selected segment changed" in record["error"]
+    assert first.caption == "Original"
+    assert second.caption == "Second caption"
