@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSlider,
     QSpinBox,
@@ -254,7 +255,13 @@ class ProjectEditor(QWidget):
         self._document_layout.addWidget(toolbar)
 
     def setCentralWidget(self, widget: QWidget) -> None:  # noqa: N802
-        self._document_layout.addWidget(widget, 1)
+        scroll = QScrollArea(self)
+        scroll.setObjectName("projectEditorScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(widget)
+        self.editor_scroll = scroll
+        self._document_layout.addWidget(scroll, 1)
 
     @property
     def project(self) -> PackProject:
@@ -432,6 +439,8 @@ class ProjectEditor(QWidget):
         root_layout.addWidget(splitter, 1)
 
         left = QFrame(splitter)
+        left.setObjectName("projectEditorPanel")
+        left.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         left.setFrameShape(QFrame.Shape.StyledPanel)
         left.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         left_layout = QVBoxLayout(left)

@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QPlainTextEdit,
     QPushButton,
-    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -87,7 +86,6 @@ class TasksPanel(QDockWidget):
         self.details.setReadOnly(True)
         self.details.setMaximumHeight(65)
         self.details.setMinimumHeight(32)
-        self.details.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         layout.addWidget(self.details)
         self.setWidget(content)
         manager.changed.connect(self._changed)
@@ -96,6 +94,10 @@ class TasksPanel(QDockWidget):
         self._timer.timeout.connect(self.refresh)
         self._timer.start()
         self.refresh()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        self.setMinimumHeight(self.minimumSizeHint().height())
+        super().showEvent(event)
 
     def register_detail(self, job_id: str, widget: QWidget) -> None:
         self._details[job_id] = widget
