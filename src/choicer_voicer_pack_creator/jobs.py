@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from contextvars import copy_context
 from dataclasses import dataclass, replace
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from typing import Any
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, QThread, QTimer, Signal, Slot
@@ -100,7 +100,12 @@ class JobContext:
     def report(self, message: str, fraction: float | None = None, *, detail: Any = None) -> None:
         if fraction is not None and (not math.isfinite(fraction) or not 0 <= fraction <= 1):
             raise ValueError("Progress fraction must be finite and between 0 and 1")
-        self._manager._events.emit((self.job_id, "progress", (message, fraction, detail)))
+        if detail is not None:
+            # Rich events can establish a plan or close an estimator stage: unlike
+            # plain text updates they must reach consumers in their original order.
+            self._manager._events.emit((self.job_id, "detail", (message, fraction, detail)))
+        else:
+            self._manager._post_progress(self.job_id, (message, fraction, None))
 
     @contextmanager
     def critical_stage(self, message: str):
@@ -114,7 +119,7 @@ class JobContext:
 @dataclass(slots=True)
 class _Task:
     handle: JobHandle
-    operation: Callable[[JobContext], Any]
+    operation: Callable[[JobContext], Any] | None
     requests: tuple
     dependencies: tuple[str, ...]
     lease: str | None = None
@@ -148,6 +153,8 @@ class JobManager(QObject):
         self._tasks: dict[str, _Task] = {}
         self._running = dict.fromkeys(self.limits, 0)
         self._closed = False
+        self._progress_lock = Lock()
+        self._pending_progress: dict[str, tuple] = {}
         self._events.connect(self._receive, Qt.ConnectionType.QueuedConnection)
         self._timer = QTimer(self)
         self._timer.setInterval(100)
@@ -235,6 +242,9 @@ class JobManager(QObject):
     @Slot()
     def _schedule(self) -> None:
         self._assert_thread()
+        if self._closed:
+            self._timer.stop()
+            return
         for task in tuple(self._tasks.values()):
             handle = task.handle
             if handle.record.state not in {"queued", "waiting"}:
@@ -274,6 +284,7 @@ class JobManager(QObject):
                 cancelled=context._cancel.is_set, progress=context.report,
                 owner=context.job_id, committed=context._mark_committed,
             ):
+                assert task.operation is not None
                 result = task.operation(context)
                 if not context._committed:
                     context.check_cancelled()
@@ -288,15 +299,28 @@ class JobManager(QObject):
                 leases.release(task.lease)
             self._events.emit((context.job_id, "finished", (state, result, error)))
 
+    def _post_progress(self, job_id: str, value: tuple) -> None:
+        with self._progress_lock:
+            pending = job_id in self._pending_progress
+            self._pending_progress[job_id] = value
+            if not pending:
+                self._events.emit((job_id, "progress", None))
+
     @Slot(object)
     def _receive(self, event: tuple) -> None:
         job_id, kind, value = event
         handle = self._tasks[job_id].handle
-        if kind == "progress":
+        if kind in {"progress", "detail"}:
+            if kind == "progress":
+                with self._progress_lock:
+                    value = self._pending_progress.pop(job_id)
             if not handle.record.active:
                 return
             message, fraction, detail = value
-            self._update(handle, message=message, fraction=fraction, detail=detail)
+            self._update(
+                handle, message=message, fraction=fraction,
+                detail=detail if detail is not None else handle.record.detail,
+            )
             handle.progress.emit(message, fraction)
             if detail is not None:
                 handle.detail.emit(detail)
@@ -306,6 +330,7 @@ class JobManager(QObject):
             self._schedule()
 
     def _finish(self, handle: JobHandle, state: str, result: Any, error: str | None) -> None:
+        self._tasks[handle.id].operation = None
         self._update(
             handle, state=state, finished_at=time.time(), result=result, error=error,
             message=error or state.capitalize(), fraction=None,
@@ -318,12 +343,13 @@ class JobManager(QObject):
 
     def shutdown(self, *, cancel: bool = True, wait: bool = False) -> None:
         self._assert_thread()
+        if not cancel and self.active_jobs():
+            raise RuntimeError("Wait for active jobs before shutting down without cancellation")
         self._closed = True
+        self._timer.stop()
         if cancel:
             for record in self.active_jobs():
                 self.cancel(record.id)
-        if not cancel and self.active_jobs():
-            raise RuntimeError("Wait for active jobs before shutting down without cancellation")
         self._executor.shutdown(wait=wait)
         if wait:
             QCoreApplication.sendPostedEvents(self, QEvent.Type.MetaCall)

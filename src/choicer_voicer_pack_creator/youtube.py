@@ -36,6 +36,7 @@ from choicer_voicer_pack_creator.diagnostics import (
 )
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import SourceCaption
+from choicer_voicer_pack_creator.operations import OperationCancelled
 from choicer_voicer_pack_creator.process_worker import (
     ProcessWorkerCancelled,
     ProcessWorkerError,
@@ -54,7 +55,7 @@ class YouTubeError(ValueError):
     pass
 
 
-class YouTubeCancelled(DownloadCancelled):
+class YouTubeCancelled(DownloadCancelled, OperationCancelled):
     pass
 
 

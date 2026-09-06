@@ -212,3 +212,42 @@ def test_backend_nested_leases_reuse_job_owner(qtbot, manager, tmp_path):
     handle = manager.submit("one", "export", "Export", operation, write_paths=[tmp_path])
     finish(qtbot, manager)
     assert handle.record.result == "ok"
+
+
+def test_progress_is_coalesced_without_inventing_final_percentage(qtbot, manager):
+    reported = threading.Event()
+
+    def operation(context):
+        for index in range(10000):
+            context.report("Measured items", index / 10000)
+        reported.set()
+
+    received = []
+    handle = manager.submit("one", "test", "Progress", operation)
+    handle.progress.connect(lambda message, fraction: received.append(fraction))
+    manager._schedule()
+    assert reported.wait(3)
+    finish(qtbot, manager)
+    assert received == [0.9999]
+    assert handle.record.fraction is None
+    assert handle.record.detail is None
+
+
+def test_rich_progress_retains_plan_and_stage_events(qtbot, manager):
+    reported = threading.Event()
+
+    def operation(context):
+        context.report("Plan", detail=("plan", 3))
+        context.report("Encoding", detail=("encoding", 1))
+        context.report("Probing")
+        context.report("Publishing", detail=("publication", 2))
+        reported.set()
+
+    received = []
+    handle = manager.submit("one", "export", "Export", operation)
+    handle.detail.connect(received.append)
+    manager._schedule()
+    assert reported.wait(3)
+    finish(qtbot, manager)
+    assert received == [("plan", 3), ("encoding", 1), ("publication", 2)]
+    assert handle.record.detail == ("publication", 2)
