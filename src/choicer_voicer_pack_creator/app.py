@@ -6,9 +6,10 @@ import sys
 import tempfile
 import wave
 from array import array
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import (
     QCoreApplication,
@@ -30,6 +31,9 @@ from choicer_voicer_pack_creator.diagnostics import (
     diagnostic_event,
     diagnostic_exception,
 )
+
+if TYPE_CHECKING:
+    from choicer_voicer_pack_creator.ui.main_window import MainWindow
 
 
 class _DiagnosticNotifications(QObject):
@@ -61,6 +65,19 @@ def _qt_message(kind, context, message: str) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(argv) if argv is not None else sys.argv
+    if "--mcp" in arguments:
+        from choicer_voicer_pack_creator.mcp_server import main as mcp_main
+
+        return mcp_main([item for item in arguments[1:] if item != "--mcp"])
+    return run_editor(arguments)
+
+
+def run_editor(
+    argv: Sequence[str],
+    *,
+    start_automation: Callable[[MainWindow], object] | None = None,
+) -> int:
+    arguments = list(argv)
     smoke_test = "--smoke-test" in arguments
     QCoreApplication.setOrganizationName("ChoicerVoicerCommunity")
     QCoreApplication.setApplicationName("Choicer Voicer Pack Creator")
@@ -73,11 +90,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             app_data.mkdir(parents=True, exist_ok=True)
         except OSError as error:
+            if start_automation is not None:
+                print(f"Application data is unavailable: {error}", file=sys.stderr)
+                return 2
             app = QApplication(arguments)
             QMessageBox.critical(None, "Application data is unavailable", str(error))
             return 2
         instance_lock = QLockFile(str(app_data / "application-instance.lock"))
         if not instance_lock.tryLock(100):
+            if start_automation is not None:
+                print(
+                    "The editor is already running. Close it before starting live MCP, "
+                    "or use --headless with a separate project.",
+                    file=sys.stderr,
+                )
+                return 3
             app = QApplication(arguments)
             QMessageBox.warning(
                 None,
@@ -100,6 +127,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             stack.enter_context(diagnostics)
         except OSError as error:
+            if start_automation is not None:
+                print(f"Diagnostic logging is unavailable: {error}", file=sys.stderr)
+                return 2
             app = QApplication(arguments)
             QMessageBox.critical(
                 None, "Diagnostic logging is unavailable",
@@ -125,12 +155,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         stack.callback(heartbeat.stop)
         diagnostics.exit_code = _run_application(
             arguments, app, data_root, smoke_test=smoke_test,
+            start_automation=start_automation,
         )
         return diagnostics.exit_code
 
 
 def _run_application(
     arguments: list[str], app: QApplication, app_data: Path, *, smoke_test: bool,
+    start_automation: Callable[[MainWindow], object] | None = None,
 ) -> int:
     # Import optional/native workflows after the diagnostic sink and exception hooks exist.
     from choicer_voicer_pack_creator.analysis import (
@@ -156,6 +188,9 @@ def _run_application(
         media = MediaTools()
     except MediaError as error:
         diagnostic_exception("media_tools_unavailable", error)
+        if start_automation is not None:
+            print(f"FFmpeg is unavailable: {error}", file=sys.stderr)
+            return 2
         QMessageBox.critical(
             None,
             "FFmpeg is unavailable",
@@ -256,11 +291,13 @@ def _run_application(
         analysis_data_root=app_data / "analysis",
     )
     window.show()
+    if start_automation is not None:
+        window.automation_runtime = start_automation(window)
     diagnostic_event("main_window_ready", initial_path=initial_path)
     if smoke_test:
         window.dirty = False
         QTimer.singleShot(350, app.quit)
-    else:
+    elif start_automation is None:
         result_argument = next(
             (item.split("=", 1)[1] for item in arguments if item.startswith("--update-result=")),
             None,
