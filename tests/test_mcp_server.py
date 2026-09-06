@@ -190,3 +190,27 @@ def test_live_cli_exits_on_stdin_eof(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
+
+
+@pytest.mark.parametrize("flag", ["--data-root", "--test-data-root"])
+def test_mcp_cli_forwards_isolated_root_and_keeps_ui_opt_in(tmp_path, monkeypatch, flag):
+    from choicer_voicer_pack_creator import app, mcp_server
+
+    captured = {}
+
+    def run_editor(arguments, *, start_automation):
+        captured.update(arguments=arguments, hooks=start_automation.keywords["ui_test_hooks"])
+        return 0
+
+    monkeypatch.setattr(app, "run_editor", run_editor)
+    assert mcp_server.main([flag, str(tmp_path), "--ui-test-hooks"]) == 0
+    assert captured["arguments"][1:] == ["--data-root", str(tmp_path)]
+    assert captured["hooks"]
+
+
+def test_headless_rejects_relative_profile_root():
+    from choicer_voicer_pack_creator.mcp_server import main
+
+    with pytest.raises(SystemExit) as error:
+        main(["--headless", "--data-root", "relative-profile"])
+    assert error.value.code == 2

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from choicer_voicer_pack_creator.automation import (
     HeadlessProjectAccess,
@@ -12,8 +12,12 @@ from choicer_voicer_pack_creator.automation import (
 )
 from choicer_voicer_pack_creator.exporter import safe_name
 
+if TYPE_CHECKING:
+    from choicer_voicer_pack_creator.jobs import JobRecord
+    from choicer_voicer_pack_creator.mcp_gui import EditorBridge
 
-def describe_job(record) -> dict[str, Any]:
+
+def describe_job(record: JobRecord) -> dict[str, Any]:
     return {
         "job_id": record.id, "project_id": record.project_id,
         "kind": record.kind, "title": record.title, "state": record.state,
@@ -28,15 +32,17 @@ def describe_job(record) -> dict[str, Any]:
 class LiveJobs:
     """Submit to the visible workspace's scheduler; never maintain a second task list."""
 
-    def __init__(self, bridge) -> None:
+    def __init__(self, bridge: EditorBridge) -> None:
         self.bridge = bridge
 
     def list(self, project_id: str | None = None) -> dict[str, Any]:
         def read():
-            if project_id is not None:
-                self.bridge.window.editor_for_project(project_id)
             manager = self.bridge.window.job_manager
             records = manager.tasks() if project_id is None else manager.tasks(project_id)
+            if project_id is not None and not records and project_id not in {
+                session.id for session in self.bridge.window.project_sessions
+            }:
+                raise ValueError(f"Unknown project_id: {project_id}")
             return {"jobs": [describe_job(record) for record in records]}
         return self.bridge.call(read)
 
@@ -79,7 +85,7 @@ class LiveJobs:
             def operation(ctx):
                 return frozen.export_pack(
                     str(parent), expected_revision, overwrite,
-                    lambda detail: ctx.report(detail.message, detail=detail),
+                    lambda detail: ctx.report(detail.message, detail.fraction, detail=detail),
                 )
         elif kind == "analysis":
             if use_whisper and not allow_download:
@@ -99,7 +105,7 @@ class LiveJobs:
         def submit():
             # A human edit between request capture and GUI scheduling must not silently
             # change which snapshot was accepted.
-            require_revision(automation.access._snapshot(), expected_revision)
+            require_revision(automation.access.snapshot(), expected_revision)
             handle = self.bridge.window.job_manager.submit(
                 snapshot.project_id, kind, f"MCP {kind}: {snapshot.project.title}", operation,
                 resource_class="cpu", resource_keys=keys, read_paths=reads, write_paths=writes,

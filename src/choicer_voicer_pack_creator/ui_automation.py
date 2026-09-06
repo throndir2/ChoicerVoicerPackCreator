@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Literal, Protocol
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 from uuid import uuid4
 
 from PySide6.QtCore import QBuffer, QIODevice, QObject, Qt, QTimer
@@ -19,6 +20,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+if TYPE_CHECKING:
+    from choicer_voicer_pack_creator.ui.main_window import MainWindow
+
+T = TypeVar("T")
 SELECTORS = frozenset({
     "projectTabs", "projectTitle", "segmentCaption", "segmentsTable",
     "saveProject", "exportProject", "analyzeProject",
@@ -43,9 +48,9 @@ TASK_ACTIONS = frozenset({
 
 
 class Bridge(Protocol):
-    window: Any
+    window: MainWindow
 
-    def call(self, function): ...
+    def call(self, function: Callable[[], T]) -> T: ...
 
 
 class UIAutomation:

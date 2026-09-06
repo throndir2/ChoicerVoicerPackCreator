@@ -32,7 +32,8 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 INSTRUCTIONS = (
     "Create Choicer Voicer packs using the editor's own project, media and export services. "
-    "Start with get_help and get_project. Use absolute local paths. Get permission before "
+    "Start with get_help, list_projects and get_project. Pass stable project_id on project tools. "
+    "New/open/import preserve other documents. Use absolute local paths. Get permission before "
     "overwriting outputs, discarding unsaved edits, or downloading Whisper components. "
     "Read revision from each project result and supply expected_revision on edits/save/export. "
     "Review frames/audio and draft analysis; never guess exact captions or speaker identity. "
@@ -40,6 +41,9 @@ INSTRUCTIONS = (
     "Save a .cvpack.json before export. No source media is rewritten. Previews are sent to "
     "the MCP client and may be uploaded to its model provider; get the user's permission. "
     "Only use media the user has permission to use."
+    " In live mode prefer start_export/start_analysis and inspect get_job: queued is NOT success. "
+    "Cancel with cancel_job and wait for terminal cleanup. Semantic tools/get_frame do not prove UI "
+    "behavior; opt-in UI tools inspect the actual application window, not the desktop."
 )
 
 
@@ -400,10 +404,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--headless", action="store_true",
         help="Run without an editor window (default: launch a visible, live-controlled editor).",
     )
-    parser.add_argument("--data-root", type=Path, help="Isolated app data/settings/recovery/lock root.")
+    parser.add_argument(
+        "--data-root", "--test-data-root", type=Path,
+        help="Absolute isolated app data/settings/recovery/lock root.",
+    )
     parser.add_argument("--ui-test-hooks", action="store_true",
                         help="Opt in to application-local UI input/state/screenshot tools (live only).")
     options = parser.parse_args(argv)
+    if options.data_root is not None and not options.data_root.is_absolute():
+        parser.error("--data-root must be an absolute directory path.")
     if sys.stdin is None or sys.stdout is None:
         parser.error("stdio is unavailable. Use Choicer Voicer MCP.exe, not the windowed desktop EXE.")
     if not options.headless:
@@ -413,14 +422,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         editor_args = [sys.argv[0]]
         if options.data_root is not None:
             editor_args.extend(["--data-root", str(options.data_root)])
-        if options.ui_test_hooks:
-            editor_args.append("--ui-test-hooks")
         return run_editor(
             editor_args,
             start_automation=partial(start_live_server, ui_test_hooks=options.ui_test_hooks),
         )
     data_root = options.data_root or (
-        Path(os.environ.get("LOCALAPPDATA", str(Path.home() / ".local" / "share")) )
+        Path(os.environ.get("LOCALAPPDATA", str(Path.home() / ".local" / "share")))
         / "ChoicerVoicerCommunity" / "Choicer Voicer Pack Creator"
     )
     automation = PackAutomation(

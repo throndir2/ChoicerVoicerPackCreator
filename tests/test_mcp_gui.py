@@ -408,3 +408,70 @@ def test_queued_caption_input_rejects_changed_segment_selection(qtbot, live_edit
     assert "selected segment changed" in record["error"]
     assert first.caption == "Original"
     assert second.caption == "Second caption"
+
+
+def test_mcp_save_respects_pending_gui_destination_reservation(
+    qtbot, live_editor, tmp_path, monkeypatch,
+):
+    window, _bridge, automation = live_editor
+    first = window.active_editor
+    second = window.add_project(PackProject(title="Second"), dirty=False)
+    started, release = threading.Event(), threading.Event()
+    original = ProjectStore.save
+
+    def held_save(project, destination):
+        started.set()
+        assert release.wait(10)
+        original(project, destination)
+
+    monkeypatch.setattr(ProjectStore, "save", held_save)
+    destination = tmp_path / "reserved.cvpack.json"
+    assert window.save_editor(first, destination=destination)
+    try:
+        qtbot.waitUntil(started.is_set)
+        current = in_worker(qtbot, automation.get_project)
+        with pytest.raises(ValueError, match="another save path"):
+            in_worker(qtbot, lambda: automation.save_project(
+                current["revision"], str(destination), overwrite=True
+            ))
+        assert second.project_path is None
+    finally:
+        release.set()
+    qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
+    assert ProjectStore.load(destination).title == "Live"
+    assert not window._save_tokens
+
+
+def test_closed_pending_document_is_not_reactivated_by_mcp(qtbot, live_editor, tmp_path):
+    from choicer_voicer_pack_creator.ui_automation import UIAutomation
+
+    window, bridge, automation = live_editor
+    editor = window.active_editor
+    path = tmp_path / "closed.cvpack.json"
+    project = PackProject(title="Saved disk", authors=["Tester"])
+    ProjectStore.save(project, path)
+    editor._set_project(project, path, False)
+    editor.title_edit.setText("Discarded draft")
+    old_id = editor.session.id
+    release = threading.Event()
+    job = window.job_manager.submit(
+        old_id, "recovery", "Held recovery", lambda _ctx: release.wait(10), resource_class="io",
+    )
+    hooks = UIAutomation(bridge)
+    try:
+        qtbot.waitUntil(lambda: job.record.state == "running")
+        window.close_project_tab(window.tabs.indexOf(editor))
+        hooks.interact("projectCloseDiscard", "click")
+        qtbot.waitUntil(lambda: old_id not in {session.id for session in window.project_sessions})
+        assert old_id in window.editors  # Retained solely until the pending job finishes.
+        with pytest.raises(ValueError, match="Unknown project_id"):
+            in_worker(qtbot, lambda: automation.for_project(old_id))
+        with pytest.raises(ValueError, match="Unknown project_id"):
+            in_worker(qtbot, lambda: automation.access.activate(old_id))
+        reopened = in_worker(qtbot, lambda: automation.open_project(str(path)))
+        assert reopened["project_id"] != old_id
+        assert reopened["project"]["title"] == "Saved disk"
+        assert not reopened["dirty"]
+    finally:
+        release.set()
+    qtbot.waitUntil(lambda: not job.record.active)

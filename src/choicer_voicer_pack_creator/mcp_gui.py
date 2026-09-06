@@ -100,7 +100,7 @@ class EditorProjectAccess:
     def _editor(self):
         window = self.bridge.window
         if self.project_id is not None:
-            if self.project_id not in window.editors:
+            if self.project_id not in {session.id for session in window.project_sessions}:
                 raise ValueError(f"Unknown project_id: {self.project_id}")
             return window.editor_for_project(self.project_id)
         if window.active_editor is None:
@@ -118,8 +118,8 @@ class EditorProjectAccess:
         def read():
             window = self.bridge.window
             snapshots = [
-                EditorProjectAccess(self.bridge, project_id)._snapshot()
-                for project_id in window.editors
+                EditorProjectAccess(self.bridge, session.id)._snapshot()
+                for session in window.project_sessions
             ]
             return {
                 "active_project_id": window.active_editor.session.id if window.active_editor else None,
@@ -134,6 +134,7 @@ class EditorProjectAccess:
 
     def activate(self, project_id: str) -> ProjectSnapshot:
         def activate():
+            EditorProjectAccess(self.bridge, project_id)._editor()
             self.bridge.window.focus_project(project_id)
             return EditorProjectAccess(self.bridge, project_id)._snapshot()
         return self.bridge.call(activate)
@@ -142,7 +143,8 @@ class EditorProjectAccess:
         def create():
             window = self.bridge.window
             if snapshot.path is not None:
-                for editor in window.editors.values():
+                for session in window.project_sessions:
+                    editor = window.editor_for_project(session.id)
                     if editor.project_path == snapshot.path:
                         return self.activate(editor.session.id)
             editor = window.add_project(snapshot.project, snapshot.path, dirty=snapshot.dirty)
@@ -191,21 +193,23 @@ class EditorProjectAccess:
             require_revision(snapshot, expected_revision)
             window = self.bridge.window
             editor = self._editor()
-            for other in window.editors.values():
-                if other is not editor and other.project_path == destination:
-                    raise ValueError("Destination belongs to another open project.")
             revision = editor.session.revision
 
             def operation(ctx):
                 with ctx.critical_stage("Saving editable project"):
                     return save_snapshot(snapshot, destination, overwrite)
 
-            handle = window.job_manager.submit(
-                snapshot.project_id, "save", f"MCP save: {snapshot.project.title}", operation,
-                resource_class="io", resource_keys=(f"document-save:{snapshot.project_id}",),
-                write_paths=(destination, ProjectStore.previous_path(destination)),
-                source_snapshot={"project_id": snapshot.project_id, "revision": expected_revision},
-            )
+            reservation = window.reserve_project_save(snapshot.project_id, destination)
+            try:
+                handle = window.job_manager.submit(
+                    snapshot.project_id, "save", f"MCP save: {snapshot.project.title}", operation,
+                    resource_class="io", resource_keys=(f"document-save:{snapshot.project_id}",),
+                    write_paths=(destination, ProjectStore.previous_path(destination)),
+                    source_snapshot={"project_id": snapshot.project_id, "revision": expected_revision},
+                )
+            except Exception:
+                window.release_project_save(reservation)
+                raise
 
             def completed(saved: ProjectSnapshot) -> None:
                 try:
@@ -217,6 +221,7 @@ class EditorProjectAccess:
                     future.set_exception(error)
 
             def finished() -> None:
+                window.release_project_save(reservation)
                 if not future.done():
                     record = handle.record
                     future.set_exception(RuntimeError(
