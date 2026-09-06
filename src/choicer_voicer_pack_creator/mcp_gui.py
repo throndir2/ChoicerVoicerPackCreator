@@ -18,6 +18,7 @@ from choicer_voicer_pack_creator.automation import (
 )
 from choicer_voicer_pack_creator.mcp_server import create_server
 from choicer_voicer_pack_creator.project_io import ProjectStore
+from choicer_voicer_pack_creator.project_session import canonical_project_path
 from choicer_voicer_pack_creator.ui.main_window import MainWindow
 
 T = TypeVar("T")
@@ -163,8 +164,13 @@ class EditorProjectAccess:
 
     def open_existing(self, path: Path) -> ProjectSnapshot | None:
         def open_existing():
-            editor = self.bridge.window.project_for_path(path)
-            return self.activate(editor.session.id) if editor is not None else None
+            window = self.bridge.window
+            editor = window.project_for_path(path)
+            if editor is not None:
+                return self.activate(editor.session.id)
+            if canonical_project_path(path) in window._save_targets:
+                raise ValueError("Project save is in progress. Wait before opening this path.")
+            return None
         return self.bridge.call(open_existing)
 
     def _snapshot(self) -> ProjectSnapshot:

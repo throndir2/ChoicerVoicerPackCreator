@@ -634,6 +634,39 @@ def test_live_loading_document_is_readable_but_rejects_mutations(qtbot, live_edi
         editor.session.loading = False
 
 
+def test_mcp_open_waits_for_retired_owners_save_publication(
+    qtbot, live_editor, tmp_path, monkeypatch,
+):
+    window, _bridge, automation = live_editor
+    owner = window.active_editor
+    destination = tmp_path / "retiring-save.cvpack.json"
+    ProjectStore.save(PackProject(title="Old on disk"), destination)
+    started, release = threading.Event(), threading.Event()
+    original_save = ProjectStore.save
+
+    def held_save(project, path):
+        started.set()
+        assert release.wait(10)
+        original_save(project, path)
+
+    monkeypatch.setattr(ProjectStore, "save", held_save)
+    assert window.save_editor(owner, destination=destination)
+    try:
+        qtbot.waitUntil(started.is_set)
+        window.close_project_tab(window.tabs.indexOf(owner))
+        assert owner.session.id not in {item.id for item in window.project_sessions}
+        assert window.project_for_path(destination) is None
+        before = len(window.project_sessions)
+        with pytest.raises(ValueError, match="save.*progress"):
+            in_worker(qtbot, lambda: automation.open_project(str(destination)))
+        assert len(window.project_sessions) == before
+    finally:
+        release.set()
+    qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
+    opened = in_worker(qtbot, lambda: automation.open_project(str(destination)))
+    assert opened["project"]["title"] == "Live"
+
+
 def test_closed_pending_document_is_not_reactivated_by_mcp(qtbot, live_editor, tmp_path):
     from choicer_voicer_pack_creator.ui_automation import UIAutomation
 
