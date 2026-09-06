@@ -815,7 +815,12 @@ def test_fresh_native_layout_keeps_task_and_segment_rows_clickable(workspace, qt
         parent = field.parentWidget()
         while parent is not None:
             if isinstance(parent, QScrollArea):
-                parent.ensureWidgetVisible(field)
+                # Text editors expose their caret to ensureWidgetVisible; reveal the full field
+                # through both scroll layers instead, regardless of the workspace header height.
+                center = field.mapTo(parent.widget(), field.rect().center())
+                parent.ensureVisible(
+                    center.x(), center.y(), field.width() // 2 + 10, field.height() // 2 + 10,
+                )
             parent = parent.parentWidget()
         QApplication.processEvents()
         point = target.rect().center()

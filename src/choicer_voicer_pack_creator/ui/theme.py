@@ -91,6 +91,14 @@ QPushButton#primary:enabled { background: #087a8d; border-color: #33d1df; color:
 QPushButton#primary:enabled:hover { background: #0994aa; }
 QPushButton#danger { color: #ff9999; border-color: #733b47; }
 QPushButton#danger:hover { background: #512832; }
+QPushButton#coffeeSupport {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 2px;
+}
+QPushButton#coffeeSupport:hover, QPushButton#coffeeSupport:focus { border-color: #ffdd00; }
+QPushButton#coffeeSupport:pressed { background: #19344c; }
 QTableWidget {
     background: #0b121c;
     gridline-color: #1e2b3b;

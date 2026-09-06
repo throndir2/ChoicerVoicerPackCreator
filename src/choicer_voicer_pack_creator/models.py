@@ -284,7 +284,7 @@ class PackProject:
         if any(segment.audio_mode != "video" or not segment.source_range_known for segment in selected):
             raise ValueError(
                 "Preserved recordings cannot be combined safely. For each recording, mark the "
-                "exact source-video In/Out range, click Apply Range, and choose Yes to regenerate "
+                "exact source-video In/Out range, click Update Segment Timing, and choose Yes to regenerate "
                 "its prompt audio. Then select the segments and combine them."
             )
         if any(

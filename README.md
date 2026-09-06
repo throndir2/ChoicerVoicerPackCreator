@@ -2,6 +2,10 @@
 
 A visual desktop editor for creating and modifying dub packs for *The Choicer Voicer*.
 
+<a href="https://www.buymeacoffee.com/throndir" target="_blank" rel="noopener noreferrer">
+  <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="40">
+</a>
+
 > **Unofficial community project.** This project is not affiliated with, endorsed by, or sponsored by the creators of *The Choicer Voicer*. Do not redistribute video, audio, or artwork unless you have permission to do so.
 
 ## What it does
@@ -307,6 +311,22 @@ The details window is nonmodal and can be closed while the export continues in t
 output locations, cleanup notes, and failures for later inspection. Export uses a snapshot; edits
 made during export affect the next export, not the one already running.
 
+### Timeline controls
+
+The bottom controls separate the **In/Out** range fields and zoom from the segment actions.
+Hover over the controls or timeline for instructions.
+
+- **Set In / Set Out** copy the current playback position into the range start or end.
+  Changing these fields only marks a range; it does not edit an existing segment.
+- **Add Segment** creates a new segment from the marked In/Out range.
+- **Update Segment Timing** replaces the selected segment's start and end with that range.
+  Dragging a segment or its linked waveform handles updates its timing directly, without this step.
+- **Split at Playhead** divides the selected segment at the white playback line.
+- **Play Selected Segment** plays its saved range and pauses at the end. For preserved prompt
+  audio, it plays the recording instead of the video. It does not preview unapplied In/Out changes.
+
+Timing, split, and segment playback buttons require a single selected segment.
+
 ### Combine segments
 
 In the **Segments** list, use **Ctrl-click** to select individual rows or **Shift-click** to select
@@ -316,7 +336,7 @@ gaps. Their nonempty lines are joined with spaces in timeline order, and their s
 combined without duplicates. Unselected segments are left unchanged.
 
 The combined segment uses source-video audio. Preserved recordings must first be given precise
-source-video In/Out values using **Apply Range** and explicitly switched to regenerated audio.
+source-video In/Out values using **Update Segment Timing** and explicitly switched to regenerated audio.
 A custom still image is retained; if the selection contains different custom stills, the app
 asks before keeping the first one in timeline order. No source media files are deleted.
 Playback keeps a multi-selection intact so you can combine segments while listening.
@@ -594,7 +614,7 @@ and ZIP pass final validation.
 2. Existing MP3 and PNG assets are preserved by default.
 3. Edit captions, speakers, or timeline positions.
 4. Existing packs store a trigger timestamp and padded recording, not the original spoken cut. To
-	regenerate one safely, mark the exact source-video In/Out range, click **Apply Range**, and choose
+	regenerate one safely, mark the exact source-video In/Out range, click **Update Segment Timing**, and choose
 	**Yes** when asked whether to regenerate the prompt audio.
 5. Save as a `.cvpack.json` project, then export.
 

@@ -61,7 +61,7 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-choicer_voicer_pack_creator = ["resources/*.json", "resources/*.txt", "resources/*.md"]
+choicer_voicer_pack_creator = ["resources/*.json", "resources/*.txt", "resources/*.md", "resources/*.png"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"
