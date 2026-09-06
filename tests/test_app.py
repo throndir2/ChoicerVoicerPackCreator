@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, QTimer
 
 from choicer_voicer_pack_creator.app import parse_editor_arguments
 from choicer_voicer_pack_creator.single_instance import SingleInstance
@@ -19,13 +19,13 @@ def test_visible_isolation_requires_explicit_root_and_preserves_all_files(tmp_pa
     root_arguments = [f"{flag}={root}"] if equals else [flag, str(root)]
     paths = [tmp_path / "first.cvpack.json", tmp_path / "second.cvpack.json"]
     options = parse_editor_arguments([
-        "editor", *root_arguments, "--update-result=result.json", *map(str, paths),
+        "editor", *root_arguments, "--ui-test-hooks", "--update-result=result.json", *map(str, paths),
     ])
     assert options.data_root == root
     assert options.paths == tuple(paths)
     assert not options.smoke_test
     assert options.arguments == [
-        "editor", "--update-result=result.json", *map(str, paths),
+        "editor", "--ui-test-hooks", "--update-result=result.json", *map(str, paths),
     ]
     assert "--headless" not in options.arguments
 
@@ -63,7 +63,8 @@ def test_normal_startup_keeps_smoke_and_updater_options_out_of_paths(tmp_path, m
     )
 
 
-def test_bootstrap_passes_isolated_settings_recovery_diagnostics_and_live_hook(tmp_path):
+@pytest.mark.parametrize("entrypoint", ["main", "run_editor"])
+def test_bootstrap_passes_isolated_settings_recovery_diagnostics_and_live_hook(tmp_path, entrypoint):
     root = tmp_path / "isolated"
     regular_root = tmp_path / "regular"
     report = tmp_path / "bootstrap.json"
@@ -92,12 +93,18 @@ def run(arguments, application, data_root, **kwargs):
     }), encoding="utf-8")
     return 0
 app._run_application = run
-raise SystemExit(app.run_editor(
-    ["editor", "--data-root=" + sys.argv[1], *sys.argv[4:]], start_automation=hook
-))
+arguments = ["editor", "--data-root=" + sys.argv[1], *sys.argv[5:]]
+result = (
+    app.main(arguments) if sys.argv[4] == "main"
+    else app.run_editor(arguments, start_automation=hook)
+)
+raise SystemExit(result)
 """
     result = subprocess.run(
-        [sys.executable, "-c", code, str(root), str(regular_root), str(report), *map(str, paths)],
+        [
+            sys.executable, "-c", code, str(root), str(regular_root), str(report),
+            entrypoint, *map(str, paths),
+        ],
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
@@ -105,7 +112,8 @@ raise SystemExit(app.run_editor(
     assert Path(data["data_root"]) == root
     assert Path(data["settings_path"]) == root / "settings.ini"
     assert data["ini"] and not data["fallbacks"]
-    assert data["live"] and not data["smoke"] and data["listening"]
+    assert data["live"] == (entrypoint == "run_editor")
+    assert not data["smoke"] and data["listening"]
     assert Path(data["isolated_property"]) == root
     assert data["paths"] == list(map(str, paths))
     assert not regular_root.exists()
@@ -178,6 +186,7 @@ def test_run_application_opens_every_path_restores_workspace_and_keeps_live_runt
             assert kwargs["recovery_store"].path == tmp_path / "recovery-v2.json"
             assert kwargs["analysis_data_root"] == tmp_path / "analysis"
             windows.append(self)
+            QTimer.singleShot(0, self.restore_workspace)
 
         def show(self):
             calls.append("shown")
@@ -230,7 +239,7 @@ def test_run_application_opens_every_path_restores_workspace_and_keeps_live_runt
 
     def start(window):
         assert window is windows[0]
-        assert calls[:2] == ["shown", "restore"]
+        assert calls == ["shown"]
         return runtime
 
     monkeypatch.delenv("CHOICER_VOICER_SMOKE_REPORT", raising=False)
