@@ -235,7 +235,7 @@ def test_combining_unsafe_audio_reports_how_to_fix_without_changing_project(
     before = window.project.to_dict()
     window.action_combine.trigger()
     assert len(messages) == 1
-    assert "Apply Range" in messages[0]
+    assert "Update Segment Timing" in messages[0]
     assert window.project.to_dict() == before
     assert not window.dirty
 
