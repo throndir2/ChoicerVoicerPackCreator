@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 import threading
 import time
 
@@ -251,3 +253,50 @@ def test_rich_progress_retains_plan_and_stage_events(qtbot, manager):
     finish(qtbot, manager)
     assert received == [("plan", 3), ("encoding", 1), ("publication", 2)]
     assert handle.record.detail == ("publication", 2)
+
+
+def test_shutdown_cancels_queue_without_starting_it(qtbot, manager):
+    handles = [
+        manager.submit("one", "test", "Queued", lambda ctx: pytest.fail("Queue started"))
+        for _ in range(5)
+    ]
+    manager.shutdown(wait=True)
+    assert all(handle.record.state == "cancelled" for handle in handles)
+
+
+def test_worker_system_exit_is_a_failure_not_success(qtbot, manager):
+    def operation(context):
+        raise SystemExit(7)
+
+    handle = manager.submit("one", "test", "Exit", operation)
+    finish(qtbot, manager)
+    assert handle.record.state == "failed"
+    assert handle.record.error == "SystemExit: 7"
+
+
+def test_headless_manager_uses_qtcore_without_widgets():
+    script = """
+import sys
+from PySide6.QtCore import QCoreApplication, QTimer
+from choicer_voicer_pack_creator.jobs import JobManager
+try:
+    JobManager()
+except RuntimeError as error:
+    assert "QtCore" in str(error)
+else:
+    raise AssertionError("Missing event loop was accepted")
+app = QCoreApplication([])
+manager = JobManager()
+handle = manager.submit("headless", "test", "Core only", lambda context: 42)
+handle.finished.connect(app.quit)
+QTimer.singleShot(5000, app.quit)
+app.exec()
+manager.shutdown(wait=True)
+assert handle.record.state == "succeeded", handle.record
+assert handle.record.result == 42
+assert "PySide6.QtWidgets" not in sys.modules
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr

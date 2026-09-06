@@ -140,6 +140,8 @@ class JobManager(QObject):
     def __init__(
         self, parent: QObject | None = None, *, limits: Mapping[str, int] | None = None,
     ) -> None:
+        if QCoreApplication.instance() is None:
+            raise RuntimeError("JobManager requires a running QtCore application/event loop")
         super().__init__(parent)
         self.limits = dict(limits if limits is not None else {"cpu": 1, "io": 2, "network": 2})
         if not self.limits or any(
@@ -290,7 +292,7 @@ class JobManager(QObject):
                     context.check_cancelled()
         except OperationCancelled:
             state = "cancelled"
-        except Exception as failure:
+        except BaseException as failure:
             # Cleanup failures remain failures even after a cancellation request.
             state, error = "failed", f"{type(failure).__name__}: {failure}"
         finally:
