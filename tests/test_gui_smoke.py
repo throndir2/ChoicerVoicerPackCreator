@@ -15,6 +15,7 @@ from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
 from choicer_voicer_pack_creator.ui.main_window import (
     ExportWorker,
     MainWindow,
+    ProjectEditor,
     WaveformWorker,
 )
 from choicer_voicer_pack_creator.ui.theme import APP_STYLESHEET
@@ -294,7 +295,7 @@ def test_backspace_remains_available_in_editors(
     assert window.project.segments == [selected]
 
 
-@pytest.mark.parametrize("blocked", ["no-selection", "busy"])
+@pytest.mark.parametrize("blocked", ["no-selection", "disabled-action"])
 def test_backspace_does_not_delete_without_an_available_action(
     qtbot, playback_window, monkeypatch, blocked: str
 ) -> None:
@@ -308,7 +309,7 @@ def test_backspace_does_not_delete_without_an_available_action(
         window._refresh_table()
         window._sync_selected_editor()
     else:
-        window._set_busy(True, "Exporting")
+        window.action_delete.setEnabled(False)
     window.setFocus()
     qtbot.waitUntil(window.hasFocus)
 
@@ -914,7 +915,7 @@ def test_recovery_restores_unsaved_edits_without_overwriting_project(
     )
     window = MainWindow(UnusedMedia())  # type: ignore[arg-type]
     qtbot.addWidget(window)
-    window.recovery_store = recovery
+    window.active_editor.recovery_store = recovery
     window._offer_recovery()
 
     assert window.project_path == project_path.resolve()
@@ -937,7 +938,7 @@ def test_discard_only_clears_recovery_after_transition(
     recovery.save(project, None)
     window = MainWindow(UnusedMedia())  # type: ignore[arg-type]
     qtbot.addWidget(window)
-    window.recovery_store = recovery
+    window.active_editor.recovery_store = recovery
     window._set_project(project, None, mark_dirty=True)
     monkeypatch.setattr(
         QMessageBox,
@@ -948,7 +949,7 @@ def test_discard_only_clears_recovery_after_transition(
     assert window._maybe_save()
     assert recovery.path.is_file()
     window._set_project(PackProject(authors=["Creator"]), None, mark_dirty=False)
-    assert not recovery.path.exists()
+    qtbot.waitUntil(lambda: not recovery.path.exists())
     window.close()
 
 
@@ -961,19 +962,21 @@ def test_open_corrupt_project_offers_previous_save(
     project.title = "Second"
     ProjectStore.save(project, path)
     path.write_text("corrupt", encoding="utf-8")
-    monkeypatch.setattr(
-        QMessageBox,
-        "question",
-        staticmethod(lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes),
-    )
     window = MainWindow(UnusedMedia())  # type: ignore[arg-type]
     qtbot.addWidget(window)
     window.open_path(path)
 
+    qtbot.waitUntil(lambda: any(
+        box.windowTitle() == "Open previous save?" for box in window._decisions
+    ))
+    box = next(box for box in window._decisions if box.windowTitle() == "Open previous save?")
+    qtbot.mouseClick(box.button(QMessageBox.StandardButton.Yes), Qt.MouseButton.LeftButton)
     assert window.project.title == "First"
-    assert window.project_path == path.resolve()
+    assert window.project_path is None
     assert window.dirty
     assert path.read_text(encoding="utf-8") == "corrupt"
+    for box in list(window._decisions):
+        box.reject()
     window.dirty = False
     window.close()
 
@@ -1012,7 +1015,7 @@ def test_late_waveform_result_is_ignored(qtbot) -> None:
     window.close()
 
 
-def test_worker_results_are_delivered_on_gui_thread(qtbot, tmp_path: Path) -> None:
+def test_worker_results_are_delivered_on_gui_thread(qtbot, tmp_path: Path, monkeypatch) -> None:
     waveform_threads: list[QThread] = []
     retirement_threads: list[QThread] = []
     export_threads: list[QThread] = []
@@ -1027,7 +1030,7 @@ def test_worker_results_are_delivered_on_gui_thread(qtbot, tmp_path: Path) -> No
             progress("working")
             return object()
 
-    class TrackingWindow(MainWindow):
+    class TrackingEditor(ProjectEditor):
         @Slot(int, str, float, list)
         def _waveform_ready(self, request_id, path, duration, peaks):
             waveform_threads.append(QThread.currentThread())
@@ -1042,7 +1045,8 @@ def test_worker_results_are_delivered_on_gui_thread(qtbot, tmp_path: Path) -> No
         def _export_completed(self, _value):
             export_threads.append(QThread.currentThread())
 
-    window = TrackingWindow(ImmediateMedia())  # type: ignore[arg-type]
+    monkeypatch.setattr(MainWindow, "editor_type", TrackingEditor)
+    window = MainWindow(ImmediateMedia())  # type: ignore[arg-type]
     qtbot.addWidget(window)
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")

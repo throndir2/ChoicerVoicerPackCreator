@@ -24,8 +24,11 @@ from choicer_voicer_pack_creator.exporter import ExportResult
 
 
 class ExportProgressDialog(QDialog):
-    def __init__(self, destination: Path, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, destination: Path, parent: QWidget | None = None, *, background: bool = False,
+    ) -> None:
         super().__init__(parent)
+        self.background = background
         self._running = True
         self._outcome: bool | None = None
         self._elapsed = QElapsedTimer()
@@ -37,7 +40,9 @@ class ExportProgressDialog(QDialog):
         self._live = False
         self._estimator = ExportEstimator()
         self.setWindowTitle("Exporting pack")
-        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setWindowModality(
+            Qt.WindowModality.NonModal if background else Qt.WindowModality.WindowModal
+        )
         self.resize(760, 620)
 
         layout = QVBoxLayout(self)
@@ -82,14 +87,16 @@ class ExportProgressDialog(QDialog):
         self.details.setMaximumBlockCount(2000)
         layout.addWidget(self.details, 1)
         self.note_label = QLabel(
-            "Please keep this window open until export finishes. "
+            ("You can close these details and keep editing. Track or cancel export in Tasks. "
+             if background else "Please keep this window open until export finishes. ")
+            +
             "Existing output is kept as a rollback backup during publishing."
         )
         self.note_label.setWordWrap(True)
         layout.addWidget(self.note_label)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         self.close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
-        self.close_button.setEnabled(False)
+        self.close_button.setEnabled(background)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
@@ -232,17 +239,23 @@ class ExportProgressDialog(QDialog):
             else "Export did not complete. Review the error details above before trying again."
         )
         self.close_button.setEnabled(True)
-        self.close_button.setFocus()
+        if self.isVisible():
+            self.close_button.setFocus()
 
     def done(self, result: int) -> None:
-        if not self._running:
+        if self._running and self.background:
+            self.hide()
+        elif not self._running:
             super().done(result)
 
     def reject(self) -> None:
         self.done(QDialog.DialogCode.Rejected)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        if self._running:
+        if self._running and self.background:
+            self.hide()
+            event.ignore()
+        elif self._running:
             event.ignore()
         else:
             super().closeEvent(event)

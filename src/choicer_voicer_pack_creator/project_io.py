@@ -182,11 +182,59 @@ class RecoveryRecord:
     source_path: Path
 
 
+class WorkspaceStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path.resolve()
+
+    def save(self, documents: list[dict[str, Any]], active_id: str | None) -> None:
+        _write_bytes_atomic(
+            self.path,
+            (json.dumps({
+                "workspace_schema_version": 1, "active_id": active_id,
+                "documents": documents,
+            }, indent=2) + "\n").encode("utf-8"),
+        )
+
+    def load(self) -> dict[str, Any]:
+        if not self.path.is_file():
+            return {"documents": [], "active_id": None}
+        value = json.loads(self.path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(value, dict) or value.get("workspace_schema_version") != 1
+            or not isinstance(value.get("documents"), list)
+        ):
+            raise ValueError("Unsupported or invalid workspace restore file")
+        return value
+
+
 class RecoveryStore:
     """Atomic per-user recovery snapshots that never replace a project file."""
 
     def __init__(self, path: Path) -> None:
         self.path = path.resolve()
+
+    def for_session(self, session_id: str) -> RecoveryStore:
+        if not session_id or any(character not in "0123456789abcdef-" for character in session_id):
+            raise ValueError("Invalid recovery session ID")
+        return RecoveryStore(self.path.parent / "recovery" / f"{session_id}.json")
+
+    def session_records(
+        self, errors: list[str] | None = None,
+    ) -> list[tuple[str, RecoveryRecord]]:
+        records = []
+        folder = self.path.parent / "recovery"
+        if folder.is_dir():
+            for path in sorted(folder.glob("*.json")):
+                try:
+                    record = RecoveryStore(path).load()
+                except (OSError, ValueError, TypeError) as error:
+                    if errors is None:
+                        raise
+                    errors.append(f"Recovery at {path} was retained but could not be read: {error}")
+                    continue
+                if record is not None:
+                    records.append((path.stem, record))
+        return records
 
     @property
     def previous_path(self) -> Path:
