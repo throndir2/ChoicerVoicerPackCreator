@@ -29,6 +29,7 @@ class JobWorker(QThread):
         self._job_context: JobContext | None = None
         self._job_error = ""
         self._job_exception: BaseException | None = None
+        self._job_cancel_emitted = False
         self._job_result: object = None
 
     def configure_job(
@@ -72,6 +73,7 @@ class JobWorker(QThread):
         self._job_exception = sys.exception()
 
     def _capture_cancelled(self) -> None:
+        self._job_cancel_emitted = True
         error = sys.exception()
         self._job_exception = (
             error if isinstance(error, OperationCancelled) else
@@ -107,6 +109,11 @@ class JobWorker(QThread):
 
     @Slot()
     def _job_finished(self) -> None:
+        record = self.job_handle.record
+        if record.state == "cancelled" and not self._job_cancel_emitted and hasattr(self, "canceled"):
+            self.canceled.emit()
+        elif record.state in {"failed", "blocked"} and not self._job_error and hasattr(self, "failed"):
+            self.failed.emit(record.error or record.message)
         self.finished.emit()
 
     def isInterruptionRequested(self) -> bool:  # noqa: N802

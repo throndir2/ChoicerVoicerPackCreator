@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import getpass
 import os
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -1405,7 +1407,7 @@ class ProjectEditor(QWidget):
 
     def _cancel_waveform_workers(self) -> None:
         self._waveform_request_id += 1
-        for worker in self._waveform_workers:
+        for worker in tuple(self._waveform_workers):
             worker.requestInterruption()
 
     @Slot()
@@ -1764,6 +1766,7 @@ class ProjectEditor(QWidget):
         self._sync_selected_editor()
 
     def preview_segment(self) -> None:
+        self.workspace.pause_other_previews(self)
         segment = self.selected_segment()
         if segment is None:
             return
@@ -2851,6 +2854,7 @@ class MainWindow(QMainWindow):
         self._opening_paths: dict[str, str] = {}
         self._save_targets: dict[str, str] = {}
         self._save_jobs: dict[str, set[str]] = {}
+        self._save_tokens: dict[str, str] = {}
         self._restore_started = False
         self.workspace_store = (
             WorkspaceStore(recovery_store.path.parent / "workspace-v1.json")
@@ -2874,6 +2878,10 @@ class MainWindow(QMainWindow):
         self.tasks_panel = TasksPanel(self.job_manager, self)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.tasks_panel)
         self.tasks_panel.hide()
+        self.job_manager.changed.connect(
+            lambda record: QTimer.singleShot(0, self._retire_closed_editors)
+            if not record.active else None
+        )
         editor = self.add_project(PackProject(authors=[getpass.getuser()]), dirty=False)
         self._initial_editor_id = editor.session.id
         self.updater = UpdateController(self, editor.help_menu)
@@ -2908,7 +2916,10 @@ class MainWindow(QMainWindow):
 
     @property
     def project_sessions(self) -> list[ProjectSession]:
-        return [editor.session for editor in self.editors.values()]
+        return [
+            editor.session for editor in self.editors.values()
+            if editor.session.id not in self._closed_ids
+        ]
 
     def editor_for_project(self, project_id: str) -> ProjectEditor:
         return self.editors[project_id]
@@ -2925,6 +2936,8 @@ class MainWindow(QMainWindow):
     ) -> ProjectEditor:
         if path is not None:
             for existing in self.editors.values():
+                if existing.session.id in self._closed_ids:
+                    continue
                 if existing.project_path is not None and (
                     canonical_project_path(existing.project_path) == canonical_project_path(path)
                 ):
@@ -2985,7 +2998,10 @@ class MainWindow(QMainWindow):
             index = self.tabs.indexOf(editor)
             if index >= 0:
                 label = editor.project.title or "Untitled Dub Pack"
-                active = self.job_manager.active_jobs(editor.session.id)
+                active = [
+                    job for job in self.job_manager.active_jobs(editor.session.id)
+                    if job.kind not in {"recovery", "workspace"}
+                ]
                 suffix = " [working]" if active else ""
                 if editor.session.attention:
                     suffix += " [!]"
@@ -3001,6 +3017,8 @@ class MainWindow(QMainWindow):
             self.focus_project(self._opening_paths[key])
             return
         for editor in self.editors.values():
+            if editor.session.id in self._closed_ids:
+                continue
             if editor.project_path is not None and (
                 canonical_project_path(editor.project_path) == canonical_project_path(path)
             ):
@@ -3125,18 +3143,11 @@ class MainWindow(QMainWindow):
             if not destination.name.casefold().endswith(".cvpack.json"):
                 destination = destination.with_name(destination.name + ".cvpack.json")
         destination = destination.resolve()
-        key = canonical_project_path(destination)
-        owner = self._save_targets.get(key)
-        if owner is None:
-            owner = next((
-                other.session.id for other in self.editors.values()
-                if other is not editor and other.project_path is not None
-                and canonical_project_path(other.project_path) == key
-            ), None)
-        if owner is not None and owner != editor.session.id:
-            self.notice("Project is already open", "Choose another save path or use the existing tab.")
+        try:
+            reservation = self.reserve_project_save(editor.session.id, destination)
+        except ValueError as error:
+            self.notice("Project is already open", str(error))
             return False
-        self._save_targets[key] = editor.session.id
         snapshot, revision = editor.session.snapshot(), editor.session.revision
 
         def save(_context):
@@ -3148,12 +3159,16 @@ class MainWindow(QMainWindow):
             if on_saved is not None:
                 on_saved()
 
-        job = self.job_manager.submit(
-            editor.session.id, "save", f"Saving {snapshot.title}", save,
-            resource_class="io", write_paths=(destination, ProjectStore.previous_path(destination)),
-            resource_keys=(f"document-save:{editor.session.id}",),
-            source_snapshot={"revision": revision},
-        )
+        try:
+            job = self.job_manager.submit(
+                editor.session.id, "save", f"Saving {snapshot.title}", save,
+                resource_class="io", write_paths=(destination, ProjectStore.previous_path(destination)),
+                resource_keys=(f"document-save:{editor.session.id}",),
+                source_snapshot={"revision": revision},
+            )
+        except (RuntimeError, ValueError):
+            self.release_project_save(reservation)
+            raise
         job.completed.connect(saved)
         def failed(message):
             self._closing = False
@@ -3161,15 +3176,37 @@ class MainWindow(QMainWindow):
             self.notice("Could not save project", message)
 
         def finished():
-            pending = self._save_jobs[key]
-            pending.discard(job.id)
-            if not pending:
-                self._save_jobs.pop(key)
-                self._save_targets.pop(key, None)
-        self._save_jobs.setdefault(key, set()).add(job.id)
+            self.release_project_save(reservation)
         job.failed.connect(failed)
         job.finished.connect(finished)
         return True
+
+    def reserve_project_save(self, project_id: str, destination: Path) -> str:
+        editor = self.editor_for_project(project_id)
+        key = canonical_project_path(destination)
+        owner = self._save_targets.get(key)
+        if owner is None:
+            owner = next((
+                other.session.id for other in self.editors.values()
+                if other is not editor and other.session.id not in self._closed_ids
+                and other.project_path is not None
+                and canonical_project_path(other.project_path) == key
+            ), None)
+        if owner is not None and owner != project_id:
+            raise ValueError("Choose another save path or use the existing project's tab.")
+        token = uuid.uuid4().hex
+        self._save_targets[key] = project_id
+        self._save_jobs.setdefault(key, set()).add(token)
+        self._save_tokens[token] = key
+        return token
+
+    def release_project_save(self, token: str) -> None:
+        key = self._save_tokens.pop(token)
+        pending = self._save_jobs[key]
+        pending.remove(token)
+        if not pending:
+            self._save_jobs.pop(key)
+            self._save_targets.pop(key)
 
     def complete_project_save(
         self, project_id: str, destination: Path, revision: int, saved_hash: str,
@@ -3180,7 +3217,9 @@ class MainWindow(QMainWindow):
         editor.session.saved_revision = revision
         self.settings.setValue("lastProjectDir", str(destination.parent))
         editor._remember_recent_project(destination)
-        if not editor.dirty:
+        if project_id in self._closed_ids:
+            pass
+        elif not editor.dirty:
             editor._clear_recovery_snapshot()
         else:
             editor._write_recovery_snapshot()
@@ -3391,6 +3430,7 @@ class MainWindow(QMainWindow):
 
     def _hide_editor(self, editor: ProjectEditor, *, retain: bool) -> None:
         editor._commit_editors()
+        editor._recovery_timer.stop()
         editor._save_layout_state()
         editor._cancel_stopped_seek(restore_audio=True)
         editor.player.pause()
@@ -3404,6 +3444,22 @@ class MainWindow(QMainWindow):
         if not self.tabs.count():
             self.add_project(PackProject(authors=[getpass.getuser()]), dirty=False)
         self.save_workspace_state()
+        QTimer.singleShot(0, self._retire_closed_editors)
+
+    def _retire_closed_editors(self) -> None:
+        for project_id in tuple(self._closed_ids):
+            if self.job_manager.active_jobs(project_id):
+                continue
+            editor = self.editors.pop(project_id, None)
+            if editor is not None:
+                editor._recovery_timer.stop()
+                editor.player.stop()
+                editor.prompt_player.stop()
+                for dialog in editor.findChildren(QDialog):
+                    dialog.hide()
+                editor.deleteLater()
+            self._closed_ids.discard(project_id)
+            self._exit_discarded.discard(project_id)
 
     def _decide_dirty(
         self, editor: ProjectEditor, proceed: Callable[[], None], cancel: Callable[[], None],
@@ -3420,6 +3476,14 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
             | QMessageBox.StandardButton.Cancel
         )
+        box.setObjectName("projectDirtyDecision")
+        box.setProperty("projectId", editor.session.id)
+        for button, name in (
+            (QMessageBox.StandardButton.Save, "projectCloseSave"),
+            (QMessageBox.StandardButton.Discard, "projectCloseDiscard"),
+            (QMessageBox.StandardButton.Cancel, "projectCloseCancel"),
+        ):
+            box.button(button).setObjectName(name)
 
         def decided(result):
             if result == QMessageBox.StandardButton.Discard:
@@ -3453,7 +3517,12 @@ class MainWindow(QMainWindow):
             )
             keep = box.addButton("Keep processing", QMessageBox.ButtonRole.AcceptRole)
             stop = box.addButton("Cancel tasks and close", QMessageBox.ButtonRole.DestructiveRole)
-            box.addButton("Keep open", QMessageBox.ButtonRole.RejectRole)
+            stay = box.addButton("Keep open", QMessageBox.ButtonRole.RejectRole)
+            box.setObjectName("projectCloseDecision")
+            box.setProperty("projectId", editor.session.id)
+            keep.setObjectName("projectCloseKeepProcessing")
+            stop.setObjectName("projectCloseCancelTasks")
+            stay.setObjectName("projectCloseKeepOpen")
 
             def decide(_result):
                 if box.clickedButton() is keep:

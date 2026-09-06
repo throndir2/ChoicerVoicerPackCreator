@@ -4,7 +4,7 @@ import threading
 
 import pytest
 from PySide6.QtCore import QSettings, Qt, QThread, Signal
-from PySide6.QtWidgets import QFileDialog
+from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
 
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.operations import OperationCancelled
@@ -229,6 +229,95 @@ def test_managed_worker_cancellation_is_terminal_on_gui_thread(workspace, qtbot)
     assert threads == [workspace.thread()]
     assert not worker.isRunning()
     assert worker.wait(0)
+
+
+def test_backing_completion_keeps_newer_choice_and_never_targets_active_tab(
+    workspace, qtbot, tmp_path, monkeypatch,
+):
+    from choicer_voicer_pack_creator.ui import main_window
+
+    class BackingReview(QDialog):
+        def __init__(self, _media, _video, _root, parent, **_kwargs):
+            super().__init__(parent)
+            self.backing_path = tmp_path / "generated.wav"
+
+    monkeypatch.setattr(main_window, "BackingDialog", BackingReview)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"synthetic")
+    a = workspace.active_editor
+    a._set_project(PackProject(
+        title="A", video_path=str(source), video_duration=1,
+    ), None, False)
+    assert a.generate_backing_track()
+    first = a._backing_dialog
+    b = workspace.add_project(PackProject(title="B"), dirty=False)
+    first.accept()
+    assert a.project.backing_track_path == str(tmp_path / "generated.wav")
+    assert b.project.backing_track_path == ""
+    assert workspace.active_editor is b
+    a.project.backing_track_path = ""
+    assert a.generate_backing_track()
+    second = a._backing_dialog
+    chosen = tmp_path / "chosen.wav"
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(chosen), ""))
+    a.choose_backing_track()
+    second.accept()
+    assert a.project.backing_track_path == str(chosen)
+    qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
+
+
+def test_discarded_tab_reopens_saved_contents_not_hidden_edits(
+    workspace, qtbot, tmp_path,
+):
+    path = tmp_path / "saved.cvpack.json"
+    ProjectStore.save(PackProject(title="Saved"), path)
+    workspace.open_path(path)
+    qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
+    editor = workspace.active_editor
+    editor.title_edit.setText("Discard this")
+    editor._commit_editors()
+    old_id = editor.session.id
+    workspace.close_project_tab(workspace.tabs.indexOf(editor))
+    box = workspace._decisions[-1]
+    qtbot.mouseClick(box.button(QMessageBox.StandardButton.Discard), Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: old_id not in workspace.editors)
+    workspace.open_path(path)
+    qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
+    assert workspace.project.title == "Saved"
+    assert workspace.active_editor.session.id != old_id
+
+
+def test_legacy_recovery_is_preserved_on_dismissal_and_migrates_after_acceptance(qtbot, tmp_path):
+    recovery = RecoveryStore(tmp_path / "recovery-v2.json")
+    recovery.save(PackProject(title="Legacy edits"), None)
+    windows = []
+    for accept in (False, True):
+        window = MainWindow(
+            QuietMedia(),
+            settings=QSettings(str(tmp_path / "legacy.ini"), QSettings.Format.IniFormat),
+            recovery_store=recovery, analysis_data_root=tmp_path / "analysis",
+        )
+        windows.append(window)
+        qtbot.addWidget(window)
+        window.show()
+        qtbot.waitUntil(lambda: bool(window._decisions))
+        box = next(box for box in window._decisions if box.windowTitle() == "Recover previous workspace?")
+        qtbot.mouseClick(
+            box.button(QMessageBox.StandardButton.Yes if accept else QMessageBox.StandardButton.No),
+            Qt.MouseButton.LeftButton,
+        )
+        qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
+        if accept:
+            assert not recovery.path.exists()
+            assert window.project.title == "Legacy edits"
+            assert window.active_editor.recovery_store.load().project.title == "Legacy edits"
+        else:
+            assert recovery.load().project.title == "Legacy edits"
+        window.workspace_store = None
+        for editor in window.editors.values():
+            editor._recovery_timer.stop()
+            editor.dirty = False
+        window.close()
 
 
 @pytest.mark.integration

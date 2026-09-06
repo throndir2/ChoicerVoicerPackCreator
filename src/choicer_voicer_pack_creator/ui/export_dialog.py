@@ -239,7 +239,7 @@ class ExportProgressDialog(QDialog):
             else "Export did not complete. Review the error details above before trying again."
         )
         self.close_button.setEnabled(True)
-        if self.isVisible():
+        if self.isVisible() and not self.background:
             self.close_button.setFocus()
 
     def done(self, result: int) -> None:
