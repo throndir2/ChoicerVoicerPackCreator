@@ -314,6 +314,7 @@ def test_refine_only_analysis_uses_audio_without_whisper_and_reports_separate_ou
     assert result.model_name is None
     assert [cue.to_dict() for cue in cues] == original
     assert any("Refining YouTube" in message for message in messages)
+    assert f"Prepared {0 if empty else 2} YouTube caption row(s)." in messages
     events = [json.loads(line) for line in analysis_log_path(tmp_path / "diagnostics")
               .read_text(encoding="utf-8").splitlines()]
     configuration = next(event for event in events if event["event"] == "analysis_configuration")

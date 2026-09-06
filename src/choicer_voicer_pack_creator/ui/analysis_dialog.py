@@ -377,7 +377,7 @@ class AnalysisDialog(QDialog):
         layout = QVBoxLayout(self)
         intro = QLabel(
             (
-                "Choose Refined YouTube or Whisper. YouTube rows appear only after processing. "
+                "Choose YouTube or Whisper. YouTube rows appear only after processing. "
                 "Each draft keeps its own text and timings. "
                 "Click the Use button below either draft to add only its checked rows. "
                 "Closing saves all drafts without adding segments. "
@@ -497,7 +497,7 @@ class AnalysisDialog(QDialog):
         if self.source_choice:
             self.refined_table.setColumnHidden(5, True)
             self.local_table.setColumnHidden(4, True)
-        self.refined_radio = QRadioButton("Select Refined YouTube transcript")
+        self.refined_radio = QRadioButton("Select YouTube transcript")
         self.local_radio = QRadioButton("Select Whisper transcript")
         self.source_group = QButtonGroup(self)
         for radio in (self.refined_radio, self.local_radio):
@@ -524,7 +524,7 @@ class AnalysisDialog(QDialog):
         self.local_status = QLabel("Whisper has not run yet.")
         self.local_draft_label = QLabel()
         self.local_draft_label.setWordWrap(True)
-        self.refined_panel = QGroupBox("Refined YouTube", self)
+        self.refined_panel = QGroupBox("YouTube", self)
         self.local_panel = QGroupBox(
             "Whisper Transcript" if self.local_source == "Whisper" else "Detected Audio Ranges",
             self,
@@ -599,7 +599,7 @@ class AnalysisDialog(QDialog):
         self.preview_button.setEnabled(False)
         self.preview_button.clicked.connect(self.preview_current_row)
         controls.addButton(self.preview_button, QDialogButtonBox.ButtonRole.ActionRole)
-        self.refined_add_button = QPushButton("Use Refined YouTube Transcript", self.refined_panel)
+        self.refined_add_button = QPushButton("Use YouTube Transcript", self.refined_panel)
         self.local_add_button = QPushButton("Use Whisper Transcript", self.local_panel)
         for button, radio, panel in (
             (self.refined_add_button, self.refined_radio, self.refined_panel),
@@ -635,7 +635,7 @@ class AnalysisDialog(QDialog):
             self.local_status.setText(f"Saved {self.local_source} draft: {len(review.local_rows)} rows.")
             if review.refined_rows:
                 self.refined_status.setText(
-                    f"Saved Refined YouTube draft: {len(review.refined_rows)} rows. "
+                    f"Saved YouTube draft: {len(review.refined_rows)} rows. "
                     "Review Source notes for timing limitations."
                 )
         if not self.source_captions and not self.refined_table.rowCount():
@@ -792,12 +792,12 @@ class AnalysisDialog(QDialog):
             usable and self.table.currentRow() >= 0 and not self._close_after_cancel
         )
         source = {
-            "refined": "Refined YouTube", "local": self.local_source,
+            "refined": "YouTube", "local": self.local_source,
         }[self.selected_source]
         self.local_add_button.setText(
             "Use Whisper Transcript" if self.local_source == "Whisper" else "Use Detected Ranges"
         )
-        if source in {"Refined YouTube", "Whisper"}:
+        if source in {"YouTube", "Whisper"}:
             self.preview_button.setText(f"Play Selected {source} Line")
         else:
             self.preview_button.setText("Play Selected Range")
@@ -883,7 +883,7 @@ class AnalysisDialog(QDialog):
                 self, "question",
                 "Replace local analysis draft?",
                 "A successful scan will replace the local draft and its edits. "
-                "The Refined YouTube draft will not change. "
+                "The YouTube draft will not change. "
                 "Edits made while the scan runs are kept until you explicitly apply its new result. "
                 "A failed or canceled scan keeps all drafts. "
                 "Continue?" if self.source_choice else
@@ -1008,8 +1008,8 @@ class AnalysisDialog(QDialog):
             self._pending_refine = True
             show_message(
                 self, "question",
-                "Replace Refined YouTube draft?",
-                "A successful refinement will replace only the Refined YouTube draft and its edits, "
+                "Replace YouTube draft?",
+                "A successful refinement will replace only the YouTube draft and its edits, "
                 "using the original imported captions. Your Whisper draft will not change. "
                 "Edits made while refining are kept until you apply the new result. "
                 "A failed or canceled scan keeps all drafts. Continue?",
@@ -1155,7 +1155,7 @@ class AnalysisDialog(QDialog):
                 for cue in value.refined_captions
             ])
             self.refined_status.setText(
-                f"{len(value.refined_captions)} Refined YouTube rows. "
+                f"{len(value.refined_captions)} YouTube rows. "
                 "Review Source notes for timing limitations. "
                 "Music can hide pauses; speaker changes are not detected."
             )
@@ -1217,7 +1217,7 @@ class AnalysisDialog(QDialog):
 
     def _recovery_hint(self, *, refine: bool = False) -> str:
         table = self.refined_table if refine else self.local_table
-        source = "Refined YouTube" if refine else self.local_source
+        source = "YouTube" if refine else self.local_source
         if table.rowCount():
             action = f"Use {source} Transcript" if source != "Audio activity" else "Use Detected Ranges"
             return (

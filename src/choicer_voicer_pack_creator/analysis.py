@@ -1111,7 +1111,7 @@ def _analyze_video(
                 source_captions, [(region.start, region.end) for region in activity], duration,
                 pause_threshold=pause_threshold, check_cancel=lambda: _check_cancel(cancelled),
             )
-            progress(f"Prepared {len(refined)} Refined YouTube caption row(s).", 1.0)
+            progress(f"Prepared {len(refined)} YouTube caption row(s).", 1.0)
             # If both outputs were requested, retain the ordinary scan for Whisper suggestions.
             if use_whisper:
                 activity, threshold = scan_audio_activity(

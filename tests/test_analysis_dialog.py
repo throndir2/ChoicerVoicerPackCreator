@@ -129,7 +129,7 @@ def test_workspace_whisper_and_refinement_start_independently_and_survive_use(
         return AnalysisResult(
             [AnalysisSuggestion(1, 2, "Whisper result", "Whisper")],
             1, 1, -30, None if refine else "tiny", "en", detect_hardware(),
-            refined_captions=[SourceCaption(1, 2, "Refined result", "Refined YouTube")]
+            refined_captions=[SourceCaption(1, 2, "Refined result", "YouTube")]
             if refine else None,
         )
 
@@ -208,7 +208,7 @@ def test_workspace_backing_and_whisper_share_memory_lease_but_refinement_can_run
             [AnalysisSuggestion(1, 2, "Local result", "Whisper")],
             1, 1, -30, "tiny", "en", detect_hardware(),
             refined_captions=None if use_whisper else [
-                SourceCaption(1, 2, "Refined result", "Refined YouTube"),
+                SourceCaption(1, 2, "Refined result", "YouTube"),
             ],
         )
 
@@ -271,7 +271,7 @@ def test_workspace_autostart_download_consent_is_nonmodal_and_does_not_delay_ref
             [AnalysisSuggestion(1, 2, "Local result", "Whisper")],
             1, 1, -30, "tiny", "en", detect_hardware(),
             refined_captions=None if use_whisper else [
-                SourceCaption(1, 2, "Refined result", "Refined YouTube"),
+                SourceCaption(1, 2, "Refined result", "YouTube"),
             ],
         )
 
@@ -316,7 +316,7 @@ def test_workspace_explicit_cancel_interrupts_both_jobs_without_losing_drafts(
     monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
     review = AnalysisReview(
         local_rows=[AnalysisDraftRow("1", "2", "Local edit", "Whisper")],
-        refined_rows=[AnalysisDraftRow("1", "2", "Refined edit", "Refined YouTube")],
+        refined_rows=[AnalysisDraftRow("1", "2", "Refined edit", "YouTube")],
         selected_source="local",
     )
     dialog = AnalysisDialog(
@@ -369,14 +369,14 @@ def test_workspace_late_result_preserves_inflight_draft_edits_until_explicit_rep
         return AnalysisResult(
             [AnalysisSuggestion(3, 4, "New result", "Whisper")],
             1, 1, -30, "tiny", "en", detect_hardware(),
-            refined_captions=[SourceCaption(3, 4, "New result", "Refined YouTube")]
+            refined_captions=[SourceCaption(3, 4, "New result", "YouTube")]
             if refine else None,
         )
 
     monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
     review = AnalysisReview(
         local_rows=[AnalysisDraftRow("1", "2", "Old local", "Whisper")],
-        refined_rows=[AnalysisDraftRow("1", "2", "Old refined", "Refined YouTube")],
+        refined_rows=[AnalysisDraftRow("1", "2", "Old refined", "YouTube")],
         selected_source="refined" if refine else "local",
     )
     dialog = AnalysisDialog(
@@ -423,7 +423,7 @@ def complete_refinement(dialog):
     dialog._completed(AnalysisResult(
         [], 1, 0, -30, None, None, detect_hardware(),
         refined_captions=[
-            SourceCaption(cue.start, cue.end, cue.text, "Refined YouTube")
+            SourceCaption(cue.start, cue.end, cue.text, "YouTube")
             for cue in dialog.source_captions
         ],
     ))
@@ -666,7 +666,7 @@ def test_each_transcript_has_a_direct_use_button(
         2, 2, -30, "tiny", "en", detect_hardware(),
     ))
     assert dialog.selected_source == "refined"
-    assert dialog.refined_add_button.text() == "Use Refined YouTube Transcript"
+    assert dialog.refined_add_button.text() == "Use YouTube Transcript"
     assert dialog.local_add_button.text() == "Use Whisper Transcript"
     for panel, table, button in (
         (dialog.refined_panel, dialog.refined_table, dialog.refined_add_button),
@@ -716,7 +716,7 @@ def test_each_transcript_has_a_direct_use_button(
         qtbot.keyClick(dialog, Qt.Key.Key_Return)
 
     assert accepted == [
-        AnalysisSuggestion(1, 2, "Edited line", "Refined YouTube")
+        AnalysisSuggestion(1, 2, "Edited line", "YouTube")
         if source == "refined" else
         AnalysisSuggestion(0.5, 2.5, "Edited line", "Whisper", 0.8)
     ]
@@ -751,7 +751,7 @@ def test_adding_captions_during_background_scan_waits_for_cancellation(
         auto_start=True,
         review=AnalysisReview(
             youtube_rows=[AnalysisDraftRow("1", "2", "Original", "YouTube")],
-            refined_rows=[AnalysisDraftRow("1.1", "1.9", "Refined", "Refined YouTube")],
+            refined_rows=[AnalysisDraftRow("1.1", "1.9", "Refined", "YouTube")],
             selected_source=source,
         ),
     )
@@ -762,7 +762,7 @@ def test_adding_captions_during_background_scan_waits_for_cancellation(
     assert dialog.scan_button.text() == "Whisper Running..."
     assert dialog.scan_button.objectName() != "primary"
     assert dialog.add_button.objectName() == "primary"
-    assert dialog.add_button.text() == "Use Refined YouTube Transcript"
+    assert dialog.add_button.text() == "Use YouTube Transcript"
     assert dialog.table.isEnabled()
     dialog.table.item(0, 3).setText("Edited while Whisper runs")
     dialog.accept_suggestions()
@@ -790,8 +790,8 @@ def test_automatic_refinement_precedes_whisper_and_keeps_its_selected_draft(
     )
     captions = [SourceCaption(1, 3, "Original words", "YouTube creator (en)")]
     refined = [
-        SourceCaption(1.1, 1.8, "Original", "Refined YouTube"),
-        SourceCaption(2.3, 2.9, "words", "Refined YouTube"),
+        SourceCaption(1.1, 1.8, "Original", "YouTube"),
+        SourceCaption(2.3, 2.9, "words", "YouTube"),
     ]
     calls = []
 
@@ -852,7 +852,7 @@ def test_automatic_refinement_precedes_whisper_and_keeps_its_selected_draft(
     assert saved[-1].youtube_rows == original_rows
     assert len(saved[-1].refined_rows) == 2
     assert dialog.selected_source == "refined"
-    assert dialog.add_button.text() == "Use Refined YouTube Transcript"
+    assert dialog.add_button.text() == "Use YouTube Transcript"
     assert dialog.add_button.isEnabled()
     assert dialog.refine_button.isEnabled()
     assert dialog.source_captions == captions
@@ -947,7 +947,7 @@ def test_automatic_analysis_without_captions_starts_whisper_directly(
 
 
 @pytest.mark.parametrize("refined_rows", [[], [
-    AnalysisDraftRow("1.1", "2.9", "Refined edit", "Refined YouTube", checked=False),
+    AnalysisDraftRow("1.1", "2.9", "Refined edit", "YouTube", checked=False),
 ]])
 def test_restoring_drafts_only_processes_missing_refinement(
     qtbot, tmp_path, monkeypatch, refined_rows,
@@ -1018,11 +1018,11 @@ def test_source_choice_imports_its_own_segmentation_and_saves_it(
     ], 2, 1, -30, "base", "en", detect_hardware()))
     dialog._completed(AnalysisResult(
         [], 1, 0, -30, None, None, detect_hardware(),
-        refined_captions=[SourceCaption(1.1, 2.9, "Refined line", "Refined YouTube")],
+        refined_captions=[SourceCaption(1.1, 2.9, "Refined line", "YouTube")],
     ))
     dialog.local_radio.setChecked(source == "refined")
     expected = [
-        AnalysisSuggestion(1.1, 2.9, "Refined line", "Refined YouTube")
+        AnalysisSuggestion(1.1, 2.9, "Refined line", "YouTube")
         if source == "refined" else
         AnalysisSuggestion(0.5, 3.5, "One longer Whisper line", "Whisper", 0.8)
     ]
@@ -1059,7 +1059,7 @@ def test_closing_review_preserves_all_edited_drafts_and_checkboxes(
         source_captions=captions,
         review=AnalysisReview(
             youtube_rows=legacy_rows,
-            refined_rows=[AnalysisDraftRow("1", "2", "Previous draft", "Refined YouTube")],
+            refined_rows=[AnalysisDraftRow("1", "2", "Previous draft", "YouTube")],
             selected_source="refined",
         ),
     )
@@ -1069,7 +1069,7 @@ def test_closing_review_preserves_all_edited_drafts_and_checkboxes(
     ], 1, 1, -30, "base", "en", detect_hardware()))
     dialog._completed(AnalysisResult(
         [], 1, 0, -30, None, None, detect_hardware(),
-        refined_captions=[SourceCaption(1.1, 1.9, "Refined draft", "Refined YouTube")],
+        refined_captions=[SourceCaption(1.1, 1.9, "Refined draft", "YouTube")],
     ))
     dialog.local_table.item(0, 3).setText("Edited Whisper")
     dialog.refined_table.item(0, 3).setText("Edited refinement")
@@ -1114,7 +1114,7 @@ def test_finishing_commits_active_table_editor_to_draft(qtbot, tmp_path, finish,
     if source == "refined":
         dialog._completed(AnalysisResult(
             [], 1, 0, -30, None, None, detect_hardware(),
-            refined_captions=[SourceCaption(1, 2, "Refined", "Refined YouTube")],
+            refined_captions=[SourceCaption(1, 2, "Refined", "YouTube")],
         ))
     else:
         dialog._populate([AnalysisSuggestion(1, 2, "Whisper", "Whisper")])
@@ -1200,7 +1200,7 @@ def test_canceling_rescan_retains_local_and_youtube_drafts(qtbot, tmp_path, monk
         [AnalysisDraftRow("1", "2", "YouTube draft", "YouTube")],
         [AnalysisDraftRow("0.5", "3", "Existing Whisper edit", "Whisper")],
         "local",
-        refined_rows=[AnalysisDraftRow("1.1", "1.9", "Refined edit", "Refined YouTube")],
+        refined_rows=[AnalysisDraftRow("1.1", "1.9", "Refined edit", "YouTube")],
     )
     dialog = AnalysisDialog(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
@@ -1280,13 +1280,18 @@ def test_source_labels_and_play_action_identify_the_selected_transcript(qtbot, t
         source_captions=[SourceCaption(1, 2, "YouTube line", "YouTube creator (en)")],
     )
     qtbot.addWidget(dialog)
-    assert dialog.refined_panel.title() == "Refined YouTube"
+    assert dialog.refined_panel.title() == "YouTube"
+    assert dialog.refined_radio.text() == "Select YouTube transcript"
+    assert dialog.refined_add_button.text() == "Use YouTube Transcript"
+    assert dialog._recovery_hint(refine=True).startswith("No YouTube draft is available.")
     assert dialog.local_panel.title() == "Whisper Transcript"
     assert not dialog.preview_button.isEnabled()
     complete_refinement(dialog)
     dialog.refined_table.selectRow(0)
     assert dialog.preview_button.isEnabled()
-    assert dialog.preview_button.text() == "Play Selected Refined YouTube Line"
+    assert dialog.preview_button.text() == "Play Selected YouTube Line"
+    assert dialog.refined_status.text().startswith("1 YouTube rows.")
+    assert "'Use YouTube Transcript'" in dialog._recovery_hint(refine=True)
     previews = []
     dialog.preview_requested.connect(lambda start, end: previews.append((start, end)))
     dialog.preview_button.click()
@@ -1314,8 +1319,8 @@ def test_refinement_runs_without_whisper_and_replaces_only_its_draft(
         return AnalysisResult(
             [], 2, 0, -30, None, None, detect_hardware(),
             refined_captions=[
-                SourceCaption(1.1, 1.8, "First", "Refined YouTube"),
-                SourceCaption(2.3, 2.9, "Second", "Refined YouTube"),
+                SourceCaption(1.1, 1.8, "First", "YouTube"),
+                SourceCaption(2.3, 2.9, "Second", "YouTube"),
             ],
         )
 
@@ -1324,7 +1329,7 @@ def test_refinement_runs_without_whisper_and_replaces_only_its_draft(
         youtube_rows=[AnalysisDraftRow("1", "3", "Edited original", "YouTube")],
         local_rows=[AnalysisDraftRow("0.5", "3.5", "Edited Whisper", "Whisper")],
         selected_source="local",
-        refined_rows=[AnalysisDraftRow("1", "3", "Previous refined edit", "Refined YouTube")],
+        refined_rows=[AnalysisDraftRow("1", "3", "Previous refined edit", "YouTube")],
         pause_threshold=0.55,
     )
     captions = [SourceCaption(1, 3, "Original imported words", "YouTube automatic (en)")]
@@ -1335,6 +1340,7 @@ def test_refinement_runs_without_whisper_and_replaces_only_its_draft(
     qtbot.addWidget(dialog)
 
     missing = tmp_path / "missing-whisper"
+    assert dialog.refined_status.text().startswith("Saved YouTube draft: 1 rows.")
     monkeypatch.setattr(
         analysis_dialog, "WhisperManager",
         lambda _root: SimpleNamespace(cli_path=missing, model_path=lambda _key: missing),
@@ -1368,8 +1374,8 @@ def test_refinement_runs_without_whisper_and_replaces_only_its_draft(
     assert [row.caption for row in saved.refined_rows] == ["First", "Second"]
     assert saved.selected_source == "refined"
     assert dialog.selected_source == "refined"
-    assert dialog.add_button.text() == "Use Refined YouTube Transcript"
-    assert dialog.preview_button.text() == "Play Selected Refined YouTube Line"
+    assert dialog.add_button.text() == "Use YouTube Transcript"
+    assert dialog.preview_button.text() == "Play Selected YouTube Line"
     previews = []
     dialog.preview_requested.connect(lambda start, end: previews.append((start, end)))
     dialog.preview_button.click()
@@ -1400,7 +1406,7 @@ def test_refinement_interruption_keeps_all_drafts(qtbot, tmp_path, monkeypatch, 
         youtube_rows=[AnalysisDraftRow("1", "3", "YouTube edit", "YouTube")],
         local_rows=[AnalysisDraftRow("0.5", "3.5", "Whisper edit", "Whisper")],
         selected_source="local",
-        refined_rows=[AnalysisDraftRow("1.1", "2.9", "Refined edit", "Refined YouTube")],
+        refined_rows=[AnalysisDraftRow("1.1", "2.9", "Refined edit", "YouTube")],
     )
     dialog = AnalysisDialog(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
@@ -1438,7 +1444,7 @@ def test_refinement_interruption_keeps_all_drafts(qtbot, tmp_path, monkeypatch, 
 def test_whisper_rescan_leaves_refined_edits_and_pause_setting_unchanged(qtbot, tmp_path):
     review = AnalysisReview(
         refined_rows=[
-            AnalysisDraftRow("1.05", "unfinished", "Edited refinement", "Refined YouTube", checked=False),
+            AnalysisDraftRow("1.05", "unfinished", "Edited refinement", "YouTube", checked=False),
         ],
         selected_source="refined",
         pause_threshold=0.7,
@@ -1464,7 +1470,7 @@ def test_processing_transcript_cannot_be_imported_or_previewed(qtbot, tmp_path, 
     dialog = AnalysisDialog(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
         review=AnalysisReview(
-            refined_rows=[AnalysisDraftRow("1", "2", "Saved draft", "Refined YouTube")],
+            refined_rows=[AnalysisDraftRow("1", "2", "Saved draft", "YouTube")],
             selected_source="refined",
         ),
     )
@@ -1487,7 +1493,7 @@ def test_compact_review_keeps_refined_rows_visible(qtbot, tmp_path):
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
         source_captions=[SourceCaption(1, 3, "Original", "YouTube")],
         review=AnalysisReview(
-            refined_rows=[AnalysisDraftRow("1", "3", "Refined", "Refined YouTube")],
+            refined_rows=[AnalysisDraftRow("1", "3", "Refined", "YouTube")],
             selected_source="refined",
         ),
     )
@@ -1525,7 +1531,7 @@ def test_late_cancellation_discards_completion_queued_after_final_worker_check(
         [AnalysisSuggestion(1, 3, "New Whisper", "Whisper")],
         1, 1, -30, "base", "en", detect_hardware(),
         refined_captions=(
-            [SourceCaption(1, 3, "New refinement", "Refined YouTube")]
+            [SourceCaption(1, 3, "New refinement", "YouTube")]
             if source == "refined" else None
         ),
     )
@@ -1544,7 +1550,7 @@ def test_late_cancellation_discards_completion_queued_after_final_worker_check(
         youtube_rows=[AnalysisDraftRow("1", "3", "YouTube edit", "YouTube")],
         local_rows=[AnalysisDraftRow("1.1", "2.9", "Whisper edit", "Whisper")],
         refined_rows=[
-            AnalysisDraftRow("1.2", "2.8", "Refined edit", "Refined YouTube"),
+            AnalysisDraftRow("1.2", "2.8", "Refined edit", "YouTube"),
         ],
         selected_source="local" if source == "refined" else "refined",
     )
@@ -1592,7 +1598,7 @@ def test_model_switch_recovery_can_use_current_whisper_without_rerunning(
         youtube_import=True,
         review=AnalysisReview(
             youtube_rows=[AnalysisDraftRow("1", "3", "YouTube edit", "YouTube")],
-            refined_rows=[AnalysisDraftRow("1.1", "2.9", "Refined edit", "Refined YouTube")],
+            refined_rows=[AnalysisDraftRow("1.1", "2.9", "Refined edit", "YouTube")],
             selected_source="refined",
         ),
     )
@@ -1708,7 +1714,7 @@ def test_successful_model_switch_updates_only_local_draft_provenance(
     review = AnalysisReview(
         youtube_rows=[AnalysisDraftRow("1", "2", "YouTube edit", "YouTube")],
         local_rows=[AnalysisDraftRow("1", "2", "Tiny edit", "Whisper", checked=False)],
-        refined_rows=[AnalysisDraftRow("1.1", "1.9", "Refined edit", "Refined YouTube")],
+        refined_rows=[AnalysisDraftRow("1.1", "1.9", "Refined edit", "YouTube")],
         selected_source="refined", local_model_name="tiny", local_detected_language="en",
     )
     dialog = AnalysisDialog(
@@ -1811,7 +1817,7 @@ def test_empty_refinement_keeps_drafts_and_does_not_chain_whisper(
     review = AnalysisReview(
         youtube_rows=[AnalysisDraftRow("1", "2", "Original", "YouTube")],
         refined_rows=(
-            [AnalysisDraftRow("1.1", "1.9", "Refined edit", "Refined YouTube")]
+            [AnalysisDraftRow("1.1", "1.9", "Refined edit", "YouTube")]
             if has_previous else []
         ),
         selected_source="refined",
@@ -1845,7 +1851,7 @@ def test_clicking_draft_selects_its_source_and_checked_rows_control_import(qtbot
         youtube_import=True,
         review=AnalysisReview(
             youtube_rows=[AnalysisDraftRow("1", "2", "YouTube", "YouTube")],
-            refined_rows=[AnalysisDraftRow("2", "3", "Refined", "Refined YouTube")],
+            refined_rows=[AnalysisDraftRow("2", "3", "Refined", "YouTube")],
             local_rows=[AnalysisDraftRow("3", "4", "Whisper", "Whisper")],
             selected_source="local" if source != "local" else "refined",
         ),
