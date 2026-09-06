@@ -10,11 +10,14 @@ from PySide6.QtCore import QBuffer, QIODevice, QObject, QPoint, Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
     QApplication,
     QComboBox,
     QLineEdit,
     QMenu,
     QPlainTextEdit,
+    QScrollArea,
+    QScrollBar,
     QTableWidget,
     QTabWidget,
     QWidget,
@@ -32,15 +35,22 @@ SELECTORS = frozenset({
     "exportDetailsClose",
     "projectCloseKeepProcessing", "projectCloseCancelTasks", "projectCloseKeepOpen",
     "projectCloseSave", "projectCloseDiscard", "projectCloseCancel",
+    "projectEditorScroll",
+    "projectEditorScrollbar", "projectDetailsScrollbar", "selectedSegmentScrollbar",
 })
 EDITOR_SELECTORS = frozenset({
     "projectTitle", "segmentCaption", "segmentsTable",
     "saveProject", "exportProject", "analyzeProject",
+    "projectEditorScroll",
+    "projectEditorScrollbar", "projectDetailsScrollbar", "selectedSegmentScrollbar",
 })
 KEYS = {
     "Enter": Qt.Key.Key_Return, "Escape": Qt.Key.Key_Escape,
     "Tab": Qt.Key.Key_Tab, "Backspace": Qt.Key.Key_Backspace,
     "Space": Qt.Key.Key_Space, "Delete": Qt.Key.Key_Delete,
+    "PageUp": Qt.Key.Key_PageUp, "PageDown": Qt.Key.Key_PageDown,
+    "Home": Qt.Key.Key_Home, "End": Qt.Key.Key_End,
+    "Up": Qt.Key.Key_Up, "Down": Qt.Key.Key_Down,
 }
 TASK_ACTIONS = frozenset({
     "taskShowProject", "taskCancel", "taskRetry", "taskOpenOutput", "taskDetails",
@@ -71,6 +81,8 @@ class UIAutomation:
     def _target(self, selector: str, project_id: str | None) -> QObject:
         if selector not in SELECTORS:
             raise ValueError(f"Selector is not allowlisted: {selector}")
+        if project_id is not None and selector not in EDITOR_SELECTORS | {"projectTabs"}:
+            raise ValueError("Omit project_id for global Tasks and decision controls.")
         window = self.bridge.window
         if project_id is not None and project_id not in {
             session.id for session in window.project_sessions
@@ -81,6 +93,12 @@ class UIAutomation:
             raise ValueError("Project is not the visible tab. Select it through projectTabs first.")
         roots = [editor] if selector in EDITOR_SELECTORS and editor is not None else [window]
         for root in roots:
+            visible = [
+                item for item in root.findChildren(QObject, selector)
+                if isinstance(item, (QWidget, QAction)) and item.isVisible()
+            ]
+            if len(visible) > 1:
+                raise ValueError("Multiple visible widgets match this selector; dismiss other windows.")
             target = self._find(root, selector)
             if target is not None:
                 return target
@@ -96,27 +114,48 @@ class UIAutomation:
 
     @staticmethod
     def _hit(widget: QWidget, point: QPoint) -> QWidget:
-        if not widget.visibleRegion().contains(point):
-            raise ValueError("The target input point is clipped. Enlarge or scroll its panel.")
         hit = QApplication.widgetAt(widget.mapToGlobal(point))
         if hit is None or (hit is not widget and not widget.isAncestorOf(hit)):
-            raise ValueError("The target input point is obscured by another widget or window.")
+            raise ValueError("The target input point is clipped or obscured by another widget/window.")
+        local = hit.mapFromGlobal(widget.mapToGlobal(point))
+        if not hit.visibleRegion().contains(local):
+            raise ValueError("The actual input receiver is clipped. Enlarge or scroll its panel.")
         return hit
 
+    @staticmethod
+    def _input_point(widget: QWidget) -> QPoint:
+        area = widget.viewport() if isinstance(widget, QAbstractScrollArea) else widget
+        visible = area.visibleRegion()
+        if visible.isEmpty():
+            raise ValueError("The target input area is clipped. Enlarge or scroll its panel.")
+        return widget.mapFromGlobal(area.mapToGlobal(visible.boundingRect().center()))
+
     def _click(self, widget: QWidget, point: QPoint | None = None) -> None:
-        point = widget.rect().center() if point is None else point
-        hit = self._hit(widget, point)
+        point = self._input_point(widget) if point is None else point
+        hit = self._prepare_input(widget, point)
         position = hit.mapFromGlobal(widget.mapToGlobal(point))
         QTest.mouseClick(hit, Qt.MouseButton.LeftButton, pos=position)
+
+    def _prepare_input(self, widget: QWidget, point: QPoint) -> QWidget:
+        hit = self._hit(widget, point)
+        window = hit.window()
+        if not isinstance(window, QMenu) and not window.isActiveWindow():
+            window.activateWindow()
+            if not QTest.qWaitForWindowActive(window, 1000):
+                raise ValueError("The application window could not receive focus. Focus it and retry.")
+        return self._hit(widget, point)
 
     @staticmethod
     def _describe(target: QObject) -> dict[str, Any]:
         result: dict[str, Any] = {"selector": target.objectName()}
         if isinstance(target, QWidget):
+            visible = target.visibleRegion().boundingRect()
             result.update(
                 enabled=target.isEnabled(), visible=target.isVisible(), focused=target.hasFocus(),
                 rendered=not target.visibleRegion().isEmpty(),
                 accessible_name=target.accessibleName(),
+                size=[target.width(), target.height()],
+                visible_rect=[visible.x(), visible.y(), visible.width(), visible.height()],
             )
         elif isinstance(target, QAction):
             result.update(enabled=target.isEnabled(), visible=target.isVisible(), text=target.text())
@@ -141,6 +180,13 @@ class UIAutomation:
             ])
         elif isinstance(target, QComboBox):
             result.update(index=target.currentIndex(), text=target.currentText())
+        elif isinstance(target, QScrollArea):
+            result.update(
+                vertical_scroll=target.verticalScrollBar().value(),
+                vertical_maximum=target.verticalScrollBar().maximum(),
+            )
+        elif isinstance(target, QScrollBar):
+            result.update(value=target.value(), minimum=target.minimum(), maximum=target.maximum())
         return result
 
     def state(self) -> dict[str, Any]:
@@ -189,7 +235,7 @@ class UIAutomation:
         return self.bridge.call(capture)
 
     def interact(
-        self, selector: str, action: Literal["click", "type", "key", "select", "close_tab"],
+        self, selector: str, action: Literal["click", "type", "key", "select", "close_tab", "reveal"],
         project_id: str | None = None, text: str | None = None,
         index: int | None = None, key: str | None = None,
     ) -> dict[str, str]:
@@ -199,7 +245,7 @@ class UIAutomation:
                 raise ValueError("Target is not enabled for input.")
             if not target.isVisible():
                 raise ValueError("Target is not visible.")
-            if isinstance(target, QWidget) and target.visibleRegion().isEmpty():
+            if action != "reveal" and isinstance(target, QWidget) and target.visibleRegion().isEmpty():
                 raise ValueError("Target has no rendered input area.")
             modal = QApplication.activeModalWidget()
             if modal is not None and (
@@ -207,7 +253,10 @@ class UIAutomation:
                 or (target is not modal and not modal.isAncestorOf(target))
             ):
                 raise ValueError("A modal window blocks this target; dismiss it in the editor.")
-            if action == "type":
+            if action == "reveal":
+                if not isinstance(target, QWidget):
+                    raise ValueError("Only widgets can be revealed by scrolling.")
+            elif action == "type":
                 if not isinstance(target, (QLineEdit, QPlainTextEdit)) or target.isReadOnly():
                     raise ValueError("Typing is allowed only in editable title/caption fields.")
                 if text is None or len(text) > 10000:
@@ -226,6 +275,8 @@ class UIAutomation:
             elif action != "click":
                 raise ValueError("Unsupported UI action.")
             tab = target.widget(index) if isinstance(target, QTabWidget) and index is not None else None
+            if tab is not None and project_id is not None and tab.session.id != project_id:
+                raise ValueError("The tab index does not match project_id.")
             row_id = None
             if isinstance(target, QTableWidget) and action == "select":
                 item = target.item(index, 0)
@@ -246,7 +297,7 @@ class UIAutomation:
                 try:
                     if not target.isVisible() or not target.isEnabled():
                         raise ValueError("Target became hidden or disabled before input.")
-                    if isinstance(target, QWidget) and target.visibleRegion().isEmpty():
+                    if action != "reveal" and isinstance(target, QWidget) and target.visibleRegion().isEmpty():
                         raise ValueError("Target lost its rendered input area before input.")
                     if project_id is not None and self.bridge.window.active_editor.session.id != project_id:
                         raise ValueError("The active project changed before input.")
@@ -269,7 +320,14 @@ class UIAutomation:
                         raise ValueError("A modal window blocked the target before input.")
                     # A queued input may enter a nested modal event loop. Never hold an MCP
                     # request waiting for it; subsequent state calls report its real status.
-                    if isinstance(target, QAction):
+                    if action == "reveal":
+                        ancestor = target.parentWidget()
+                        while ancestor is not None:
+                            if isinstance(ancestor, QScrollArea):
+                                ancestor.ensureWidgetVisible(target, 10, 10)
+                            ancestor = ancestor.parentWidget()
+                        self._hit(target, self._input_point(target))
+                    elif isinstance(target, QAction):
                         menus = [obj for obj in target.associatedObjects() if isinstance(obj, QMenu)]
                         if not menus:
                             raise ValueError("Action has no application menu.")
@@ -279,7 +337,7 @@ class UIAutomation:
                             raise ValueError("The action menu did not become visible.")
                         self._click(menu, menu.actionGeometry(target).center())
                     elif action == "type":
-                        self._hit(target, target.rect().center())
+                        self._prepare_input(target, self._input_point(target))
                         target.setFocus()
                         QTest.keyClick(target, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
                         if all(" " <= char <= "~" for char in text):
@@ -297,7 +355,7 @@ class UIAutomation:
                         if isinstance(target, QLineEdit):
                             QTest.keyClick(target, Qt.Key.Key_Tab)
                     elif action == "key":
-                        self._hit(target, target.rect().center())
+                        self._prepare_input(target, self._input_point(target))
                         target.setFocus()
                         QTest.keyClick(target, KEYS[key])
                     elif action == "close_tab":
@@ -335,7 +393,7 @@ class UIAutomation:
                         ):
                             raise RuntimeError("The row click did not select the requested item.")
                     elif action == "select" and isinstance(target, QComboBox):
-                        self._hit(target, target.rect().center())
+                        self._prepare_input(target, self._input_point(target))
                         target.setFocus()
                         QTest.keyClick(target, Qt.Key.Key_Home)
                         for _ in range(index):

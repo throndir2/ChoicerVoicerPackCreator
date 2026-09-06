@@ -209,9 +209,13 @@ the application's own rendered window, **not the desktop**. `get_frame` still re
 **source-media frame**, not a UI screenshot. UI images/text can reach the model provider too.
 
 `ui_interact(selector, action, project_id?, text?, index?, key?)` accepts `click`, `type`, `key`,
-`select`, or `close_tab`. Selection/closing uses zero-based tab/table/combobox indices;
+`select`, `close_tab`, or `reveal`. Selection/closing uses zero-based tab/table/combobox indices;
 typing replaces editable text using Qt input (line fields commit by moving focus).
 Tab selection and closing use real mouse events on the tab bar.
+`reveal` explicitly scrolls ancestor areas to a known widget without editing anything; the next
+click/key input must still hit the real rendered widget. On short screens use it before field
+input, or send `Home`/`End`/`PageUp`/`PageDown` to an allowlisted scrollbar. Inputs activate only
+their own application window when needed, never as a side effect of background completion.
 Actions are queued so opening a modal does not trap a request: read `get_ui_state.actions`
 for the returned `action_id` reaching `completed` or `failed` (a modal can leave it `running`).
 Acceptance is not proof the intended workflow finished; inspect widgets, Tasks, and projects.
@@ -221,15 +225,20 @@ Stable selectors: `projectTabs`, `projectTitle`, `segmentCaption`, `segmentsTabl
 `taskLog`, `taskShowProject`, `taskCancel`, `taskRetry`, `taskOpenOutput`, `taskDetails`.
 Export details expose `exportDetailsClose`; project-close decisions expose
 `projectCloseKeepProcessing`, `projectCloseCancelTasks`, `projectCloseKeepOpen`,
-`projectCloseSave`, `projectCloseDiscard`, and `projectCloseCancel`.
+`projectCloseSave`, `projectCloseDiscard`, and `projectCloseCancel`. Scrolling selectors are
+`projectEditorScroll`, `projectEditorScrollbar`, `projectDetailsScrollbar`, and `selectedSegmentScrollbar`.
 Editor selectors are scoped to the visible `project_id`; select that tab before typing.
 Closed/discarded document IDs retire after their tasks finish; retained background documents
 keep their identity. Reopening a retired document creates a new identity.
-Allowed keys: `Enter`, `Escape`, `Tab`, `Backspace`, `Space`, `Delete`.
+Omit `project_id` for global Tasks/decision controls. Ambiguous visible selectors are rejected.
+Allowed keys: `Enter`, `Escape`, `Tab`, `Backspace`, `Space`, `Delete`,
+`PageUp`, `PageDown`, `Home`, `End`, `Up`, `Down`.
 Unknown selectors, disabled/hidden widgets and modal-blocked targets fail explicitly.
 Clipped table rows and widgets without a rendered input area are refused rather than
 claiming that an invisible click worked. Queued tab/row inputs retain their original identities
 across reordering; changed task/segment selection is rejected before acting on a different target.
+Hit testing checks the actual receiver's visible region and Qt's widget at its global position,
+not just widget geometry (which can extend underneath other controls).
 Native OS file dialogs are not an unconstrained automation endpoint: a human must dismiss
 them. Use semantic tools to supply authorized paths, then UI input for visible editing.
 There is no Python evaluation, arbitrary member invocation, clipboard or desktop input API.

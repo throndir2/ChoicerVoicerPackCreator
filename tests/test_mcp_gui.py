@@ -431,12 +431,25 @@ def test_queued_tab_close_keeps_identity_when_tabs_reorder(qtbot, live_editor):
     second = window.add_project(PackProject(title="Second"), dirty=False)
     window.focus_project(first.session.id)
     index = window.tabs.indexOf(first)
+    with pytest.raises(ValueError, match="does not match project_id"):
+        hooks.interact(
+            "projectTabs", "close_tab", first.session.id, index=window.tabs.indexOf(second)
+        )
     accepted = hooks.interact("projectTabs", "close_tab", first.session.id, index=index)
     window.tabs.tabBar().moveTab(index, window.tabs.indexOf(second))
     qtbot.waitUntil(lambda: window.tabs.indexOf(first) < 0)
     assert window.tabs.indexOf(second) >= 0
     record = next(item for item in hooks.state()["actions"] if item["action_id"] == accepted["action_id"])
     assert record["state"] == "completed"
+
+
+def test_global_ui_controls_reject_misleading_document_scope(live_editor):
+    from choicer_voicer_pack_creator.ui_automation import UIAutomation
+
+    window, bridge, _automation = live_editor
+    hooks = UIAutomation(bridge)
+    with pytest.raises(ValueError, match="Omit project_id"):
+        hooks.interact("taskCancel", "click", window.active_editor.session.id)
 
 
 def test_queued_caption_input_rejects_changed_segment_selection(qtbot, live_editor):

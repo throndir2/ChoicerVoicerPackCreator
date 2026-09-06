@@ -381,14 +381,19 @@ def create_server(
 
     @server.tool(annotations=edit)
     async def ui_interact(
-        selector: str, action: Literal["click", "type", "key", "select", "close_tab"],
+        selector: str,
+        action: Literal["click", "type", "key", "select", "close_tab", "reveal"],
         project_id: str | None = None, text: str | None = None,
         index: int | None = None,
-        key: Literal["Enter", "Escape", "Tab", "Backspace", "Space", "Delete"] | None = None,
+        key: Literal[
+            "Enter", "Escape", "Tab", "Backspace", "Space", "Delete",
+            "PageUp", "PageDown", "Home", "End", "Up", "Down",
+        ] | None = None,
     ) -> dict[str, str]:
         """Opt-in: enqueue allowlisted application-local Qt input. Poll get_ui_state actions.
 
         select/close_tab use zero-based indices; type replaces editable field text.
+        reveal scrolls ancestor areas only; subsequent typing/clicks still require a real hit target.
         Project-scoped input requires the project's tab to be visible. No arbitrary evaluation.
         """
         return await to_thread.run_sync(partial(

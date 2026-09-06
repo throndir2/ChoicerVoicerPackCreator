@@ -102,6 +102,11 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
                             item for item in current["actions"]
                             if item["action_id"] == accepted["action_id"]
                         )
+                        if record["state"] == "failed":
+                            await screenshot("mcp-failure.png")
+                            (artifacts / "mcp-failure-state.json").write_text(
+                                json.dumps(current, indent=2), encoding="utf-8"
+                            )
                         assert record["state"] != "failed", record
                         if record["state"] == "completed":
                             return current
@@ -159,8 +164,25 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
                     await anyio.sleep(0.02)
 
             await tab(c["project_id"])
+            editor_scroll = next(
+                item for item in (await state())["widgets"]
+                if item["selector"] == "projectEditorScroll"
+            )
+            if editor_scroll["vertical_maximum"] > 0:
+                scrolled = await interact(
+                    "projectEditorScrollbar", "key", project_id=c["project_id"], key="End"
+                )
+                assert next(
+                    item for item in scrolled["widgets"] if item["selector"] == "projectEditorScroll"
+                )["vertical_scroll"] > 0
+                await interact(
+                    "projectEditorScrollbar", "key", project_id=c["project_id"], key="Home"
+                )
+            await interact("projectTitle", "reveal", project_id=c["project_id"])
             await interact("projectTitle", "type", project_id=c["project_id"], text="C edited in UI")
+            await interact("segmentsTable", "reveal", project_id=c["project_id"])
             await interact("segmentsTable", "select", project_id=c["project_id"], index=0)
+            await interact("segmentCaption", "reveal", project_id=c["project_id"])
             await interact(
                 "segmentCaption", "type", project_id=c["project_id"], text="Caption typed in visible UI"
             )
@@ -202,6 +224,7 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
             await interact("taskDetails", "click")
             await interact("exportDetailsClose", "click")
             assert not (await call("get_job", job_id=export["job_id"]))["cancel_requested"]
+            await interact("projectTitle", "reveal", project_id=c["project_id"])
             await interact("projectTitle", "click", project_id=c["project_id"])
             focus_before = (await state())["focus_selector"]
             assert focus_before == "projectTitle"
@@ -261,6 +284,7 @@ def test_native_stdio_background_projects_and_real_ui(tmp_path):
             assert reopened["project_id"] != b["project_id"]
             assert reopened["project"]["title"] == "Native B"
             await tab(c["project_id"])
+            await interact("projectTitle", "reveal", project_id=c["project_id"])
             await interact(
                 "projectTitle", "type", project_id=c["project_id"], text="C recovery draft"
             )

@@ -115,7 +115,7 @@ content, never the desktop. `get_frame` is SOURCE MEDIA, not a UI screenshot.
 These images and UI text may be sent to the client's model provider.
 
 `ui_interact(selector, action, project_id?, text?, index?, key?)` queues real
-application-local Qt input: click/type/key/select/close_tab. Type replaces editable
+application-local Qt input: click/type/key/select/close_tab/reveal. Type replaces editable
 text; select/close_tab use zero-based indices. Poll `get_ui_state.actions`
 for the returned action_id; queued acceptance is not completed interaction.
 Select a project's real tab before sending its project-scoped field input.
@@ -125,10 +125,15 @@ taskProjectFilter/taskShowProject/taskCancel/taskRetry/taskOpenOutput/taskDetail
 Details expose exportDetailsClose. Close decisions expose projectCloseKeepProcessing,
 projectCloseCancelTasks, projectCloseKeepOpen, projectCloseSave, projectCloseDiscard,
 and projectCloseCancel.
-Keys are Enter/Escape/Tab/Backspace/Space/Delete. Disabled, hidden, unknown or
+For short screens, reveal explicitly scrolls ancestor areas before hit-checked input.
+Real scrollbars are projectEditorScrollbar, projectDetailsScrollbar, selectedSegmentScrollbar;
+projectEditorScroll reports the overall scroll position. Global Tasks/decisions omit project_id.
+Keys are Enter/Escape/Tab/Backspace/Space/Delete/PageUp/PageDown/Home/End/Up/Down.
+Disabled, hidden, ambiguous, unknown or
 modal-blocked targets fail. Dismiss native file dialogs manually; use semantic
 tools for authorized paths. Clipped rows are refused, not treated as successful
 invisible clicks. Queued inputs keep target identities across tab/row reordering.
+Actual receiver hit testing accounts for ancestor clipping and covering widgets/windows.
 No arbitrary evaluation/member calls, clipboard,
 desktop capture or global input is exposed. Semantic calls alone do not validate UI.
 
