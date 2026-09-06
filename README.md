@@ -146,7 +146,7 @@ source.
 Portable Windows builds check the public
 [GitHub releases](https://github.com/throndir2/ChoicerVoicerPackCreator/releases) in the background
 on startup. **Prereleases are included by default**, alongside stable releases.
-The **Help** menu provides **Check for Updates**, **Check for Updates on Startup**, and
+The **Help → Updates** submenu provides **Check for Updates**, **Check for Updates on Startup**, and
 **Include Prereleases**. An offline or rate-limited automatic check reports its failure in the
 status bar without interrupting your work. Checks contact GitHub, not your media or project files.
 
@@ -215,7 +215,7 @@ or reference prepared local assets. The MCP tools also do not provide OCR or wik
 
 ## Create a pack
 
-1. Choose **File → New from Video**.
+1. Choose **File → New → From Video**.
 2. Once the source is ready, start editing immediately. Transcript analysis, voice-fingerprint
    preparation, and backing generation use the shared background queue. The inline
    **Background processing** panel shows their progress, permission requests, and cancel/retry
@@ -232,7 +232,7 @@ or reference prepared local assets. The MCP tools also do not provide OCR or wik
 8. Repeat for the whole video. Drag segment edges on the timeline for fine adjustments.
 9. Review the generated backing, or choose a custom clean backing track and icon.
 10. Save the editable project.
-11. Choose **Export Pack + ZIP** and select an output directory.
+11. Choose **Export Pack + ZIP**, review export options, and select an output directory.
 
 **File > Open Recent** remembers the last 10 successfully opened or saved projects, newest first.
 Opening or saving the same project moves it to the top without duplicates; **Save Project As**
@@ -251,22 +251,27 @@ The tab's `*`, `[working]`, and `[!]` indicators show unsaved edits, work in pro
 Completion does not select a different tab.
 
 The permanent menu bar sits directly below the Windows title bar, above the project tabs.
-**File** contains new/open/import, recent projects, and the active project's save/export/close
+**File → New** groups **From Video** and **From YouTube**; **File → Import Pack** groups **Folder**
+and **ZIP**. **File** also contains open/recent projects and the active project's save/export/close
 commands. **Project** contains video analysis and backing-track generation; **Segments** contains
-segment editing and preview commands. **Tools > Tasks** and **Help** (updates, diagnostics, MCP
-help, and About) apply to the whole application.
+segment editing and preview commands. **Tools > Tasks** and **Help** apply to the whole application.
+**Help → Updates** groups update commands and preferences, and **Help → Diagnostics** groups log
+collection commands; MCP help and About remain directly under Help.
 
-Each tab has a compact **Save / Export / Analyze / Backing** toolbar. Its commands and the
+Each tab has a compact **Save / Export / Analyze** toolbar. Its commands and the
 project-related menus always target the active tab. Primary actions pair icons with short labels;
 secondary segment, file-picker, and tab-close controls use icons with descriptive tooltips.
-Hover over a command for its purpose and available shortcut. **Ctrl+W** closes the active project,
-with the same unsaved-change and running-task prompts as its tab's close button.
+Hover over a command for its purpose and available shortcut. **File → Close Project** or **Ctrl+W**
+closes the active project, with the same unsaved-change and running-task prompts as its tab's close
+button. The Windows close button or **Alt+F4** exits the application, prompting to save/discard/cancel
+unsaved projects and to stop active tasks before exiting.
+Backing generation remains in Pack Details and the Project menu.
 
 Drag local video files (MP4, MKV, MOV, WebM, OGV, or AVI) or saved `.cvpack.json` projects
 anywhere in the main editor window to open each in its own tab, without replacing existing
 work or discarding unsaved edits. Dropping an already-open project focuses its tab instead
 of opening a duplicate. Videos use the same background import and initial processing as
-**New from Video**. Drops over text fields also open tabs rather than inserting file paths;
+**File → New → From Video**. Drops over text fields also open tabs rather than inserting file paths;
 ordinary text dragging still edits text. Folders, web links, and other file types are not
 accepted; if a drop mixes supported and unsupported items, none are opened.
 
@@ -310,12 +315,13 @@ the dialog or accepting unchanged settings does not downscale or re-encode compa
 Expand **Advanced: prompt audio padding** to review head/tail silence (0-2 seconds each) for newly
 generated prompts. Imported prompt recordings are not repadded.
 
-**Continue to export location...** applies the choices to the project's existing controls, then
+**Continue to export location...** applies the choices to the project, then
 continues through backing music, destination and overwrite decisions. Changed settings mark the
 project unsaved; use **Save** to retain them for next time. Exporting does not save the editable
 project. **Cancel**, Escape, or closing the options dialog leaves the project unchanged and starts
 no export. Cancelling a later destination/overwrite decision keeps accepted edits unsaved.
-The same numeric controls remain available in project details.
+Export quality, imported-video preservation, and padding are configured here rather than in
+Pack Details, which stays focused on the title, authors, notes, and media.
 
 Repeat exports to the same destination reuse the previous video conversion when source content,
 height, FPS, and encoding recipe still match and the exported video's checksum is intact.
@@ -383,7 +389,7 @@ Select a single row again to edit or preview an individual segment and resume pl
 
 ### Analyze and transcribe a video
 
-The nonmodal analysis window opens after **New from Video** and can be reopened with **Project →
+The nonmodal analysis window opens after **File → New → From Video** and can be reopened with **Project →
 Analyze Video & Suggest Segments** (`Ctrl+Shift+R`). New local-video and YouTube imports both start
 Whisper automatically, subject to download consent, while reopening existing drafts does not rerun it.
 Backing generation, waveform extraction, caption refinement, and transcription are independent tasks;
@@ -443,14 +449,14 @@ an error rather than waiting indefinitely, without removing saved drafts.
 
 ### Collecting logs for support
 
-Logging is automatic; users do not need a console or a debug setting. **Help → Save Diagnostic
+Logging is automatic; users do not need a console or a debug setting. **Help → Diagnostics → Save Diagnostic
 Bundle** saves a ZIP of recent application, analysis, and native crash logs with version
 information. The same action is available in the YouTube import and analysis windows, including
 while a task is running. Reproduce the issue, save the bundle, and send that ZIP with the approximate
 time of the problem and a description of what the app displayed. If the app crashed, reopen it
 and save the bundle before repeatedly retrying. Nothing is uploaded automatically.
 
-**Help → Open Diagnostic Logs** or **Open Logs** in the analysis window opens the storage folder.
+**Help → Diagnostics → Open Diagnostic Logs** or **Open Logs** in the analysis window opens the storage folder.
 On Windows it is normally
 `%LOCALAPPDATA%\ChoicerVoicerCommunity\Choicer Voicer Pack Creator\analysis\logs`.
 It is outside the portable application folder, so logs survive application upgrades. The exact
@@ -484,7 +490,7 @@ files on disk can contain unredacted code paths; the bundle redacts these before
 
 ### Import a YouTube video
 
-Choose **File → New from YouTube** and paste a video URL. The destination defaults to your
+Choose **File → New → From YouTube** and paste a video URL. The destination defaults to your
 Windows **Downloads** folder unless a previous location was selected; clearing the field also
 uses Downloads. You can choose a different folder. Only download material you own or have
 permission to use. New videos create a
@@ -594,7 +600,7 @@ media servers, but local Whisper does not upload your audio or captions. Playlis
 streams, and age-/sign-in-restricted videos are unsupported. Downloads may fail because of
 availability, rate limits, or upstream changes; the importer does not use browser cookies or
 attempt access-restriction workarounds. An authorized local copy can still be opened with
-**New from Video**. Downloader/solver updates ship with application updates.
+**File → New → From Video**. Downloader/solver updates ship with application updates.
 
 ### Direct waveform editing
 
@@ -658,8 +664,8 @@ and ZIP pass final validation.
 
 ## Modify an existing pack
 
-1. Choose **File → Import Existing Pack** for a folder containing `_pack_info.ini`, or
-   **File → Import Pack ZIP** for an exported archive.
+1. Choose **File → Import Pack → Folder** for a folder containing `_pack_info.ini`, or
+   **File → Import Pack → ZIP** for an exported archive.
 2. Existing MP3 and PNG assets are preserved by default.
 3. Edit captions, speakers, or timeline positions.
 4. Existing packs store a trigger timestamp and padded recording, not the original spoken cut. To
@@ -739,7 +745,7 @@ Use **Duplicate Segment** to create a second prompt at exactly the same timestam
 
 For newly cut segments, prompt audio comes from the source video. The exporter normalizes it and adds 150 ms head / 250 ms tail padding by default; both values are editable. Imported or manually chosen prompt files are preserved when already MP3 and converted otherwise.
 
-**New from Video** and **New from YouTube** automatically queue music/effects backing along with
+**File → New → From Video** and **From YouTube** automatically queue music/effects backing along with
 transcript analysis and voice preparation, without opening processing popups. The analysis review's
 transcript selection does not control backing generation: choosing a transcript, canceling a scan,
 or closing the review leaves backing queued or running independently. **Tools > Tasks** retains each job's
@@ -770,8 +776,8 @@ The source video's original mixed dialogue is never used as automatic backing.
 
 ### Add missing music to a pack
 
-1. Open the saved `.cvpack.json` project. If only the export remains, use **File → Import Pack ZIP**
-   or **Import Existing Pack**. ZIP media is extracted into a unique durable application-data folder;
+1. Open the saved `.cvpack.json` project. If only the export remains, use **File → Import Pack → ZIP**
+   or **Folder**. ZIP media is extracted into a unique durable application-data folder;
    the original archive is not changed.
 2. Click **Generate backing** (or **Regenerate backing** for a silent MP3) and approve model
    download/replacement if prompted. The included `dub_video.ogv` retains the original audio in

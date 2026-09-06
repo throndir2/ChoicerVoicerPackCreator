@@ -4,7 +4,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import QSettings, QSignalBlocker, Qt, QTimer
+from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
 
 from choicer_voicer_pack_creator.jobs import JobManager
@@ -265,8 +265,6 @@ def make_window(qtbot, tmp_path):
     window.project.video_duration = 10
     window.project.backing_track_path = str(old_backing)
     window.project.preserve_source_video = True
-    with QSignalBlocker(window.preserve_video_check):
-        window.preserve_video_check.setChecked(True)
     window.project.segments = [
         Segment(1.2, 3.4, "Carefully edited dialogue", ["Nahida"], audio_mode="file",
                 audio_path=str(prompt), source_range_known=False),

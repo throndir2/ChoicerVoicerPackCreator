@@ -367,7 +367,7 @@ def test_update_menu_preferences_show_native_checks_and_persist(
     qtbot, make_window, automatic, control,
 ) -> None:
     window = make_window(automatic=automatic, prereleases=not automatic)
-    menu = window.help_menu
+    menu = window.updates_menu
     updater = window.updater
     option = QStyleOptionMenuItem()
     menu.initStyleOption(option, updater.check_action)
