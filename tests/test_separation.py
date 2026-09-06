@@ -15,6 +15,12 @@ import soundfile as sf
 
 import choicer_voicer_pack_creator.analysis as analysis
 import choicer_voicer_pack_creator.separation as separation
+from choicer_voicer_pack_creator.operations import (
+    OperationCancelled,
+    SourceChangedError,
+    operation_scope,
+    path_leases,
+)
 from choicer_voicer_pack_creator.separation import (
     SAMPLE_RATE,
     SeparationCancelled,
@@ -111,8 +117,17 @@ def manager(tmp_path):
     return manager
 
 
+@pytest.fixture
+def source_video(tmp_path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"synthetic source video")
+    return source
+
+
 @pytest.mark.parametrize("cache", ["missing", "wrong-size", "wrong-hash"])
-def test_missing_or_invalid_model_needs_consent_before_network(manager, monkeypatch, cache):
+def test_missing_or_invalid_model_needs_consent_before_network(
+    manager, monkeypatch, cache, source_video,
+):
     if cache != "missing":
         manager.model_path.parent.mkdir(parents=True)
         manager.model_path.write_bytes(
@@ -125,7 +140,7 @@ def test_missing_or_invalid_model_needs_consent_before_network(manager, monkeypa
 
     monkeypatch.setattr(separation, "download_verified", no_download)
     with pytest.raises(SeparationDownloadRequired):
-        manager.generate(None, Path("unused.mp4"), progress=lambda *_: None, cancelled=lambda: False)
+        manager.generate(None, source_video, progress=lambda *_: None, cancelled=lambda: False)
     assert (manager.model_path.read_bytes() if manager.model_path.exists() else None) == original
     assert not list((manager.data_root / "separation-jobs").iterdir())
 
@@ -149,7 +164,9 @@ def test_authorized_cache_install_offline_reuse_and_same_size_corruption(manager
         manager._ensure_model(job, False, lambda *_: None, lambda: False)
 
 
-def test_failed_authorized_repair_preserves_invalid_cache_and_assets(manager, monkeypatch):
+def test_failed_authorized_repair_preserves_invalid_cache_and_assets(
+    manager, monkeypatch, source_video,
+):
     manager.model_path.parent.mkdir(parents=True)
     manager.model_path.write_bytes(b"old-invalid-cache")
     original = manager.data_root / "original.wav"
@@ -162,28 +179,39 @@ def test_failed_authorized_repair_preserves_invalid_cache_and_assets(manager, mo
 
     monkeypatch.setattr(separation, "download_verified", failure)
     with pytest.raises(SeparationError, match="hash mismatch"):
-        manager.generate(None, Path("unused.mp4"), allow_download=True,
+        manager.generate(None, source_video, allow_download=True,
                          progress=lambda *_: None, cancelled=lambda: False)
     assert original.read_bytes() == b"existing asset"
     assert manager.model_path.read_bytes() == b"old-invalid-cache"
     assert not list((manager.data_root / "separation-jobs").iterdir())
 
 
-def test_concurrent_installs_use_distinct_verified_staging(manager, tmp_path, monkeypatch):
+@pytest.mark.parametrize("cancel_waiter", [False, True])
+def test_concurrent_installs_share_setup_and_keep_job_staging(
+    manager, tmp_path, monkeypatch, cancel_waiter,
+):
     second = SeparationManager(manager.data_root)
     second.manifest = manager.manifest
     jobs = [tmp_path / "first-job", tmp_path / "second-job"]
     for job in jobs:
         job.mkdir()
-    barrier = threading.Barrier(2)
+    downloading = threading.Event()
+    release = threading.Event()
+    waiting = threading.Event()
+    cancelled = threading.Event()
     destinations = []
     download = separation.download_verified
     replace = separation.os.replace
 
     def synchronized_download(*args):
         destinations.append(args[1])
-        barrier.wait(timeout=10)
+        downloading.set()
+        assert release.wait(timeout=10)
         return download(*args)
+
+    def progress(message, _fraction):
+        if "Waiting" in message:
+            waiting.set()
 
     def check_publication(source, destination):
         if Path(destination) == manager.model_path:
@@ -196,13 +224,25 @@ def test_concurrent_installs_use_distinct_verified_staging(manager, tmp_path, mo
     monkeypatch.setattr(separation, "download_verified", synchronized_download)
     monkeypatch.setattr(separation.os, "replace", check_publication)
     with ThreadPoolExecutor(max_workers=2) as executor:
-        pending = [
-            executor.submit(item._ensure_model, job, True, lambda *_: None, lambda: False)
-            for item, job in zip((manager, second), jobs, strict=True)
-        ]
-        assert [item.result(timeout=15) for item in pending] == [manager.model_path] * 2
-    assert len(set(destinations)) == 2
-    assert {path.parent for path in destinations} == set(jobs)
+        first = executor.submit(manager._ensure_model, jobs[0], True, lambda *_: None, lambda: False)
+        try:
+            assert downloading.wait(timeout=5)
+            second_result = executor.submit(
+                second._ensure_model, jobs[1], False, progress, cancelled.is_set,
+            )
+            assert waiting.wait(timeout=5)
+            if cancel_waiter:
+                cancelled.set()
+                with pytest.raises(SeparationCancelled):
+                    second_result.result(timeout=3)
+                assert not first.done()
+                assert not list(jobs[1].iterdir())
+        finally:
+            release.set()
+        assert first.result(timeout=5) == manager.model_path
+        if not cancel_waiter:
+            assert second_result.result(timeout=5) == manager.model_path
+    assert destinations == [jobs[0] / "htdemucs.onnx"]
     assert manager._verified_model(lambda *_: None, lambda: False)
     assert not list(manager.model_path.parent.glob("*.partial"))
     for filename in ("Demucs-MIT.txt", "StemSplit-MIT.txt", "backing-separation.json"):
@@ -250,27 +290,56 @@ def test_hash_verification_is_cancellable(manager, tmp_path):
         manager._verified_model(lambda *_: None, cancelled)
 
 
+def test_separation_checks_ambient_cancellation(manager, tmp_path):
+    assert issubclass(SeparationCancelled, OperationCancelled)
+    cancelled = threading.Event()
+    with operation_scope(cancelled.is_set):
+        cancelled.set()
+        with pytest.raises(SeparationCancelled):
+            separation.check_cancel(lambda: False)
+        with pytest.raises(SeparationCancelled):
+            manager._ensure_model(tmp_path, True, lambda *_: None, lambda: False)
+        with pytest.raises(SeparationCancelled):
+            manager.generate(
+                None, Path("unused.mp4"), progress=lambda *_: None, cancelled=lambda: False,
+            )
+    assert not manager.data_root.exists()
+
+
+def test_separation_model_setup_does_not_commit_the_enclosing_generation(manager, tmp_path):
+    job = tmp_path / "job"
+    job.mkdir()
+    committed = []
+    with operation_scope(committed=lambda: committed.append(True)):
+        manager._ensure_model(job, True, lambda *_: None, lambda: False)
+    assert committed == []
+
+
 def _mock_preparation(manager, monkeypatch):
     monkeypatch.setattr(manager, "_ensure_model", lambda *_: manager.model_path)
     monkeypatch.setattr(manager, "_decode", lambda *_: 83)
 
 
-def test_generation_publishes_only_verified_unique_durable_assets(manager, monkeypatch):
+def _write_successful_result(command):
+    request_path = Path(command[-1])
+    job = request_path.parent
+    request = json.loads(request_path.read_text())
+    sf.write(job / "backing.wav", np.ones((83, 2)) * 0.25, SAMPLE_RATE, subtype="PCM_24")
+    separation.write_json_atomic(job / "status.json", {
+        "job_id": request["job_id"], "state": "succeeded",
+        "message": "Done", "progress": 1.0,
+    })
+
+
+def test_generation_publishes_only_verified_unique_durable_assets(manager, monkeypatch, source_video):
     _mock_preparation(manager, monkeypatch)
 
     def run(command, _description, _cancelled, *, tick):
-        request_path = Path(command[-1])
-        job = request_path.parent
-        request = json.loads(request_path.read_text())
-        sf.write(job / "backing.wav", np.ones((83, 2)) * 0.25, SAMPLE_RATE, subtype="PCM_24")
-        separation.write_json_atomic(job / "status.json", {
-            "job_id": request["job_id"], "state": "succeeded",
-            "message": "Done", "progress": 1.0,
-        })
+        _write_successful_result(command)
         tick(0)
 
     monkeypatch.setattr(separation, "_run_cancellable", run)
-    paths = [manager.generate(None, Path("unused.mp4"), progress=lambda *_: None,
+    paths = [manager.generate(None, source_video, progress=lambda *_: None,
                               cancelled=lambda: False) for _ in range(2)]
     assert paths[0] != paths[1]
     for path in paths:
@@ -279,11 +348,122 @@ def test_generation_publishes_only_verified_unique_durable_assets(manager, monke
     assert not list((manager.data_root / "separation-jobs").iterdir())
 
 
+@pytest.mark.parametrize("change", ["modify", "replace", "delete"])
+def test_generation_rejects_changed_source_before_publishing(
+    manager, monkeypatch, source_video, change,
+):
+    _mock_preparation(manager, monkeypatch)
+
+    def run(command, _description, _cancelled, *, tick):
+        _write_successful_result(command)
+
+    def progress(message, _fraction):
+        if not message.startswith("Publishing the verified backing track"):
+            return
+        if change == "modify":
+            source_video.write_bytes(b"externally changed source video")
+        elif change == "replace":
+            replacement = source_video.with_suffix(".replacement")
+            replacement.write_bytes(source_video.read_bytes())
+            replacement.replace(source_video)
+        else:
+            source_video.unlink()
+
+    monkeypatch.setattr(separation, "_run_cancellable", run)
+    with pytest.raises(SourceChangedError):
+        manager.generate(None, source_video, progress=progress, cancelled=lambda: False)
+    assert not (manager.data_root / "backing-tracks").exists()
+    assert not list((manager.data_root / "separation-jobs").iterdir())
+
+
+def test_standalone_generation_holds_source_read_lease_until_publication(
+    manager, monkeypatch, source_video,
+):
+    _mock_preparation(manager, monkeypatch)
+    processing = threading.Event()
+    release = threading.Event()
+    waiting = threading.Event()
+    cancel_writer = threading.Event()
+
+    def run(command, _description, _cancelled, *, tick):
+        processing.set()
+        assert release.wait(timeout=10)
+        _write_successful_result(command)
+
+    def progress(message, _fraction):
+        if "Waiting" in message:
+            waiting.set()
+
+    def replace_video():
+        with operation_scope(cancel_writer.is_set, progress), path_leases(
+            write_paths=(source_video,),
+        ):
+            source_video.write_bytes(b"unexpected replacement")
+
+    monkeypatch.setattr(separation, "_run_cancellable", run)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        pending = executor.submit(
+            manager.generate, None, source_video,
+            progress=lambda *_: None, cancelled=lambda: False,
+        )
+        try:
+            assert processing.wait(timeout=5)
+            writer = executor.submit(replace_video)
+            assert waiting.wait(timeout=5)
+            cancel_writer.set()
+            with pytest.raises(OperationCancelled):
+                writer.result(timeout=3)
+            assert source_video.read_bytes() == b"synthetic source video"
+        finally:
+            cancel_writer.set()
+            release.set()
+        output = pending.result(timeout=5)
+    separation.validate_audio(output, 83, lambda: False)
+    with path_leases(write_paths=(source_video,)):
+        source_video.write_bytes(b"replacement after generation")
+
+
+def test_standalone_generation_source_lease_wait_is_cancellable(manager, source_video):
+    waiting = threading.Event()
+    cancelled = threading.Event()
+
+    def progress(message, _fraction):
+        if "Waiting" in message:
+            waiting.set()
+
+    with path_leases(write_paths=(source_video,)), ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(
+            manager.generate, None, source_video, progress=progress, cancelled=cancelled.is_set,
+        )
+        try:
+            assert waiting.wait(timeout=5)
+        finally:
+            cancelled.set()
+        with pytest.raises(SeparationCancelled):
+            pending.result(timeout=3)
+    assert not manager.data_root.exists()
+
+
+def test_missing_generation_source_fails_before_component_setup(manager, tmp_path, monkeypatch):
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("A missing source must not start component setup")
+
+    monkeypatch.setattr(manager, "_ensure_model", unexpected)
+    with pytest.raises(SeparationError, match="generation failed"):
+        manager.generate(
+            None, tmp_path / "missing.mp4", allow_download=True,
+            progress=lambda *_: None, cancelled=lambda: False,
+        )
+    assert not manager.data_root.exists()
+
+
 @pytest.mark.parametrize("failure", [
     "cancel", "process", "missing-status", "failed-status", "wrong-job",
     "missing-output", "short-output", "nan-output", "clipped-output",
 ])
-def test_failure_or_cancel_never_publishes_or_modifies_existing_assets(manager, monkeypatch, failure):
+def test_failure_or_cancel_never_publishes_or_modifies_existing_assets(
+    manager, monkeypatch, failure, source_video,
+):
     _mock_preparation(manager, monkeypatch)
     manager.data_root.mkdir(parents=True)
     original = manager.data_root / "previous-backing.wav"
@@ -309,7 +489,7 @@ def test_failure_or_cancel_never_publishes_or_modifies_existing_assets(manager, 
 
     monkeypatch.setattr(separation, "_run_cancellable", run)
     with pytest.raises(SeparationCancelled if failure == "cancel" else SeparationError):
-        manager.generate(None, Path("unused.mp4"), progress=lambda *_: None, cancelled=lambda: False)
+        manager.generate(None, source_video, progress=lambda *_: None, cancelled=lambda: False)
     assert original.read_bytes() == b"preserve me"
     assert not (manager.data_root / "backing-tracks").exists()
     assert not list((manager.data_root / "separation-jobs").iterdir())
@@ -397,7 +577,9 @@ def test_atomic_status_retries_windows_reader_lock(tmp_path, monkeypatch):
     assert not status.with_suffix(".partial").exists()
 
 
-def test_cancel_terminates_and_waits_for_only_the_separation_process(manager, monkeypatch, tmp_path):
+def test_cancel_terminates_and_waits_for_only_the_separation_process(
+    manager, monkeypatch, tmp_path, source_video,
+):
     _mock_preparation(manager, monkeypatch)
     launched = []
     real_popen = analysis.subprocess.Popen
@@ -419,7 +601,7 @@ def test_cancel_terminates_and_waits_for_only_the_separation_process(manager, mo
     monkeypatch.setattr(analysis.subprocess, "Popen", record_popen)
     monkeypatch.setattr(separation, "_run_cancellable", run)
     with pytest.raises(SeparationCancelled):
-        manager.generate(None, Path("unused.mp4"), progress=lambda *_: None,
+        manager.generate(None, source_video, progress=lambda *_: None,
                          cancelled=lambda: ready.exists())
     assert len(launched) == 1
     assert launched[0].poll() is not None

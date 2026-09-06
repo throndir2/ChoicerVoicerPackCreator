@@ -20,6 +20,15 @@ from choicer_voicer_pack_creator.analysis import (
 )
 from choicer_voicer_pack_creator.diagnostics import diagnostic_event, diagnostic_exception
 from choicer_voicer_pack_creator.media import MediaTools
+from choicer_voicer_pack_creator.operations import (
+    OperationCancelled,
+    SourceSnapshot,
+    cancellation_deferred,
+    check_cancelled,
+    critical_stage,
+    operation_scope,
+    path_leases,
+)
 
 ProgressCallback = Callable[[str, float | None], None]
 CancelCallback = Callable[[], bool]
@@ -34,7 +43,7 @@ class SeparationError(RuntimeError):
     pass
 
 
-class SeparationCancelled(SeparationError):
+class SeparationCancelled(SeparationError, OperationCancelled):
     pass
 
 
@@ -47,7 +56,11 @@ def default_manifest_path() -> Path:
 
 
 def check_cancel(cancelled: CancelCallback) -> None:
-    if cancelled():
+    try:
+        check_cancelled()
+    except OperationCancelled as error:
+        raise SeparationCancelled("Backing-track generation was canceled") from error
+    if not cancellation_deferred() and cancelled():
         raise SeparationCancelled("Backing-track generation was canceled")
 
 
@@ -82,6 +95,7 @@ def verify_model_file(
         while block := stream.read(1024 * 1024):
             check_cancel(cancelled)
             digest.update(block)
+    check_cancel(cancelled)
     return digest.hexdigest() == expected_hash
 
 
@@ -149,6 +163,17 @@ class SeparationManager:
     def _ensure_model(
         self, job: Path, allow_download: bool, progress: ProgressCallback, cancelled: CancelCallback,
     ) -> Path:
+        try:
+            with operation_scope(cancelled, progress), path_leases(
+                write_paths=(self.model_path.parent,),
+            ):
+                return self._install_model(job, allow_download, progress, cancelled)
+        except OperationCancelled as error:
+            raise SeparationCancelled("Backing-track generation was canceled") from error
+
+    def _install_model(
+        self, job: Path, allow_download: bool, progress: ProgressCallback, cancelled: CancelCallback,
+    ) -> Path:
         if not self._verified_model(progress, cancelled):
             if not allow_download:
                 raise SeparationDownloadRequired(
@@ -165,6 +190,7 @@ class SeparationManager:
             check_cancel(cancelled)
             self.model_path.parent.mkdir(parents=True, exist_ok=True)
             try:
+                check_cancel(cancelled)
                 os.replace(downloaded, self.model_path)
             except PermissionError:
                 # Another application may have published and opened this exact model meanwhile.
@@ -172,6 +198,7 @@ class SeparationManager:
                     raise
                 downloaded.unlink(missing_ok=True)
         for filename in ("Demucs-MIT.txt", "StemSplit-MIT.txt", self.manifest_path.name):
+            check_cancel(cancelled)
             payload = (self.manifest_path.parent / filename).read_bytes()
             destination = self.model_path.parent / filename
             if destination.is_file() and destination.read_bytes() == payload:
@@ -182,6 +209,7 @@ class SeparationManager:
                 stream.flush()
                 os.fsync(stream.fileno())
             try:
+                check_cancel(cancelled)
                 os.replace(staged, destination)
             except PermissionError:
                 if not destination.is_file() or destination.read_bytes() != payload:
@@ -239,6 +267,23 @@ class SeparationManager:
         self, media: MediaTools, video: Path, *, allow_download: bool = False,
         progress: ProgressCallback, cancelled: CancelCallback,
     ) -> Path:
+        try:
+            video = video.resolve()
+            with operation_scope(cancelled, progress), path_leases(read_paths=(video,)):
+                source = SourceSnapshot.capture((video,))
+                return self._generate(
+                    media, video, allow_download=allow_download,
+                    progress=progress, cancelled=cancelled, source_snapshot=source,
+                )
+        except OperationCancelled as error:
+            raise SeparationCancelled("Backing-track generation was canceled") from error
+        except OSError as error:
+            raise SeparationError(f"Backing-track generation failed: {error}") from error
+
+    def _generate(
+        self, media: MediaTools, video: Path, *, allow_download: bool,
+        progress: ProgressCallback, cancelled: CancelCallback, source_snapshot: SourceSnapshot,
+    ) -> Path:
         check_cancel(cancelled)
         job_id = uuid.uuid4().hex
         job = self.data_root / "separation-jobs" / job_id
@@ -279,9 +324,10 @@ class SeparationManager:
             command.extend(["--separate-audio", str(request_path)])
             progress("Starting local CPU separation (no audio is uploaded)…", None)
             try:
-                _run_cancellable(
-                    command, "Local backing-track separation", cancelled, tick=poll_status,
-                )
+                with path_leases(read_paths=(model,)):
+                    _run_cancellable(
+                        command, "Local backing-track separation", cancelled, tick=poll_status,
+                    )
             except AnalysisCancelled:
                 raise
             except AnalysisError as error:
@@ -296,8 +342,10 @@ class SeparationManager:
             validate_audio(output, frames, cancelled)
             check_cancel(cancelled)
             destination = self.data_root / "backing-tracks" / f"backing-{job_id}.wav"
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(output, destination)
+            with critical_stage("Publishing the verified backing track..."):
+                source_snapshot.verify()
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(output, destination)
             diagnostic_event("backing_separation_completed", destination=destination, frames=frames)
             return destination
         except AnalysisCancelled as error:

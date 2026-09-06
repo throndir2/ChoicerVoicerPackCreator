@@ -5,9 +5,12 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import wave
 import zipfile
 from array import array
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -28,6 +31,12 @@ from choicer_voicer_pack_creator.analysis import (
 from choicer_voicer_pack_creator.diagnostics import AnalysisDiagnostics, analysis_log_path
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import CaptionFragment, SourceCaption
+from choicer_voicer_pack_creator.operations import (
+    OperationCancelled,
+    SourceChangedError,
+    operation_scope,
+    path_leases,
+)
 
 
 def _write_test_wav(path: Path) -> None:
@@ -276,6 +285,7 @@ def test_video_activity_analysis_runs_end_to_end_without_model(tmp_path: Path) -
 def test_refine_only_analysis_uses_audio_without_whisper_and_reports_separate_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty: bool,
 ) -> None:
+    (tmp_path / "video.mp4").write_bytes(b"synthetic video")
     def extract(_media, _video, destination, _progress, _cancelled):
         _write_test_wav(destination)
 
@@ -313,6 +323,7 @@ def test_refine_only_analysis_uses_audio_without_whisper_and_reports_separate_ou
 
 
 def test_normal_analysis_keeps_default_scan_and_whisper_output(tmp_path, monkeypatch) -> None:
+    (tmp_path / "video").write_bytes(b"synthetic video")
     calls = []
     transcript = AnalysisSuggestion(0.5, 1, "Original Whisper", "Whisper", 0.8)
     component = tmp_path / "installed-component"
@@ -353,6 +364,7 @@ def test_normal_analysis_keeps_default_scan_and_whisper_output(tmp_path, monkeyp
 
 
 def test_refinement_shares_disk_checks_and_propagates_cancellation(tmp_path, monkeypatch) -> None:
+    (tmp_path / "video").write_bytes(b"synthetic video")
     arguments = dict(
         sensitivity="balanced", use_whisper=False, model_key="tiny", language="auto",
         progress=lambda *_: None, source_captions=[],
@@ -366,9 +378,106 @@ def test_refinement_shares_disk_checks_and_propagates_cancellation(tmp_path, mon
         analyze_video(object(), tmp_path / "video", 2, tmp_path, **arguments, cancelled=lambda: False)
 
 
-def test_whisper_setup_uses_verified_allowlist_and_cache(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@pytest.mark.parametrize("change", ["modify", "replace", "delete"])
+def test_standalone_analysis_rejects_changed_source_before_returning(tmp_path, monkeypatch, change):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"synthetic video")
+
+    def extract(_media, _video, destination, _progress, _cancelled):
+        _write_test_wav(destination)
+        if change == "modify":
+            video.write_bytes(b"externally changed video")
+        elif change == "replace":
+            replacement = video.with_suffix(".replacement")
+            replacement.write_bytes(b"synthetic video")
+            replacement.replace(video)
+        else:
+            video.unlink()
+
+    monkeypatch.setattr(analysis_module, "extract_analysis_audio", extract)
+    with pytest.raises(SourceChangedError):
+        analyze_video(
+            object(), video, 2.4, tmp_path / "data",
+            sensitivity="balanced", use_whisper=False, model_key="tiny", language="auto",
+            progress=lambda *_: None, cancelled=lambda: False,
+        )
+
+
+def test_standalone_analysis_holds_source_read_lease_until_result_verification(tmp_path, monkeypatch):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"synthetic video")
+    analyzing = threading.Event()
+    release = threading.Event()
+    waiting = threading.Event()
+    cancel_writer = threading.Event()
+    result = object()
+
+    def analyze(*_args, **_kwargs):
+        analyzing.set()
+        assert release.wait(timeout=10)
+        return result
+
+    def progress(message, _fraction):
+        if "Waiting" in message:
+            waiting.set()
+
+    def replace_video():
+        with operation_scope(cancel_writer.is_set, progress), path_leases(write_paths=(video,)):
+            video.write_bytes(b"unexpected replacement")
+
+    monkeypatch.setattr(analysis_module, "_analyze_video", analyze)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        pending = executor.submit(
+            analyze_video, object(), video, 2.4, tmp_path / "data",
+            sensitivity="balanced", use_whisper=False, model_key="tiny", language="auto",
+            progress=lambda *_: None, cancelled=lambda: False,
+        )
+        try:
+            assert analyzing.wait(timeout=5)
+            writer = executor.submit(replace_video)
+            assert waiting.wait(timeout=5)
+            cancel_writer.set()
+            with pytest.raises(OperationCancelled):
+                writer.result(timeout=3)
+            assert video.read_bytes() == b"synthetic video"
+        finally:
+            cancel_writer.set()
+            release.set()
+        assert pending.result(timeout=5) is result
+    with path_leases(write_paths=(video,)):
+        video.write_bytes(b"replacement after analysis")
+
+
+def test_standalone_analysis_source_lease_wait_is_cancellable(tmp_path, monkeypatch):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"synthetic video")
+    waiting = threading.Event()
+    cancelled = threading.Event()
+
+    def progress(message, _fraction):
+        if "Waiting" in message:
+            waiting.set()
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("Analysis must not start before the source lease is acquired")
+
+    monkeypatch.setattr(analysis_module, "_analyze_video", unexpected)
+    with path_leases(write_paths=(video,)), ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(
+            analyze_video, object(), video, 2.4, tmp_path / "data",
+            sensitivity="balanced", use_whisper=False, model_key="tiny", language="auto",
+            progress=progress, cancelled=cancelled.is_set,
+        )
+        try:
+            assert waiting.wait(timeout=5)
+        finally:
+            cancelled.set()
+        with pytest.raises(AnalysisCancelled):
+            pending.result(timeout=3)
+
+
+@pytest.fixture
+def whisper_manager(tmp_path, monkeypatch):
     metadata = tmp_path / "metadata"
     metadata.mkdir()
     runtime_files = ["whisper-cli.exe", "whisper.dll", "ggml.dll"]
@@ -423,7 +532,11 @@ def test_whisper_setup_uses_verified_allowlist_and_cache(
         "_run_cancellable",
         lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, "1.9.3", ""),
     )
-    manager = WhisperManager(tmp_path / "installed", manifest)
+    return WhisperManager(tmp_path / "installed", manifest)
+
+
+def test_whisper_setup_uses_verified_allowlist_and_cache(tmp_path, whisper_manager) -> None:
+    manager = whisper_manager
     progress: list[str] = []
     with AnalysisDiagnostics(tmp_path / "installed"):
         cli = manager.ensure_runtime(
@@ -456,6 +569,233 @@ def test_whisper_setup_uses_verified_allowlist_and_cache(
     (manager.runtime_dir / "unexpected.exe").write_bytes(b"untrusted")
     assert manager.ensure_runtime(lambda *_args: None, lambda: False) == cli
     assert not (manager.runtime_dir / "unexpected.exe").exists()
+
+
+@pytest.mark.parametrize("cancel_waiter", [False, True])
+def test_concurrent_runtime_setup_serializes_partial_and_reports_waiting(
+    whisper_manager, monkeypatch, cancel_waiter,
+):
+    manager = whisper_manager
+    partial = manager.runtime_dir.with_name(manager.runtime_dir.name + ".partial")
+    installing = threading.Event()
+    release = threading.Event()
+    waiting = threading.Event()
+    cancelled = threading.Event()
+    launches = []
+
+    def version(*args, **kwargs):
+        launches.append(args[0])
+        installing.set()
+        assert release.wait(timeout=10)
+        assert partial.is_dir()
+        return subprocess.CompletedProcess([], 0, "1.9.3", "")
+
+    def progress(message, _fraction):
+        if "Waiting" in message:
+            waiting.set()
+
+    monkeypatch.setattr(analysis_module, "_run_cancellable", version)
+    second = WhisperManager(manager.data_root, manager.manifest_path)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(manager.ensure_runtime, lambda *_: None, lambda: False)
+        try:
+            assert installing.wait(timeout=5)
+            waiter = executor.submit(second.ensure_runtime, progress, cancelled.is_set)
+            assert waiting.wait(timeout=5)
+            if cancel_waiter:
+                cancelled.set()
+                with pytest.raises(AnalysisCancelled):
+                    waiter.result(timeout=3)
+                assert partial.is_dir()
+                assert not first.done()
+        finally:
+            release.set()
+        assert first.result(timeout=5) == manager.cli_path
+        if not cancel_waiter:
+            assert waiter.result(timeout=5) == manager.cli_path
+    assert len(launches) == 1
+    assert manager.cli_path.read_bytes() == b"payload-whisper-cli.exe"
+    assert not partial.exists()
+
+
+@pytest.mark.parametrize("cancel_waiter", [False, True])
+def test_concurrent_downloads_share_transfer_and_preserve_active_partial(
+    tmp_path, monkeypatch, cancel_waiter,
+):
+    source = tmp_path / "source.bin"
+    payload = b"synthetic pinned model"
+    source.write_bytes(payload)
+    destination = tmp_path / "cache" / "model.bin"
+    partial = destination.with_name(destination.name + ".partial")
+    downloading = threading.Event()
+    release = threading.Event()
+    waiting = threading.Event()
+    cancelled = threading.Event()
+    transfers = []
+    open_url = analysis_module.urllib.request.urlopen
+
+    def urlopen(*args, **kwargs):
+        transfers.append(args[0])
+        return open_url(*args, **kwargs)
+
+    def first_progress(message, _fraction):
+        if message.startswith("Downloading "):
+            downloading.set()
+            assert release.wait(timeout=10)
+
+    def waiter_progress(message, _fraction):
+        if "Waiting" in message:
+            waiting.set()
+
+    def download(progress, cancel):
+        return analysis_module.download_verified(
+            source.as_uri(), destination, hashlib.sha256(payload).hexdigest(),
+            len(payload), "test model", progress, cancel,
+        )
+
+    monkeypatch.setattr(analysis_module.urllib.request, "urlopen", urlopen)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(download, first_progress, lambda: False)
+        try:
+            assert downloading.wait(timeout=5)
+            waiter = executor.submit(download, waiter_progress, cancelled.is_set)
+            assert waiting.wait(timeout=5)
+            if cancel_waiter:
+                cancelled.set()
+                with pytest.raises(AnalysisCancelled):
+                    waiter.result(timeout=3)
+                assert partial.is_file()
+                assert not first.done()
+        finally:
+            release.set()
+        assert first.result(timeout=5) == destination
+        if not cancel_waiter:
+            assert waiter.result(timeout=5) == destination
+    assert len(transfers) == 1
+    assert destination.read_bytes() == payload
+    assert not partial.exists()
+
+
+def test_download_lease_includes_partial_path(tmp_path):
+    destination = tmp_path / "model.bin"
+    partial = destination.with_name(destination.name + ".partial")
+    partial.write_bytes(b"owned by another job")
+    cancelled = threading.Event()
+    waiting = threading.Event()
+
+    def progress(message, _fraction):
+        if "Waiting" in message:
+            waiting.set()
+
+    with path_leases(write_paths=(partial,)), ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(
+            analysis_module.download_verified, "file:///unused", destination, "0" * 64,
+            1, "test model", progress, cancelled.is_set,
+        )
+        try:
+            assert waiting.wait(timeout=5)
+        finally:
+            cancelled.set()
+        with pytest.raises(AnalysisCancelled):
+            pending.result(timeout=3)
+        assert partial.read_bytes() == b"owned by another job"
+        assert not destination.exists()
+
+
+def test_runtime_lease_includes_partial_directory(whisper_manager):
+    manager = whisper_manager
+    partial = manager.runtime_dir.with_name(manager.runtime_dir.name + ".partial")
+    partial.mkdir(parents=True)
+    owned_file = partial / "owned.dll"
+    owned_file.write_bytes(b"other active installation")
+    cancelled = threading.Event()
+    waiting = threading.Event()
+
+    def progress(message, _fraction):
+        if "Waiting" in message:
+            waiting.set()
+
+    with path_leases(write_paths=(partial,)), ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(manager.ensure_runtime, progress, cancelled.is_set)
+        try:
+            assert waiting.wait(timeout=5)
+        finally:
+            cancelled.set()
+        with pytest.raises(AnalysisCancelled):
+            pending.result(timeout=3)
+        assert owned_file.read_bytes() == b"other active installation"
+        assert not manager.runtime_dir.exists()
+
+
+def test_cached_download_hashing_checks_cancellation_per_chunk(tmp_path, monkeypatch):
+    destination = tmp_path / "model.bin"
+    payload = b"many small chunks"
+    destination.write_bytes(payload)
+    partial = destination.with_name(destination.name + ".partial")
+    partial.write_bytes(b"previous partial")
+    monkeypatch.setattr(analysis_module, "BUFFER_SIZE", 2)
+    checks = 0
+
+    def cancelled():
+        nonlocal checks
+        checks += 1
+        return checks >= 7
+
+    with pytest.raises(AnalysisCancelled):
+        analysis_module.download_verified(
+            "file:///unused", destination, hashlib.sha256(payload).hexdigest(),
+            len(payload), "test model", lambda *_: None, cancelled,
+        )
+    assert destination.read_bytes() == payload
+    assert partial.read_bytes() == b"previous partial"
+
+
+def test_runtime_extraction_is_chunk_cancellable(whisper_manager, monkeypatch):
+    manager = whisper_manager
+    cancelled = threading.Event()
+    reads = []
+    read = zipfile.ZipExtFile.read
+
+    def read_chunk(stream, size=-1):
+        chunk = read(stream, size)
+        reads.append(chunk)
+        cancelled.set()
+        return chunk
+
+    monkeypatch.setattr(analysis_module, "BUFFER_SIZE", 2)
+    monkeypatch.setattr(zipfile.ZipExtFile, "read", read_chunk)
+    with pytest.raises(AnalysisCancelled):
+        manager.ensure_runtime(lambda *_: None, cancelled.is_set)
+    assert reads == [b"pa"]
+    assert not manager.runtime_dir.exists()
+    assert not manager.runtime_dir.with_name(manager.runtime_dir.name + ".partial").exists()
+
+
+def test_analysis_checks_ambient_cancellation(tmp_path):
+    assert issubclass(AnalysisCancelled, OperationCancelled)
+    cancelled = threading.Event()
+    source = tmp_path / "model.bin"
+    source.write_bytes(b"model")
+    with operation_scope(cancelled.is_set):
+        cancelled.set()
+        with pytest.raises(AnalysisCancelled):
+            analysis_module._check_cancel(lambda: False)
+        with pytest.raises(AnalysisCancelled):
+            analysis_module.sha256(source)
+        with pytest.raises(AnalysisCancelled):
+            analysis_module.download_verified(
+                source.as_uri(), tmp_path / "target.bin", "0" * 64, 5,
+                "test model", lambda *_: None, lambda: False,
+            )
+    assert not (tmp_path / "target.bin").exists()
+
+
+def test_component_setup_does_not_commit_the_enclosing_analysis(whisper_manager):
+    committed = []
+    with operation_scope(committed=lambda: committed.append(True)):
+        whisper_manager.ensure_runtime(lambda *_: None, lambda: False)
+        whisper_manager.ensure_model("tiny", lambda *_: None, lambda: False)
+    assert committed == []
 
 
 def test_download_rejects_unapproved_redirect_and_oversized_payload(
@@ -729,6 +1069,47 @@ def test_analysis_subprocess_timeout_terminates_silent_worker(monkeypatch):
             "Test transcription", lambda: False, timeout=0.3,
         )
     assert processes[0].poll() is not None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows descendant file-handle ownership")
+@pytest.mark.parametrize("mode", ["cancel", "ambient", "timeout", "callback"])
+def test_analysis_subprocess_reaps_descendants_and_readers(tmp_path, mode):
+    locked = tmp_path / "owned-staging.wav"
+    locked.write_bytes(b"must be released before cancellation completes")
+    lines = []
+    threads = set(threading.enumerate())
+    script = """
+import subprocess, sys, time
+child = subprocess.Popen([
+    sys.executable, "-c",
+    "import sys,time; locked=open(sys.argv[1], 'rb'); print('ready', flush=True); time.sleep(30)",
+    sys.argv[1],
+], stdout=subprocess.PIPE, text=True)
+assert child.stdout.readline().strip() == "ready"
+print("ready", flush=True)
+time.sleep(30)
+"""
+
+    def output_line(line):
+        lines.append(line)
+        if mode == "callback":
+            raise ValueError("progress callback failed")
+
+    expected = (
+        AnalysisCancelled if mode in {"cancel", "ambient"}
+        else AnalysisError if mode == "timeout" else ValueError
+    )
+    started = time.monotonic()
+    with operation_scope(lambda: mode == "ambient" and bool(lines)), pytest.raises(expected):
+        analysis_module._run_cancellable(
+            [sys.executable, "-c", script, str(locked)],
+            "Synthetic analysis tree", lambda: mode == "cancel" and bool(lines),
+            output_line=output_line, timeout=1 if mode == "timeout" else 5,
+        )
+    assert lines == ["ready\n"]
+    assert time.monotonic() - started < 10
+    assert set(threading.enumerate()) == threads
+    locked.unlink()
 
 
 def test_analysis_subprocess_drains_both_pipes_and_preserves_failure_diagnostics():

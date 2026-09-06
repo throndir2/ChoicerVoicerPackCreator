@@ -13,6 +13,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from choicer_voicer_pack_creator import youtube
+from choicer_voicer_pack_creator.operations import operation_scope
 
 VIDEO_ID = "abcdefghijk"
 URL = f"https://www.youtube.com/watch?v={VIDEO_ID}"
@@ -220,6 +221,24 @@ def test_progress_combines_selected_streams_and_only_completes_after_publication
     for stage in ("Merging", "Checking", "Publishing"):
         assert any(message.startswith(stage) and value is None for message, value in events)
     assert events[-1] == ("YouTube video ready", 1.0)
+
+
+def test_late_cancel_after_download_publication_keeps_committed_result(tmp_path, downloader):
+    cancelled = False
+    committed = []
+
+    def progress(message, fraction):
+        nonlocal cancelled
+        if message == "YouTube video ready":
+            cancelled = True
+
+    with operation_scope(
+        cancelled=lambda: cancelled, committed=lambda: committed.append(True),
+    ):
+        result = run_download(tmp_path, cancelled=lambda: cancelled, progress=progress)
+    assert committed == [True]
+    assert result.video_path.read_bytes() == b"downloaded-video"
+    assert not list(tmp_path.glob(".cvpc-youtube-*"))
 
 
 def make_progress(formats):
