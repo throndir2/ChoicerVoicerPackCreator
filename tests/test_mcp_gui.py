@@ -579,6 +579,7 @@ def test_mcp_open_focuses_pending_save_owner_without_loading_stale_file(
         ProjectStore.save(PackProject(title="Old disk version"), destination)
     started, release = threading.Event(), threading.Event()
     original_save = ProjectStore.save
+    original_load = ProjectStore.load
 
     def held_save(project, path):
         started.set()
@@ -605,6 +606,7 @@ def test_mcp_open_focuses_pending_save_owner_without_loading_stale_file(
         assert len(window.project_sessions) == before
         assert owner.project.title == "Live"
     finally:
+        monkeypatch.setattr(ProjectStore, "load", original_load)
         release.set()
     qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
     assert owner.project_path == destination
