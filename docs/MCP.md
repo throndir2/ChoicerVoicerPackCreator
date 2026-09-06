@@ -104,7 +104,7 @@ editor window** in the in-app help dialog before copying. Examples:
 & "C:\Tools\Choicer Voicer Pack Creator\Choicer Voicer MCP.exe" --headless
 ```
 
-Headless creates **no QApplication or window**. It has its own in-memory project, independent of
+Headless creates **no QApplication or window**. It has its own in-memory documents, independent of
 any GUI, using the same `.cvpack.json` format. It cannot use `show_in_editor`. Do not edit the same
 project file concurrently in the editor, another client, or another headless process.
 
@@ -123,6 +123,7 @@ reference for argument names, limits, and defaults. `get_help` returns the app v
 | --- | --- |
 | `get_help` | Read the bundled setup, workflow, privacy, and safety guide. |
 | `get_project` | Read metadata, paginated segments, revision, dirty state, and project path. |
+| `list_projects` / `activate_project` | List stable document IDs or select an existing document. |
 | `new_project` | Start from a local video and pack metadata. |
 | `open_project` / `import_pack` | Open editable JSON or import an existing pack folder. |
 | `update_project` | Patch metadata or source/backing/icon references with a revision check. |
@@ -136,15 +137,136 @@ reference for argument names, limits, and defaults. `get_help` returns the app v
 | `export_pack` | Revision-check the saved project, then transactionally publish its validated folder and ZIP. |
 | `validate_pack` | Validate an existing folder and, optionally, its ZIP. |
 | `show_in_editor` | Live mode only: select a segment and/or seek for human review. |
+| `start_export` / `start_analysis` | Live mode: submit snapshot processing and return a task record immediately. |
+| `list_jobs` / `get_job` / `cancel_job` | Live mode: inspect shared Tasks and request cooperative cancellation. |
+| `get_ui_state` / `get_ui_screenshot` / `ui_interact` | Explicit opt-in: inspect/interact with the real rendered application UI. |
+
+### Multiple projects and background tasks
+
+`new_project`, `open_project`, and `import_pack` create documents without discarding other drafts.
+Opening an already-open canonical project path focuses that document without reloading/discarding
+its edits. The legacy `discard_dirty` argument is accepted but no longer needed.
+
+Every project result includes a process-local stable `project_id` and opaque `revision`.
+`loading` identifies an initial open/probe placeholder: inspection is allowed, but mutations
+and saving are refused until its real project finishes loading.
+Pass `project_id` to project inspection, editing, saving, export/analysis, previews and
+`show_in_editor`. Omitting it captures the active document **at request start**, not whichever
+tab is active when an operation finishes. Revisions include document identity; stale revisions
+or unknown IDs fail without applying an edit. `activate_project` takes a required `project_id`.
+`list_projects` returns `{active_project_id, projects:[{project_id,title,project_path,dirty,revision}]}`.
+IDs identify an open document/session, not a globally portable file identifier.
+
+In live mode prefer `start_export(output_parent, expected_revision, project_id?, overwrite=false)`
+and `start_analysis(expected_revision, project_id?, use_whisper=false, allow_download=false,
+sensitivity="balanced", model="base", language="auto")`. They return records containing
+`job_id`, `project_id`, `kind`, `state`, `active`, `message`, `fraction`, `cancel_requested`,
+`source_snapshot:{project_id,revision,asset_revision}`, `result`, and `error`.
+**A queued/running response is not successful export or analysis completion.**
+Poll `get_job(job_id)` until terminal; only `succeeded` has completed results.
+`list_jobs(project_id?)` reads the same scheduler as the visible Tasks panel.
+
+States are `queued`, `waiting`, `running`, `cancelling`, `succeeded`, `failed`, `cancelled`,
+and `blocked`. `cancel_job(job_id)` requests cancellation; wait for terminal cleanup rather
+than assuming an accepted request means subprocesses or staging have already stopped.
+Atomic publication may finish successfully after cancellation is requested.
+Queued inputs carry the backend's source-identity snapshot and are rechecked when admitted.
+`asset_revision` fingerprints file stat identities, not a media-content copy: ordinary external
+replacement/editing fails the old task rather than silently processing changed queued inputs.
+This is not protection against hostile edits that deliberately restore filesystem timestamps.
+Closing task details never cancels work. Jobs retain the submitted project snapshot; analysis
+returns draft evidence and never applies suggestions automatically. Export results include
+`exported_revision`. Later edits remain dirty and are not overwritten by old completions.
+
+Analysis/export in A does not globally disable editing or saving B/C. Bounded scheduling and
+shared source/destination reservations may queue conflicting work. The legacy `export_pack`
+and `analyze_video` calls wait for these same live jobs; cancelling their MCP wait does not
+cancel the task. Inspect Tasks before retrying. Headless retains waiting processing calls;
+background task tools explicitly report that they require live mode. No hidden Qt application
+is created to simulate headless jobs.
+
+### Opt-in rendered UI automation
+
+Semantic tools are **not** evidence that a user-visible control works. To inspect and interact
+with actual Qt widgets, explicitly launch the live server with `--ui-test-hooks`. Use
+`--data-root` to isolate settings, recovery, cache, instance lock and IPC from ordinary work:
+
+```powershell
+$env:QT_QPA_PLATFORM = "windows"
+.\.venv\Scripts\python.exe -m choicer_voicer_pack_creator --mcp --ui-test-hooks --data-root C:\Temp\cvpc-ui-profile
+```
+
+The client must launch this command with stdio pipes as usual. `--data-root` also selects
+headless analysis storage. Use a new profile for each automated run; never point test runs at
+the user's real profile. `get_help` reports `ui_test_hooks` and `background_jobs`.
+Without the flag, or in headless mode, all UI tools return an explicit error.
+
+`get_ui_state()` returns the actual platform name, process ID, isolated data root, window
+visibility, active project, focused selector, allowlisted widget enabled/visible/rendered/
+text/selection state, table viewport dimensions and the first 500 `row_ids`, owned window/modal state,
+and recent queued input outcomes. `get_ui_screenshot()` returns MCP PNG image content from
+the application's own rendered window, **not the desktop**. `get_frame` still returns a
+**source-media frame**, not a UI screenshot. UI images/text can reach the model provider too.
+
+`ui_interact(selector, action, project_id?, text?, index?, key?)` accepts `click`, `type`, `key`,
+`select`, `close_tab`, or `reveal`. Selection/closing uses zero-based tab/table/combobox indices;
+typing replaces editable text using Qt input (line fields commit by moving focus).
+Tab selection and closing use real mouse events on the tab bar.
+`reveal` explicitly scrolls ancestor areas to a known widget without editing anything; the next
+click/key input must still hit the real rendered widget. On short screens use it before field
+input, or send `Home`/`End`/`PageUp`/`PageDown` to an allowlisted scrollbar. Inputs activate only
+their own application window when needed, never as a side effect of background completion.
+Actions are queued so opening a modal does not trap a request: read `get_ui_state.actions`
+for the returned `action_id` reaching `completed` or `failed` (a modal can leave it `running`).
+Acceptance is not proof the intended workflow finished; inspect widgets, Tasks, and projects.
+
+Stable selectors: `projectTabs`, `projectTitle`, `segmentCaption`, `segmentsTable`,
+`saveProject`, `exportProject`, `analyzeProject`, `tasksDock`, `taskProjectFilter`, `tasksTable`,
+`taskLog`, `taskShowProject`, `taskCancel`, `taskRetry`, `taskOpenOutput`, `taskDetails`.
+Export details expose `exportDetailsClose`; project-close decisions expose
+`projectCloseKeepProcessing`, `projectCloseCancelTasks`, `projectCloseKeepOpen`,
+`projectCloseSave`, `projectCloseDiscard`, and `projectCloseCancel`. Scrolling selectors are
+`projectEditorScroll`, `projectEditorScrollbar`, `projectDetailsScrollbar`, and `selectedSegmentScrollbar`.
+Editor selectors are scoped to the visible `project_id`; select that tab before typing.
+Closed/discarded document IDs are rejected immediately, even while their task cleanup finishes.
+Documents explicitly kept processing in the background retain their identity.
+Reopening a retired document creates a new identity.
+Omit `project_id` for global Tasks/decision controls. Ambiguous visible selectors are rejected.
+Allowed keys: `Enter`, `Escape`, `Tab`, `Backspace`, `Space`, `Delete`,
+`PageUp`, `PageDown`, `Home`, `End`, `Up`, `Down`.
+Unknown selectors, disabled/hidden widgets and modal-blocked targets fail explicitly.
+Clipped table rows and widgets without a rendered input area are refused rather than
+claiming that an invisible click worked. Queued tab/row inputs retain their original identities
+across reordering; changed task/segment selection is rejected before acting on a different target.
+Hit testing checks the actual receiver's visible region and Qt's widget at its global position,
+not just widget geometry (which can extend underneath other controls).
+Native OS file dialogs are not an unconstrained automation endpoint: a human must dismiss
+them. Use semantic tools to supply authorized paths, then UI input for visible editing.
+There is no Python evaluation, arbitrary member invocation, clipboard or desktop input API.
+
+Repeatable native Windows validation (requires FFmpeg/FFprobe and an interactive desktop):
+
+```powershell
+$env:QT_QPA_PLATFORM = "windows"
+$env:CVPC_MCP_ARTIFACT_DIR = "C:\Temp\cvpc-mcp-artifacts"
+.\.venv\Scripts\python.exe -m pytest tests\test_mcp_native.py -q
+# Native bridge/input regressions, including queued selection during window activation:
+.\.venv\Scripts\python.exe -m pytest tests\test_mcp_gui.py -q
+```
+
+This launches the normal CLI with a fresh production `--data-root`, connects with the official
+MCP SDK over stdio, and uses only generated synthetic media. It records during/after application
+screenshots and does not silently fall back to offscreen Qt. Offscreen/unit runs remain useful
+regression coverage but are not native visible UI evidence.
+Actual window-activation and hit-routed field tests explicitly skip unsupported offscreen/minimal
+backends; they must run without skips on the native Windows acceptance run.
 
 ### Example: draft, review, save, export
 
 The following are **tool arguments**, not a raw JSON-RPC transcript. Use absolute local paths,
 real author credits, and timings you have reviewed.
 
-1. Call `get_help`, then `get_project` with `{}`. Inspect dirty state before replacing a project.
-   `new_project`, `open_project`, and `import_pack` refuse to lose unsaved edits unless you explicitly
-   authorize `discard_dirty`. Save first unless discarding is intentional.
+1. Call `get_help`, then `list_projects` and `get_project`. New/open/import preserve other documents.
 2. Call `new_project`:
 
    ```json
@@ -210,10 +332,8 @@ real author credits, and timings you have reviewed.
    Existing outputs are not silently replaced. Explicitly authorize overwrite if appropriate.
    Export uses the same staged, fail-closed validation and rollback-safe publication as the GUI;
    a successful export proves format/media checks, not artistic accuracy or redistribution rights.
-   Project/media operations are serialized and run to completion even when their client request
-   is canceled. Analysis and export can take minutes; use a generous client timeout. Let the
-   in-flight operation finish, then inspect project state and outputs before retrying a
-   canceled or timed-out request.
+   Analysis and export can take minutes; use a generous client timeout or the live background
+   tools described above. Inspect task state and outputs before retrying a timed-out request.
 
 ### Repair or replace source media
 
@@ -300,6 +420,6 @@ credits and licenses. Format validation does not establish copyright permission.
   or use the self-contained portable MCP executable.
 - **No window:** check for `--headless`. It deliberately runs independently of the GUI.
 - **Revision conflict:** call `get_project`, inspect human changes, and reconcile before editing.
-- **Dirty-project refusal:** save first, or deliberately authorize `discard_dirty`.
+- **Dirty export refusal:** save the target document before exporting its snapshot.
 - **Missing work after reconnect:** headless drafts must be saved before process termination.
 - **Server waits when run manually:** expected; stdio is a protocol transport, not a chat prompt.

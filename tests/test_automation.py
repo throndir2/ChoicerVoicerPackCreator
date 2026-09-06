@@ -9,6 +9,7 @@ from choicer_voicer_pack_creator.automation import (
     HeadlessProjectAccess,
     PackAutomation,
     ProjectPatch,
+    ProjectSnapshot,
     SegmentPatch,
 )
 from choicer_voicer_pack_creator.media import MediaInfo
@@ -98,10 +99,22 @@ def test_drafts_pagination_and_save_reopen(automation, tmp_path):
     assert ProjectStore.load(destination).readme == "A note"
 
 
+def test_open_existing_document_does_not_reload_an_externally_removed_file(automation, tmp_path):
+    before = automation.get_project()
+    path = tmp_path / "existing.cvpack.json"
+    saved = automation.save_project(before["revision"], str(path))
+    edited = automation.update_project(ProjectPatch(title="Unsaved draft"), saved["revision"])
+    path.unlink()
+    assert automation.open_project(str(path)) == edited
+    assert automation.access.list_projects()["active_project_id"] == saved["project_id"]
+
+
 def test_unsaved_changes_and_external_save_conflicts(automation, tmp_path):
+    original = automation.get_project()
     source = automation.get_project()["project"]["video_path"]
-    with pytest.raises(ValueError, match="Unsaved"):
-        automation.new_project(source, "Replacement", ["Tester"])
+    created = automation.new_project(source, "Replacement", ["Tester"])
+    assert created["project_id"] != original["project_id"]
+    assert automation.for_project(original["project_id"]).get_project() == original
     before = automation.get_project()
     destination = tmp_path / "saved.cvpack.json"
     saved = automation.save_project(before["revision"], str(destination))
@@ -111,6 +124,27 @@ def test_unsaved_changes_and_external_save_conflicts(automation, tmp_path):
     assert ProjectStore.load(destination).title == "External edit"
     different = tmp_path / "copy.cvpack.json"
     automation.save_project(saved["revision"], str(different))
+
+
+def test_bound_project_survives_active_switch_and_rejects_unknown_id(automation, tmp_path):
+    original = automation.get_project()
+    bound = automation.for_project()
+    created = automation.new_project(original["project"]["video_path"], "Second", ["Tester"])
+    edited = bound.update_project(ProjectPatch(title="First only"), original["revision"])
+    assert automation.get_project() == created
+    assert edited["project_id"] == original["project_id"]
+    assert bound.get_project()["project"]["title"] == "First only"
+    with pytest.raises(ValueError, match="Unknown project_id"):
+        automation.for_project("missing")
+    with pytest.raises(ValueError, match="Unknown project_id"):
+        automation.for_project("")
+    with pytest.raises(ValueError, match="Project changed"):
+        automation.update_project(ProjectPatch(title="Wrong target"), edited["revision"])
+    saved = bound.save_project(edited["revision"], str(tmp_path / "first.cvpack.json"))
+    with pytest.raises(ValueError, match="another open project"):
+        automation.save_project(created["revision"], saved["project_path"], overwrite=True)
+    assert automation.open_project(saved["project_path"]) == saved
+    assert automation.access.list_projects()["active_project_id"] == original["project_id"]
 
 
 def test_save_overwrite_and_source_protection(automation, tmp_path):
@@ -225,3 +259,16 @@ def test_preview_bounds_and_headless_show_errors(automation):
         automation.preview_audio(5, 3)
     with pytest.raises(ValueError, match="headless"):
         automation.access.show(None, None)
+
+
+def test_loading_snapshot_is_inspectable_but_cannot_be_edited_or_saved(tmp_path):
+    access = HeadlessProjectAccess(ProjectSnapshot(PackProject(title="Opening"), loading=True))
+    automation = PackAutomation(access, tmp_path)
+    state = automation.get_project()
+    assert state["loading"]
+    with pytest.raises(ValueError, match="still loading"):
+        automation.update_project(ProjectPatch(title="Not ready"), state["revision"])
+    with pytest.raises(ValueError, match="still loading"):
+        automation.save_project(state["revision"], str(tmp_path / "must-not-exist.cvpack.json"))
+    assert automation.get_project() == state
+    assert not (tmp_path / "must-not-exist.cvpack.json").exists()

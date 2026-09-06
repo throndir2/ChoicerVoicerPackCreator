@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import time
+from threading import Event, current_thread, main_thread
+from types import SimpleNamespace
 
 import pytest
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QDialog, QMessageBox
 
+from choicer_voicer_pack_creator.jobs import JobManager
 from choicer_voicer_pack_creator.models import SourceCaption
 from choicer_voicer_pack_creator.ui import main_window, youtube_dialog
 from choicer_voicer_pack_creator.youtube import YouTubeCancelled, YouTubeDownload
@@ -12,6 +16,125 @@ from choicer_voicer_pack_creator.youtube import YouTubeCancelled, YouTubeDownloa
 
 class UnusedMedia:
     pass
+
+
+def test_workspace_youtube_hides_without_cancel_and_emits_async_completion(
+    qtbot, tmp_path, monkeypatch,
+):
+    started, release = Event(), Event()
+    result = make_download(tmp_path)
+
+    def download(*_args, cancelled, **_kwargs):
+        started.set()
+        assert release.wait(5)
+        assert not cancelled()
+        return result
+
+    monkeypatch.setattr(youtube_dialog, "download_youtube", download)
+    jobs = JobManager(limits={"network": 1})
+    details = {}
+    host = QDialog()
+    qtbot.addWidget(host)
+    host.workspace = SimpleNamespace(tasks_panel=SimpleNamespace(
+        register_detail=lambda job_id, widget: details.__setitem__(job_id, widget),
+    ))
+    dialog = youtube_dialog.YouTubeDialog(
+        UnusedMedia(), str(tmp_path), host, job_manager=jobs, project_id="pending-project",
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    signals = []
+    dialog.download_started.connect(lambda: signals.append("started"))
+    dialog.accepted.connect(lambda: signals.append("accepted"))
+    active_when_accepted = []
+    dialog.accepted.connect(lambda: active_when_accepted.append(bool(jobs.active_jobs())))
+    dialog.url_edit.setText(result.url)
+    try:
+        dialog.start_download()
+        qtbot.waitUntil(started.is_set)
+        assert signals == ["started"]
+        assert details == {dialog.worker.job_handle.id: dialog}
+        assert not dialog.isModal()
+        assert dialog.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        dialog.close()
+        assert not dialog.isVisible()
+        assert not dialog.worker.isInterruptionRequested()
+    finally:
+        release.set()
+        qtbot.waitUntil(lambda: dialog.worker is None)
+        jobs.shutdown(wait=True)
+    assert signals == ["started", "accepted"]
+    assert dialog.download_result == result
+    assert jobs.tasks()[0].project_id == "pending-project"
+    assert active_when_accepted == [False]
+
+
+def test_workspace_youtube_validates_destination_on_worker_and_reports_inline(
+    qtbot, tmp_path, monkeypatch,
+):
+    from pathlib import Path
+
+    folder = tmp_path / "missing-destination"
+    original_is_dir = Path.is_dir
+    checks = []
+
+    def is_dir(path):
+        if path == folder:
+            checks.append(current_thread() is main_thread())
+        return original_is_dir(path)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir)
+    monkeypatch.setattr(QMessageBox, "critical", lambda *_a: pytest.fail("Modal failure"))
+    monkeypatch.setattr(
+        youtube_dialog, "download_youtube", lambda *_a, **_kw: pytest.fail("Invalid destination"),
+    )
+    jobs = JobManager(limits={"network": 1})
+    dialog = youtube_dialog.YouTubeDialog(
+        UnusedMedia(), str(folder), job_manager=jobs, project_id="pending-project",
+    )
+    qtbot.addWidget(dialog)
+    dialog.url_edit.setText("https://youtu.be/abcdefghijk")
+    try:
+        dialog.start_download()
+        assert dialog.worker is not None
+        qtbot.waitUntil(lambda: dialog.worker is None)
+        assert checks == [False]
+        assert "existing folder" in dialog.progress_label.text()
+        assert dialog.download_button.isEnabled()
+        assert jobs.tasks()[0].state == "failed"
+    finally:
+        jobs.shutdown(wait=True)
+
+
+def test_workspace_youtube_explicit_cancel_removes_queued_download(qtbot, tmp_path, monkeypatch):
+    started, release = Event(), Event()
+    jobs = JobManager(limits={"network": 1})
+
+    def occupy(_context):
+        started.set()
+        assert release.wait(5)
+
+    jobs.submit("other-project", "download", "Existing transfer", occupy, resource_class="network")
+    monkeypatch.setattr(
+        youtube_dialog, "download_youtube", lambda *_a, **_kw: pytest.fail("Canceled queued job ran"),
+    )
+    dialog = youtube_dialog.YouTubeDialog(
+        UnusedMedia(), str(tmp_path), job_manager=jobs, project_id="pending-project",
+    )
+    qtbot.addWidget(dialog)
+    dialog.url_edit.setText("https://youtu.be/abcdefghijk")
+    try:
+        qtbot.waitUntil(started.is_set)
+        dialog.start_download()
+        assert jobs.active_jobs("pending-project")[0].state == "queued"
+        dialog.cancel_download()
+        qtbot.waitUntil(lambda: dialog.worker is None)
+        assert jobs.tasks("pending-project")[0].state == "cancelled"
+        assert dialog.download_result is None
+    finally:
+        release.set()
+        qtbot.waitUntil(lambda: not jobs.active_jobs())
+        jobs.shutdown(wait=True)
 
 
 def make_download(tmp_path):
@@ -138,14 +261,15 @@ def test_main_window_loads_download_and_starts_caption_comparison(
 ):
     result = make_download(tmp_path)
 
-    class ImportDialog:
+    class ImportDialog(QDialog):
         download_result = result
 
         def __init__(self, *_args, **_kwargs):
-            pass
+            super().__init__(_args[2])
 
-        def exec(self):
-            return QDialog.DialogCode.Accepted
+        def show(self):
+            super().show()
+            QTimer.singleShot(0, self.accept)
 
     monkeypatch.setattr(main_window, "YouTubeDialog", ImportDialog)
     window = main_window.MainWindow(UnusedMedia(), analysis_data_root=tmp_path / "analysis")
@@ -153,9 +277,13 @@ def test_main_window_loads_download_and_starts_caption_comparison(
     scans = []
     backing_runs = []
     monkeypatch.setattr(
-        window, "generate_backing_track", lambda: backing_runs.append(window.project.video_path),
+        main_window.ProjectEditor, "generate_backing_track",
+        lambda editor: backing_runs.append(editor.project.video_path),
     )
-    monkeypatch.setattr(window, "open_analysis_dialog", lambda **kwargs: scans.append(kwargs))
+    monkeypatch.setattr(
+        main_window.ProjectEditor, "open_analysis_dialog",
+        lambda _self, **kwargs: scans.append(kwargs),
+    )
     window.new_from_youtube()
     qtbot.waitUntil(lambda: bool(scans))
     assert scans == [{"initial_scan": True, "auto_start": True}]
@@ -165,8 +293,12 @@ def test_main_window_loads_download_and_starts_caption_comparison(
     assert window.project.source_url == result.url
     assert window.dirty
     window._set_busy(True, "Exporting")
-    assert not window.action_youtube.isEnabled()
+    assert not window.action_export.isEnabled()
+    assert window.action_new.isEnabled()
+    assert window.action_youtube.isEnabled()
+    assert window.editor_splitter.isEnabled()
     window._set_busy(False, "Ready")
+    assert window.action_export.isEnabled()
     window.dirty = False
     window.close()
 

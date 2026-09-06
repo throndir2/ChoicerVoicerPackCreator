@@ -24,10 +24,14 @@ from choicer_voicer_pack_creator.exporter import ExportResult
 
 
 class ExportProgressDialog(QDialog):
-    def __init__(self, destination: Path, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, destination: Path, parent: QWidget | None = None, *, background: bool = False,
+    ) -> None:
         super().__init__(parent)
+        self.background = background
         self._running = True
         self._outcome: bool | None = None
+        self._cancelled = False
         self._elapsed = QElapsedTimer()
         self._elapsed.start()
         self._step_started = 0
@@ -37,7 +41,9 @@ class ExportProgressDialog(QDialog):
         self._live = False
         self._estimator = ExportEstimator()
         self.setWindowTitle("Exporting pack")
-        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setWindowModality(
+            Qt.WindowModality.NonModal if background else Qt.WindowModality.WindowModal
+        )
         self.resize(760, 620)
 
         layout = QVBoxLayout(self)
@@ -82,14 +88,16 @@ class ExportProgressDialog(QDialog):
         self.details.setMaximumBlockCount(2000)
         layout.addWidget(self.details, 1)
         self.note_label = QLabel(
-            "Please keep this window open until export finishes. "
+            ("You can close these details and keep editing. Track or cancel export in Tasks. "
+             if background else "Please keep this window open until export finishes. ")
+            +
             "Existing output is kept as a rollback backup during publishing."
         )
         self.note_label.setWordWrap(True)
         layout.addWidget(self.note_label)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         self.close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
-        self.close_button.setEnabled(False)
+        self.close_button.setEnabled(background)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
@@ -130,7 +138,10 @@ class ExportProgressDialog(QDialog):
                 self.overall_bar.setFormat("Estimated overall progress: %p%")
         else:
             self.step_eta_label.clear()
-            self.overall_eta_label.setText("Export complete" if self._outcome else "Export failed")
+            self.overall_eta_label.setText(
+                "Export cancelled" if self._cancelled else
+                "Export complete" if self._outcome else "Export failed"
+            )
         encoding = self._outcome is None and self._step == VIDEO_CONVERSION_STEP and self._live
         self.activity_label.setVisible(encoding)
         if encoding:
@@ -220,6 +231,15 @@ class ExportProgressDialog(QDialog):
         self.overall_bar.setFormat("Failed")
         self.details.appendPlainText(f"Last operation: {failed_step}\n\n{message}")
 
+    def show_cancelled(self) -> None:
+        self.show_error("Export cancelled. Existing published output was preserved.")
+        self._cancelled = True
+        self.setWindowTitle("Export cancelled")
+        self.progress_label.setText("Export cancelled")
+        self.progress_bar.setFormat("Cancelled")
+        self.overall_bar.setFormat("Cancelled")
+        self._update_elapsed()
+
     def worker_finished(self) -> None:
         if self._outcome is None:
             self.show_error("The exporter stopped without returning a result.")
@@ -227,22 +247,29 @@ class ExportProgressDialog(QDialog):
         self._update_elapsed()
         self._timer.stop()
         self.note_label.setText(
+            "Export cancelled; existing output was preserved." if self._cancelled else
             "Export finished. Output locations and any cleanup notes are listed above."
             if self._outcome
             else "Export did not complete. Review the error details above before trying again."
         )
         self.close_button.setEnabled(True)
-        self.close_button.setFocus()
+        if self.isVisible() and not self.background:
+            self.close_button.setFocus()
 
     def done(self, result: int) -> None:
-        if not self._running:
+        if self._running and self.background:
+            self.hide()
+        elif not self._running:
             super().done(result)
 
     def reject(self) -> None:
         self.done(QDialog.DialogCode.Rejected)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        if self._running:
+        if self._running and self.background:
+            self.hide()
+            event.ignore()
+        elif self._running:
             event.ignore()
         else:
             super().closeEvent(event)

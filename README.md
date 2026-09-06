@@ -7,6 +7,7 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 ## What it does
 
 - Creates a new project from MP4, MKV, MOV, WebM, OGV, or AVI video.
+- Keeps multiple projects in independent tabs, with a shared dockable **Tasks** panel.
 - Downloads a single YouTube video from its URL and offers YouTube and local Whisper transcripts
   side by side, each with its own text and timings.
 - Plays the source video inside the editor. Press **Space** in the video preview, timeline,
@@ -148,9 +149,9 @@ status bar without interrupting your work. Checks contact GitHub, not your media
 When a newer compatible release is found, you can decline it or download its Windows x64 ZIP.
 Downloads are cancelable and checked against the release's SHA-256 checksum and GitHub asset
 digest when available. After the download is verified, a separate confirmation offers a restart.
-The normal Save / Discard / Cancel prompt still protects unsaved edits; active exports and
-import/analysis dialogs must finish first. The app restarts in the same folder and reopens the
-saved project.
+Save / Discard / Cancel decisions protect every dirty project, not just the selected tab.
+Active tasks must finish or stop cooperatively before exit. The app restarts in the same folder
+and restores its workspace list, including independent unsaved recovery records.
 
 Each new portable package includes `portable-files.json`, an inventory of shipped files. The
 updater replaces only those files and removes obsolete inventoried files. Extra files, projects,
@@ -211,10 +212,10 @@ or reference prepared local assets. The MCP tools also do not provide OCR or wik
 ## Create a pack
 
 1. Choose **File → New from Video**.
-2. Backing generation first separates music/effects from dialogue locally. Approve the first-time
-   model download if needed, or cancel to generate it later. The analysis window then starts local
-   Whisper automatically, with its own first-time download confirmation. Check only the suggestions
-   you want to add.
+2. Once the source is ready, start editing immediately. Waveform, backing generation, and local
+   analysis run as independent background tasks. A shared nonmodal prompt combines requests for
+   missing runtime/model versions across projects. Declining keeps your media and drafts; other
+   workflows continue. Review and explicitly use only the suggestions you want to add.
 3. Assign a speaker and verify every suggested caption and boundary against the source video.
 4. Scrub the video or click the waveform to find any remaining line.
 5. Set **In** at the beginning of the spoken line and **Out** after its final phoneme.
@@ -231,7 +232,35 @@ also remembers the new copy. Entries show the filename and folder so similarly n
 can be distinguished. Unsaved new projects, source videos, and imported packs are not added until
 saved as an editable project. **Clear Recent Projects** clears only the list, not any files.
 If a project has moved or is unavailable, reopening it reports the usual error; use **Open Project**
-to find its new location. Switching projects still prompts you to save or discard unsaved edits.
+to find its new location. An already-open project focuses its tab. Opening another project never
+asks you to discard unrelated edits.
+
+### Project workspace and background tasks
+
+Each tab owns its project, selected segment, playback position, range, zoom, analysis drafts, and
+dirty state. Switching tabs pauses the previous audible preview without cancelling processing.
+The tab's `*`, `[working]`, and `[!]` indicators show unsaved edits, work in progress, and errors.
+Completion does not select a different tab.
+
+**Tools > Tasks** shows the shared dock. Filter it to all projects or the current project, inspect
+stage progress and elapsed time, cancel supported work, reopen review/details, or open a successful
+output. CPU, I/O, and network budgets bound concurrent work; jobs sharing output files or inference
+components wait rather than overwrite each other. You can edit or save another project while a
+pack exports, a source opens, or analysis runs.
+
+**Retry** is enabled for failed/canceled analysis, refinement, YouTube imports, exports, and failed
+backing generation when the originating document/source and review are still current. Analysis
+retries retain draft-replacement confirmation; export retries reopen destination and overwrite
+confirmation rather than blindly replaying publication. Successful tasks, retired documents,
+superseded sources/backing choices, and workflows without a safe retry are not replayed.
+
+Setup consent is shared for the session and keyed by exact component checksums. Closing one
+requesting project does not dismiss another project's prompt. Setup/download progress is reported
+within its processing task; it is not a separate permanent global job.
+
+Closing a tab with active work offers **Keep processing**, **Cancel tasks and close**, or
+**Keep open**. Keep processing retains a hidden document and its recovery data; **Show project**
+in Tasks restores that same tab. Processing does not survive application exit.
 
 Export opens a progress dialog with the current operation, total and current-step elapsed
 time, and a scrollable activity history without repetitive timestamp prefixes. Video conversion
@@ -251,9 +280,9 @@ creation (when requested), final validation, and cleanup. Estimates can move bac
 change; an unmeasured step that outlasts its estimate shows **re-estimating** instead of a false
 zero-second countdown. Only a successful export reaches 100%. The current-step bar shows measured
 video progress separately and stays indeterminate for operations without measurable progress.
-Keep the dialog open while export runs; **Close** becomes available only after
-the worker finishes. The dialog then keeps the output locations, cleanup notes, or failure
-details visible until dismissed.
+The details window is nonmodal and can be closed while the export continues in Tasks. It retains
+output locations, cleanup notes, and failures for later inspection. Export uses a snapshot; edits
+made during export affect the next export, not the one already running.
 
 ### Combine segments
 
@@ -272,9 +301,11 @@ Select a single row again to edit or preview an individual segment and resume pl
 
 ### Analyze and transcribe a video
 
-The initial analysis window opens after **New from Video** and can be reopened with **Tools →
+The nonmodal analysis window opens after **New from Video** and can be reopened with **Tools →
 Analyze Video & Suggest Segments** (`Ctrl+Shift+R`). New local-video and YouTube imports both start
-Whisper automatically, while reopening existing drafts does not rerun it. The window also offers a dependency-free activity
+Whisper automatically, subject to download consent, while reopening existing drafts does not rerun it.
+Backing generation, waveform extraction, caption refinement, and transcription are independent tasks;
+waiting for one does not block editing another project. The window also offers a dependency-free activity
 scan with Balanced, Sensitive, and Conservative modes. This scan measures deterministic audio
 energy and suggests possible regions; music, effects, and silence changes can still be false
 positives.
@@ -294,7 +325,8 @@ analysis audio and transcript JSON are deleted after each scan.
 Results list editable In/Out values and draft captions. Double-click a line or use **Play Selected
 Whisper Line** (or **Play Selected Range** for an activity-only scan) to audition it. Uncheck unwanted
 lines, correct text, then use the highlighted **Use Whisper Transcript** action. **Rerun Whisper**
-is a separate, secondary action. Existing segments
+is a separate, secondary action. Existing drafts stay editable during a rerun; if they change
+before it finishes, the new candidate requires an explicit replacement decision. Existing segments
 are never replaced. Suggested segments intentionally have no speaker; assign speakers manually.
 Whisper is probabilistic and can mishear names, stylized vocalizations, non-English speech, music,
 or overlapping speakers, so every result remains review evidence rather than authoritative data.
@@ -399,11 +431,11 @@ creator-uploaded tracks can themselves be translations. Some videos have no acce
 and caption delivery can fail independently of the video download.
 
 The **Refined YouTube** panel stays empty until a local audio-only refinement pass finishes on a
-background thread, then selects the processed draft for review and use. Unprocessed YouTube
+background task, then selects the processed draft for review and use. Unprocessed YouTube
 captions are never displayed or offered for import. Refinement requires no model download;
 original caption evidence stays in the project for regeneration, not as another transcript choice.
-After refinement completes, Whisper starts automatically, asking permission first if its
-runtime/model must be downloaded. Its result appears alongside YouTube in the **Whisper Transcript**
+Whisper starts independently, asking permission first if its runtime/model must be downloaded.
+Its result appears alongside YouTube in the **Whisper Transcript**
 panel without changing the selected draft. Each transcript keeps its own row count, text, and
 In/Out boundaries: a longer Whisper passage is not
 forced onto shorter YouTube captions or flagged as a conflict. You can edit, preview, and uncheck
@@ -412,7 +444,7 @@ The playback button names the chosen source: **Play Selected Refined YouTube Lin
 **Play Selected Whisper Line**.
 
 To adjust pause-aware segmentation, use the **Refined YouTube** panel and click
-**Refine YouTube Again...**. Wait for or cancel a running Whisper scan first. Refinement
+**Refine YouTube Again...**. Refinement and Whisper have separate task entries and cancellation. Refinement
 uses the original imported YouTube words, not edits made to either draft.
 New imports retain YouTube's available word/text-fragment offsets. Refinement uses these
 boundaries together with measured audio pauses to split lines and conservatively join display
@@ -435,7 +467,7 @@ Click a row in a draft or its **Select** control to choose it for playback and t
 Use action; merely finishing a background Whisper run does not select it.
 The checked rows from that source become editable project segments with that source's timings
 and no assigned speakers. Other sources are not mixed in. Playback also uses the chosen draft's
-own edited In/Out range. Choosing an available draft while another scan runs stops that scan.
+own edited In/Out range. Choosing an available draft does not cancel another running task.
 Existing project segments are never
 silently replaced; adding another set requires confirmation.
 
@@ -449,9 +481,10 @@ If a larger model fails due to memory limits, click **Use Whisper Transcript** b
 retained draft to use it without rerunning.
 If all rows are unchecked, check at least one before using the transcript.
 If automatic refinement fails, is canceled, or returns no rows, no original rows are shown as a
-fallback and Whisper does not start automatically; either pass can be retried manually.
+fallback. The independent Whisper task is unaffected; either pass can be retried manually.
 Any previously completed refined draft is retained.
-**Cancel Scan** keeps the analysis window open. **Keep Drafts & Close** stops a running scan and
+**Cancel Scan** keeps the analysis window open. **Keep Drafts & Close** hides the review while
+manager-owned work continues in **Tasks**, and
 retains all available drafts, including edits, checked rows, source selection, and the pause setting, without adding
 segments. Draft changes are included in recovery snapshots and **Save Project**, just like other
 project edits. **Tools → Analyze Video & Suggest Segments** restores completed drafts without
@@ -513,17 +546,21 @@ A failed publication restores both previous artifacts.
 
 **Save Project** updates the current editable project JSON. Before replacing an existing project,
 the editor retains one previous version beside it with a `.previous` suffix. **File → Restore
-Previous Save** loads that version as unsaved edits, so the current saved file remains unchanged
-until Save is chosen again.
+Previous Save** opens that version in a separate unsaved tab. Neither the existing tab nor the
+current saved file is replaced.
 
 **Save Project As** writes a separate project and does not modify the original project. Project
 saves store edit decisions and media references; they do not rewrite imported source packs or media.
+Saving is asynchronous and revision-aware: saving revision N cannot clear unsaved edits made while
+that save runs. Two open documents cannot save to the same project path.
 
 While editing, the app also writes debounced recovery snapshots to the current Windows user's local
-application-data directory. After a crash or power loss, the next launch offers to recover those
-edits without overwriting the saved project. A normal Save or an explicit Discard clears the
-snapshot. Only one editor instance runs at a time so two projects cannot race over the recovery
-journal. If a saved project becomes unreadable, opening it offers its adjacent previous version.
+application-data directory, in a separate namespace for each document, including unsaved projects.
+The workspace list and recoveries restore separate tabs without overwriting project files. If the
+saved file changed after recovery was recorded, the recovery opens as a separate unsaved copy.
+Save or explicit Discard clears only that document's snapshot. Legacy `recovery-v2.json` snapshots
+remain intact unless successfully migrated after acceptance; dismissing the offer does not delete
+them. If a saved project becomes unreadable, opening it offers its adjacent previous version.
 Export independently stages every generated file and retains rollback copies until the new folder
 and ZIP pass final validation.
 

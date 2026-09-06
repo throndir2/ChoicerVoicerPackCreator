@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QProgressDialog
 
@@ -17,6 +17,7 @@ from choicer_voicer_pack_creator.diagnostics import (
     diagnostic_exception,
     diagnostic_operation,
 )
+from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.updates import (
     RELEASES_URL,
     PreparedUpdate,
@@ -34,8 +35,11 @@ if TYPE_CHECKING:
     from choicer_voicer_pack_creator.ui.main_window import MainWindow
 
 
-class UpdateWorker(QThread):
+class UpdateWorker(JobWorker):
     progress = Signal(str, float)
+    completed = Signal(object)
+    failed = Signal(str)
+    canceled = Signal()
 
     def __init__(
         self, *, include_prereleases: bool, release: Release | None = None,
@@ -88,12 +92,15 @@ class UpdateWorker(QThread):
                         "update_prepared", directory=self.result.directory,
                         target=self.result.target, version=self.result.version,
                     )
+            self.completed.emit(self.result)
         except UpdateCancelled as error:
             diagnostic_exception("update_worker_canceled", error)
             self.was_cancelled = True
+            self.canceled.emit()
         except (OSError, ValueError, UpdateError, zipfile.BadZipFile, http.client.HTTPException) as error:
             diagnostic_exception("update_worker_failed", error, preparing=self.release is not None)
             self.error = str(error)
+            self.failed.emit(self.error)
 
 
 class UpdateController(QObject):
@@ -125,6 +132,8 @@ class UpdateController(QObject):
         self.prerelease_action.toggled.connect(
             lambda enabled: window.settings.setValue("updates/prereleases", enabled)
         )
+        for action in (self.check_action, self.auto_action, self.prerelease_action):
+            action.setParent(window)
         menu.addSeparator()
         self.prompt_timer = QTimer(self)
         self.prompt_timer.setInterval(1000)
@@ -172,6 +181,11 @@ class UpdateController(QObject):
         self.check_action.setEnabled(False)
         worker.progress.connect(self._progress_changed)
         worker.finished.connect(self._worker_finished)
+        worker.configure_job(
+            self.window.job_manager, None, "update",
+            "Downloading application update" if worker.release is not None else "Checking for updates",
+            resource_class="network", resource_keys=("application-update",),
+        )
         diagnostic_event("update_worker_launching", preparing=worker.release is not None)
         worker.start()
 
@@ -290,7 +304,10 @@ class UpdateController(QObject):
         if prepared is None or self.shutting_down:
             return
         # Wait for import/analysis dialogs and exports before offering a restart.
-        if QApplication.activeModalWidget() or self.window._export_worker:
+        if (
+            QApplication.activeModalWidget() or self.window.job_manager.active_jobs()
+            or any(editor._export_worker for editor in self.window.editors.values())
+        ):
             QTimer.singleShot(1000, self._ready_to_install)
             return
         answer = QMessageBox.question(
@@ -307,13 +324,21 @@ class UpdateController(QObject):
         )
         if answer == QMessageBox.StandardButton.Yes:
             self.prepared = prepared
-            if self.window.close():
+            if self.window.close() or self.window._closing:
                 return
             if self.prepared is None:
                 return  # A launched helper owns the staging folder, including on startup failure.
         self.prepared = None
         self._discard(prepared.directory)
         self.window.statusBar().showMessage("Update postponed; the installed application is unchanged.")
+
+    def cancel_close_update(self) -> None:
+        if self.prepared is not None:
+            prepared, self.prepared = self.prepared, None
+            self._discard(prepared.directory)
+            self.window.statusBar().showMessage(
+                "Update postponed; the installed application is unchanged."
+            )
 
     def can_close(self) -> bool:
         if self.worker:

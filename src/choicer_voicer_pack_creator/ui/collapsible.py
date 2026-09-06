@@ -52,7 +52,9 @@ class CollapsibleSection(QFrame):
     def last_expanded_height(self) -> int:
         return self._last_expanded_height
 
-    def set_content(self, widget: QWidget, *, scrollable: bool = False) -> None:
+    def set_content(
+        self, widget: QWidget, *, scrollable: bool = False, scrollbar_name: str = "",
+    ) -> None:
         if self.body_layout.count():
             raise RuntimeError("CollapsibleSection content has already been set")
         if not scrollable:
@@ -60,8 +62,11 @@ class CollapsibleSection(QFrame):
             return
         scroll = QScrollArea(self.body)
         scroll.setObjectName("sectionScroll")
+        scroll.verticalScrollBar().setObjectName(scrollbar_name)
+        scroll.verticalScrollBar().setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setMinimumHeight(max(120, widget.fontMetrics().height() * 5))
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(widget)
         self.body_layout.addWidget(scroll, 1)

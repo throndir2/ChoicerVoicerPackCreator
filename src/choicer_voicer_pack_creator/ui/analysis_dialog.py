@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import math
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QSignalBlocker, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QModelIndex, QSignalBlocker, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemDelegate,
@@ -52,6 +53,81 @@ from choicer_voicer_pack_creator.diagnostics import (
 )
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import AnalysisDraftRow, AnalysisReview, SourceCaption
+from choicer_voicer_pack_creator.ui.job_worker import JobWorker
+
+
+def _workspace_for(dialog: QWidget):
+    return getattr(dialog.parentWidget(), "workspace", None)
+
+
+def _current_dialog_request(dialog: QWidget) -> Callable[[], bool]:
+    editor = dialog.parentWidget()
+    session = getattr(editor, "session", None)
+    workspace = _workspace_for(dialog)
+    if session is None or workspace is None:
+        return lambda: True
+    token = session.source_token()
+    snapshot = getattr(dialog, "source_snapshot", None) or {}
+    source_revision = snapshot.get("source_revision", session.source_revision)
+    return lambda: (
+        not workspace._closing and session.id not in workspace._closed_ids
+        and session.id in workspace.editors and session.source_token() == token
+        and session.source_revision == source_revision and not session.loading
+    )
+
+
+def register_job_detail(
+    dialog: QDialog, worker: JobWorker, *, retry: Callable[[], None] | None = None,
+    available: Callable[[], bool] | None = None,
+) -> None:
+    workspace = getattr(dialog.parentWidget(), "workspace", None)
+    panel = getattr(workspace, "tasks_panel", None)
+    if panel is not None and worker.job_handle is not None:
+        panel.register_detail(worker.job_handle.id, dialog)
+        if retry is not None and available is not None and hasattr(panel, "register_retry"):
+            current = _current_dialog_request(dialog)
+            job_id = worker.job_handle.id
+            panel.register_retry(job_id, retry, available=lambda: current() and available())
+            dialog.destroyed.connect(lambda: panel.unregister_retry(job_id))
+
+
+def _job_manager_for(parent: QWidget):
+    return getattr(parent, "job_manager", None) or getattr(
+        getattr(parent, "workspace", None), "job_manager", None,
+    )
+
+
+def show_message(
+    parent: QWidget, kind: str, title: str, text: str,
+    callback: Callable[[bool], None] | None = None,
+    default: QMessageBox.StandardButton = QMessageBox.StandardButton.Cancel,
+) -> None:
+    """Use callback-driven, nonmodal messages for workspace-owned surfaces."""
+    buttons = (
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        if callback else QMessageBox.StandardButton.Ok
+    )
+    if _job_manager_for(parent) is None:
+        method = getattr(QMessageBox, kind)
+        if callback:
+            callback(method(parent, title, text, buttons, default) == QMessageBox.StandardButton.Yes)
+        else:
+            method(parent, title, text)
+        return
+    icons = {
+        "question": QMessageBox.Icon.Question,
+        "warning": QMessageBox.Icon.Warning,
+        "critical": QMessageBox.Icon.Critical,
+        "information": QMessageBox.Icon.Information,
+    }
+    box = QMessageBox(icons[kind], title, text, buttons, parent)
+    box.setWindowModality(Qt.WindowModality.NonModal)
+    box.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    box.setDefaultButton(default if callback else QMessageBox.StandardButton.Ok)
+    box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    if callback:
+        box.finished.connect(lambda answer: callback(answer == QMessageBox.StandardButton.Yes))
+    box.show()
 
 
 def open_diagnostic_logs(parent: QWidget, data_root: Path) -> None:
@@ -61,12 +137,12 @@ def open_diagnostic_logs(parent: QWidget, data_root: Path) -> None:
         folder.mkdir(parents=True, exist_ok=True)
     except OSError as error:
         diagnostic_exception("diagnostic_folder_failed", error)
-        QMessageBox.warning(parent, "Could not open diagnostic logs", str(error))
+        show_message(parent, "warning", "Could not open diagnostic logs", str(error))
         return
     if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
         diagnostic_event("diagnostic_folder_failed", reason="desktop_open_failed")
-        QMessageBox.warning(
-            parent, "Could not open diagnostic logs", f"Open this folder manually:\n{folder}"
+        show_message(
+            parent, "warning", "Could not open diagnostic logs", f"Open this folder manually:\n{folder}"
         )
 
 
@@ -79,27 +155,60 @@ def save_diagnostic_logs(parent: QWidget, data_root: Path) -> None:
     if not path:
         return
     destination = Path(path)
+
+    def operation(_context=None) -> Path:
+        try:
+            return save_diagnostic_bundle(data_root, destination)
+        except (OSError, ValueError) as error:
+            diagnostic_exception("diagnostic_bundle_failed", error)
+            raise
+
+    def failed(message: str) -> None:
+        show_message(parent, "warning", "Could not save diagnostic bundle", message)
+
+    def completed(_result=None) -> None:
+        show_message(
+            parent, "information", "Diagnostic bundle saved",
+            f"Saved to:\n{destination}\n\nSend this ZIP with a description of what went wrong. "
+            "It contains recent runs, local file paths and technical errors, but no media, "
+            "project files or normal transcript output. Review it before sharing. "
+            "Nothing has been uploaded.",
+        )
+
+    def save() -> None:
+        manager = _job_manager_for(parent)
+        if manager is None:
+            try:
+                operation()
+            except (OSError, ValueError) as error:
+                failed(str(error))
+                return
+            completed()
+            return
+        project_id = getattr(parent, "project_id", None) or getattr(
+            getattr(parent, "session", None), "id", None,
+        )
+        try:
+            job = manager.submit(
+                project_id, "diagnostics", "Save diagnostic bundle", operation,
+                resource_class="io", read_paths=(analysis_log_path(data_root).parent,),
+                write_paths=(destination,),
+            )
+        except (RuntimeError, ValueError) as error:
+            failed(str(error))
+            return
+        job.completed.connect(completed)
+        job.failed.connect(failed)
+
     if destination.suffix.lower() != ".zip":
         destination = destination.with_name(destination.name + ".zip")
-        if destination.exists() and QMessageBox.question(
-            parent, "Replace diagnostic bundle?", f"Replace {destination}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        ) != QMessageBox.StandardButton.Yes:
+        if destination.exists():
+            show_message(
+                parent, "question", "Replace diagnostic bundle?", f"Replace {destination}?",
+                lambda accepted: save() if accepted else None,
+            )
             return
-    try:
-        save_diagnostic_bundle(data_root, destination)
-    except (OSError, ValueError) as error:
-        diagnostic_exception("diagnostic_bundle_failed", error)
-        QMessageBox.warning(parent, "Could not save diagnostic bundle", str(error))
-        return
-    QMessageBox.information(
-        parent, "Diagnostic bundle saved",
-        f"Saved to:\n{destination}\n\nSend this ZIP with a description of what went wrong. "
-        "It contains recent runs, local file paths and technical errors, but no media, "
-        "project files or normal transcript output. Review it before sharing. "
-        "Nothing has been uploaded.",
-    )
+    save()
 
 
 class DraftDelegate(QStyledItemDelegate):
@@ -125,7 +234,7 @@ class DraftDelegate(QStyledItemDelegate):
             self.closeEditor.emit(editor, QAbstractItemDelegate.EndEditHint.NoHint)
 
 
-class AnalysisWorker(QThread):
+class AnalysisWorker(JobWorker):
     progress = Signal(str, int)
     completed = Signal(object)
     failed = Signal(str)
@@ -213,6 +322,9 @@ class AnalysisDialog(QDialog):
         auto_start: bool = False,
         youtube_import: bool = False,
         review: AnalysisReview | None = None,
+        job_manager=None,
+        project_id: str | None = None,
+        source_snapshot=None,
     ) -> None:
         super().__init__(parent)
         self.media = media
@@ -222,6 +334,17 @@ class AnalysisDialog(QDialog):
         self.log_path = analysis_log_path(self.data_root)
         self.existing_segments = existing_segments
         self.worker: AnalysisWorker | None = None
+        self.refinement_worker: AnalysisWorker | None = None
+        self.job_manager = job_manager
+        self.project_id = project_id
+        self.source_snapshot = source_snapshot
+        if job_manager is not None:
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self._draft_revisions = {False: 0, True: 0}
+        self._run_revisions: dict[bool, int] = {}
+        self._pending_results: dict[bool, AnalysisResult] = {}
+        self._pending_scan = False
+        self._pending_refine = False
         self._scan_canceled = False
         self._whisper_after_refinement = False
         self._close_after_cancel = False
@@ -421,7 +544,7 @@ class AnalysisDialog(QDialog):
         self.refine_button.clicked.connect(self.start_refinement)
         self.refine_button.setToolTip(
             "Create a separate draft from original imported captions, not your edited drafts. "
-            "Uses local audio only. Wait for or cancel any running scan first."
+            "Uses local audio only, independently of Whisper."
         )
         if self.source_choice:
             splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -491,6 +614,19 @@ class AnalysisDialog(QDialog):
                 panel.layout().addWidget(button)
         if not self.source_choice:
             controls.addButton(self.local_add_button, QDialogButtonBox.ButtonRole.AcceptRole)
+        self.apply_refined_result_button = QPushButton("Replace Draft with New YouTube Result")
+        self.apply_local_result_button = QPushButton("Replace Draft with New Local Result")
+        for button, refine, panel in (
+            (self.apply_refined_result_button, True, self.refined_panel),
+            (self.apply_local_result_button, False, self.local_panel),
+        ):
+            button.setAutoDefault(False)
+            button.hide()
+            button.clicked.connect(
+                lambda _checked=False, refine=refine: self.apply_new_result(refine=refine)
+            )
+            if panel.layout() is not None:
+                panel.layout().addWidget(button)
         controls.rejected.connect(self.reject)
         layout.addWidget(controls)
         if review:
@@ -591,6 +727,7 @@ class AnalysisDialog(QDialog):
         ]
 
     def _draft_edited(self, item: QTableWidgetItem) -> None:
+        self._draft_revisions[item.tableWidget() is self.refined_table] += 1
         if item.column() == 3 and item.toolTip() != item.text():
             with QSignalBlocker(item.tableWidget()):
                 item.setToolTip(item.text())
@@ -687,9 +824,18 @@ class AnalysisDialog(QDialog):
             "Refine YouTube Again..." if self.refined_table.rowCount() else "Refine YouTube"
         )
         self.refine_button.setEnabled(
-            bool(self.source_captions) and self.worker is None and not self._close_after_cancel
+            bool(self.source_captions)
+            and (self.refinement_worker if self.job_manager is not None else self.worker) is None
+            and not self._close_after_cancel and not self._pending_refine
         )
-        self.pause_spin.setEnabled(self.worker is None and not self._close_after_cancel)
+        if self.refinement_worker is not None:
+            self.refine_button.setText("Refining YouTube...")
+        self.pause_spin.setEnabled(
+            (self.refinement_worker if self.job_manager is not None else self.worker) is None
+            and not self._close_after_cancel
+        )
+        if self._pending_scan:
+            self.scan_button.setEnabled(False)
         self.scan_button.setToolTip(
             "Generate a new local draft. To import an existing result, use its highlighted Use button."
         )
@@ -728,28 +874,46 @@ class AnalysisDialog(QDialog):
             "analysis_scan_requested", already_running=self.worker is not None,
             closing=self._close_after_cancel,
         )
-        if self.worker is not None or self._close_after_cancel:
+        if self.worker is not None or self._close_after_cancel or self._pending_scan:
             return
         self._commit_draft_editors()
+        self._pending_scan = True
         if self.local_table.rowCount():
-            answer = QMessageBox.question(
-                self,
+            show_message(
+                self, "question",
                 "Replace local analysis draft?",
                 "A successful scan will replace the local draft and its edits. "
                 "The Refined YouTube draft will not change. "
+                "Edits made while the scan runs are kept until you explicitly apply its new result. "
                 "A failed or canceled scan keeps all drafts. "
                 "Continue?" if self.source_choice else
                 "A successful scan will replace the current draft and its edits. "
+                "Edits made while scanning are kept until you apply the new result. "
                 "A failed or canceled scan keeps the draft. Continue?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
+                self._confirm_scan,
             )
-            if answer != QMessageBox.StandardButton.Yes:
-                diagnostic_event("analysis_scan_declined", reason="keep_existing_draft")
-                self.progress_label.setText(f"Scan not started. {self._recovery_hint()}")
-                return
+            self._update_scan_button()
+            return
+        self._confirm_scan(True)
+
+    def _confirm_scan(self, accepted: bool) -> None:
+        if not accepted or self._close_after_cancel:
+            self._pending_scan = False
+            self.progress_label.setText(f"Scan not started. {self._recovery_hint()}")
+            self._update_scan_button()
+            return
         use_whisper = self.source_choice or self.whisper_check.isChecked()
         model_key = str(self.model_combo.currentData())
+        language = str(self.language_combo.currentData())
+
+        def start(accepted: bool) -> None:
+            self._pending_scan = False
+            self._update_scan_button()
+            if accepted and not self._close_after_cancel:
+                self._start_worker(use_whisper=use_whisper, model_key=model_key, language=language)
+            else:
+                self.progress_label.setText(f"Whisper not started. {self._recovery_hint()}")
+
         if use_whisper:
             try:
                 manager = WhisperManager(self.data_root)
@@ -757,7 +921,11 @@ class AnalysisDialog(QDialog):
                 diagnostic_exception("whisper_setup_unavailable", error)
                 hint = self._recovery_hint()
                 self.progress_label.setText(f"Whisper not started. {hint}")
-                QMessageBox.critical(self, "Whisper setup is unavailable", f"{error}\n\n{hint}")
+                self._pending_scan = False
+                self._update_scan_button()
+                show_message(
+                    self, "critical", "Whisper setup is unavailable", f"{error}\n\n{hint}"
+                )
                 return
             model_missing = not manager.model_path(model_key).is_file()
             runtime_missing = not manager.cli_path.is_file()
@@ -768,31 +936,47 @@ class AnalysisDialog(QDialog):
             if model_missing or runtime_missing:
                 download_mib = manager.model_download_bytes(model_key) / 1024**2
                 diagnostic_event("whisper_download_prompt_shown", download_mib=download_mib + 8)
-                answer = QMessageBox.question(
-                    self,
-                    "Download local transcription components?",
-                    f"This one-time setup will download approximately {download_mib + 8:.0f} MiB "
-                    "of checksum-verified whisper.cpp runtime/model files. They are stored only "
-                    "for your Windows user and can be deleted later from local application data. "
-                    "Continue?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                    QMessageBox.StandardButton.Yes,
-                )
-                diagnostic_event(
-                    "whisper_download_consent", accepted=answer == QMessageBox.StandardButton.Yes,
-                )
-                if answer != QMessageBox.StandardButton.Yes:
-                    self.progress_label.setText(
-                        f"Whisper not started. {self._recovery_hint()}"
+                def consent(accepted: bool) -> None:
+                    diagnostic_event("whisper_download_consent", accepted=accepted)
+                    start(accepted)
+
+                coordinator = getattr(_workspace_for(self), "setup_consent", None)
+                if coordinator is not None:
+                    components = {}
+                    if runtime_missing:
+                        components[f"whisper-runtime:{manager.runtime['archive_sha256']}"] = (
+                            f"Whisper CPU runtime {manager.runtime['version']} (~8 MiB)"
+                        )
+                    if model_missing:
+                        components[f"whisper-model:{manager.models[model_key]['sha256']}"] = (
+                            f"Whisper {model_key} model (~{download_mib:.0f} MiB)"
+                        )
+                    coordinator.request(
+                        self.project_id, components, consent, _current_dialog_request(self),
                     )
-                    return
-        self._start_worker(use_whisper=use_whisper)
+                else:
+                    show_message(
+                        self, "question",
+                        "Download local transcription components?",
+                        f"This one-time setup will download approximately {download_mib + 8:.0f} MiB "
+                        "of checksum-verified whisper.cpp runtime/model files. They are stored only "
+                        "for your Windows user and can be deleted later from local application data. "
+                        "Continue?",
+                        consent, QMessageBox.StandardButton.Yes,
+                    )
+                return
+        start(True)
 
     def _start_automatic_refinement(self) -> None:
+        if self.job_manager is not None:
+            self._start_pending_refinement()
+            self.start_scan()
+            return
         self._start_pending_refinement(start_whisper=True)
 
     def _start_pending_refinement(self, *, start_whisper: bool = False) -> None:
-        if self.worker is not None or self._close_after_cancel or self._scan_canceled:
+        running = self.refinement_worker if self.job_manager is not None else self.worker
+        if running is not None or self._close_after_cancel or self._scan_canceled:
             diagnostic_event(
                 "automatic_refinement_skipped", already_running=self.worker is not None,
                 closing=self._close_after_cancel, canceled=self._scan_canceled,
@@ -802,45 +986,59 @@ class AnalysisDialog(QDialog):
         self.start_refinement()
 
     def start_refinement(self) -> None:
-        if self.worker is not None or self._close_after_cancel:
+        running = self.refinement_worker if self.job_manager is not None else self.worker
+        if running is not None or self._close_after_cancel or self._pending_refine:
             return
         if not self.source_captions:
-            QMessageBox.information(
-                self, "No imported captions", "No original YouTube caption evidence is available."
+            show_message(
+                self, "information", "No imported captions",
+                "No original YouTube caption evidence is available."
             )
             return
         self._commit_draft_editors()
+        def start(accepted: bool) -> None:
+            self._pending_refine = False
+            self._update_scan_button()
+            if accepted and not self._close_after_cancel:
+                self._start_worker(use_whisper=False, refine=True)
+            else:
+                self._whisper_after_refinement = False
+
         if self.refined_table.rowCount():
-            answer = QMessageBox.question(
-                self,
+            self._pending_refine = True
+            show_message(
+                self, "question",
                 "Replace Refined YouTube draft?",
                 "A successful refinement will replace only the Refined YouTube draft and its edits, "
                 "using the original imported captions. Your Whisper draft will not change. "
+                "Edits made while refining are kept until you apply the new result. "
                 "A failed or canceled scan keeps all drafts. Continue?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
+                start,
             )
-            if answer != QMessageBox.StandardButton.Yes:
-                self._whisper_after_refinement = False
-                return
-        self._start_worker(use_whisper=False, refine=True)
+            self._update_scan_button()
+            return
+        start(True)
 
-    def _start_worker(self, *, use_whisper: bool, refine: bool = False) -> None:
+    def _start_worker(
+        self, *, use_whisper: bool, refine: bool = False,
+        model_key: str | None = None, language: str | None = None,
+    ) -> None:
+        self._commit_draft_editors()
+        self._run_revisions[refine] = self._draft_revisions[refine]
         self._scan_canceled = False
         self.scan_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
-        target_table = self.refined_table if refine else self.local_table
         target_status = self.refined_status if refine else self.local_status
-        target_table.setEnabled(False)
         target_status.setText(
             "Measuring audio pauses for YouTube captions..." if refine else
             "Whisper is running..." if use_whisper else "Scanning audio activity..."
         )
         self._update_selection_controls()
-        self.whisper_check.setEnabled(False)
-        self.model_combo.setEnabled(False)
-        self.language_combo.setEnabled(False)
-        self.sensitivity_combo.setEnabled(False)
+        if not refine or self.job_manager is None:
+            self.whisper_check.setEnabled(False)
+            self.model_combo.setEnabled(False)
+            self.language_combo.setEnabled(False)
+            self.sensitivity_combo.setEnabled(False)
         self.progress_bar.setRange(0, 0)
         self.progress_label.setText("Starting local analysis…")
         worker = AnalysisWorker(
@@ -850,12 +1048,25 @@ class AnalysisDialog(QDialog):
             self.data_root,
             str(self.sensitivity_combo.currentData()),
             use_whisper,
-            str(self.model_combo.currentData()),
-            str(self.language_combo.currentData()),
+            model_key or str(self.model_combo.currentData()),
+            language or str(self.language_combo.currentData()),
             source_captions=list(self.source_captions) if refine else None,
             pause_threshold=self.pause_spin.value(),
         )
-        self.worker = worker
+        if refine and self.job_manager is not None:
+            self.refinement_worker = worker
+        else:
+            self.worker = worker
+        if self.job_manager is not None:
+            worker.configure_job(
+                self.job_manager, self.project_id,
+                "refinement" if refine else "analysis",
+                "Refine YouTube captions" if refine else
+                "Whisper transcription" if use_whisper else "Scan audio",
+                resource_class="cpu", read_paths=(self.video,),
+                resource_keys=("local-inference",) if use_whisper else (),
+                source_snapshot=self.source_snapshot,
+            )
         diagnostic_event(
             "analysis_worker_start_requested", worker_id=worker.worker_id,
             use_whisper=use_whisper, refine=refine, model=worker.model_key, language=worker.language,
@@ -868,15 +1079,24 @@ class AnalysisDialog(QDialog):
         worker.finished.connect(self._worker_finished)
         worker.finished.connect(worker.deleteLater)
         worker.start()
+        register_job_detail(
+            self, worker, retry=self.start_refinement if refine else self.start_scan,
+            available=lambda: (
+                (self.refinement_worker if refine else self.worker) is None
+                and not self._close_after_cancel
+                and getattr(self.parentWidget(), "_analysis_dialog", self) is self
+            ),
+        )
 
     @Slot(str, int)
     def _progress(self, message: str, value: int) -> None:
         if self._scan_canceled or self._close_after_cancel:
             return
         self.progress_label.setText(message)
-        if self.worker is not None:
+        worker = self._callback_worker()
+        if worker is not None:
             status = (
-                self.refined_status if self.worker.source_captions is not None else self.local_status
+                self.refined_status if worker.source_captions is not None else self.local_status
             )
             status.setText(message)
         if value < 0:
@@ -886,18 +1106,46 @@ class AnalysisDialog(QDialog):
             self.progress_bar.setValue(value)
 
     @Slot(object)
-    def _completed(self, value: object) -> None:
+    def _completed(self, value: object, *, apply: bool = False) -> None:
         diagnostic_event(
             "analysis_result_received", canceled=self._scan_canceled,
             closing=self._close_after_cancel, valid=isinstance(value, AnalysisResult),
         )
         # A result can already be queued when the user cancels or closes the review.
-        if self._scan_canceled or self._close_after_cancel:
+        worker = self._callback_worker()
+        if not apply and (
+            self._scan_canceled or self._close_after_cancel
+            or (worker is not None and worker.isInterruptionRequested())
+        ):
             self._canceled()
             return
         if not isinstance(value, AnalysisResult):
             self._failed("Analysis returned an unexpected result")
             return
+        refine = value.refined_captions is not None
+        self._commit_draft_editors()
+        revision = None if apply else self._run_revisions.pop(refine, None)
+        has_rows = bool(value.refined_captions) if refine else any(
+            item.source == "Whisper" or not self.source_choice for item in value.suggestions
+        )
+        if has_rows and revision is not None and revision != self._draft_revisions[refine]:
+            self._pending_results[refine] = value
+            button = self.apply_refined_result_button if refine else self.apply_local_result_button
+            button.show()
+            status = self.refined_status if refine else self.local_status
+            status.setText(
+                "A new result is ready. Your edits made during processing are unchanged. "
+                "Use the replacement button to review the new result instead."
+            )
+            self.progress_label.setText("New result saved separately; current draft edits kept.")
+            self.progress_bar.setRange(0, 1000)
+            self.progress_bar.setValue(1000)
+            self._set_idle()
+            return
+        if has_rows:
+            self._pending_results.pop(refine, None)
+            (self.apply_refined_result_button if refine else self.apply_local_result_button).hide()
+            self._draft_revisions[refine] += 1
         if value.refined_captions is not None:
             if not value.refined_captions:
                 self._empty_result(refine=True)
@@ -953,6 +1201,19 @@ class AnalysisDialog(QDialog):
         if self.local_table.rowCount():
             self.local_table.selectRow(0)
         self.review_changed.emit(self.review_state())
+
+    def apply_new_result(self, *, refine: bool = False) -> None:
+        value = self._pending_results.pop(refine, None)
+        if value is None:
+            return
+        self._commit_draft_editors()
+        self._completed(value, apply=True)
+
+    def _callback_worker(self) -> AnalysisWorker | None:
+        sender = self.sender()
+        if isinstance(sender, AnalysisWorker):
+            return sender
+        return self.worker or self.refinement_worker
 
     def _recovery_hint(self, *, refine: bool = False) -> str:
         table = self.refined_table if refine else self.local_table
@@ -1014,13 +1275,17 @@ class AnalysisDialog(QDialog):
 
     def _set_idle(self) -> None:
         self._update_scan_button()
-        self.cancel_button.setEnabled(False)
+        running = self.worker is not None or self.refinement_worker is not None
+        self.cancel_button.setEnabled(running and not self._scan_canceled)
         self.local_table.setEnabled(not self._close_after_cancel)
         self.refined_table.setEnabled(not self._close_after_cancel)
         self._update_selection_controls()
-        self.whisper_check.setEnabled(True)
-        self.sensitivity_combo.setEnabled(True)
+        self.whisper_check.setEnabled(self.worker is None)
+        self.sensitivity_combo.setEnabled(self.worker is None)
         self._whisper_toggled(self.whisper_check.isChecked())
+        if self.worker is not None:
+            self.model_combo.setEnabled(False)
+            self.language_combo.setEnabled(False)
 
     @Slot(str)
     def _failed(self, message: str) -> None:
@@ -1031,14 +1296,16 @@ class AnalysisDialog(QDialog):
             return
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
-        refine = self.worker is not None and self.worker.source_captions is not None
+        worker = self._callback_worker()
+        refine = worker is not None and worker.source_captions is not None
         hint = self._recovery_hint(refine=refine)
         status = f"Analysis failed. {hint}"
         self.progress_label.setText(status)
         (self.refined_status if refine else self.local_status).setText(status)
         self._set_idle()
-        QMessageBox.critical(
-            self, "Video analysis failed", f"{message}\n\n{hint}\n\nDiagnostic log: {self.log_path}"
+        show_message(
+            self, "critical", "Video analysis failed",
+            f"{message}\n\n{hint}\n\nDiagnostic log: {self.log_path}"
         )
 
     @Slot()
@@ -1046,7 +1313,8 @@ class AnalysisDialog(QDialog):
         self._whisper_after_refinement = False
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
-        refine = self.worker is not None and self.worker.source_captions is not None
+        worker = self._callback_worker()
+        refine = worker is not None and worker.source_captions is not None
         status = f"Analysis canceled. {self._recovery_hint(refine=refine)}"
         self.progress_label.setText(status)
         (self.refined_status if refine else self.local_status).setText(status)
@@ -1057,8 +1325,10 @@ class AnalysisDialog(QDialog):
         diagnostic_event("analysis_worker_finished", closing=self._close_after_cancel)
         if self.sender() is self.worker:
             self.worker = None
+        if self.sender() is self.refinement_worker:
+            self.refinement_worker = None
         self._set_idle()
-        if self._close_after_cancel:
+        if self._close_after_cancel and self.worker is None and self.refinement_worker is None:
             self._finish_review()
         elif self._whisper_after_refinement:
             self._whisper_after_refinement = False
@@ -1106,8 +1376,9 @@ class AnalysisDialog(QDialog):
     def preview_row(self, row: int, table: QTableWidget | None = None) -> None:
         table = self.table if table is None else table
         if not table.isEnabled():
-            QMessageBox.information(
-                self, "Transcript processing", "Wait for this transcript to finish processing."
+            show_message(
+                self, "information", "Transcript processing",
+                "Wait for this transcript to finish processing."
             )
             return
         try:
@@ -1116,12 +1387,12 @@ class AnalysisDialog(QDialog):
             if not math.isfinite(start) or not math.isfinite(end):
                 raise ValueError("Non-finite range")
         except (AttributeError, ValueError):
-            QMessageBox.warning(self, "Invalid suggestion", "Fix this row's In/Out values first.")
+            show_message(self, "warning", "Invalid suggestion", "Fix this row's In/Out values first.")
             return
         start = max(0.0, min(self.duration, start))
         end = max(0.0, min(self.duration, end))
         if end - start < 0.05:
-            QMessageBox.warning(self, "Invalid suggestion", "The preview range is too short.")
+            show_message(self, "warning", "Invalid suggestion", "The preview range is too short.")
             return
         self.preview_requested.emit(start, end)
 
@@ -1132,30 +1403,43 @@ class AnalysisDialog(QDialog):
         try:
             suggestions = self.checked_suggestions()
         except ValueError as error:
-            QMessageBox.warning(self, "Invalid suggestion", str(error))
+            show_message(self, "warning", "Invalid suggestion", str(error))
             return
         if not suggestions:
-            QMessageBox.information(self, "No suggestions selected", "Check at least one row first.")
+            show_message(
+                self, "information", "No suggestions selected", "Check at least one row first."
+            )
             return
+        def use(accepted: bool) -> None:
+            if not accepted or self._close_after_cancel:
+                return
+            self._accepted_suggestions = suggestions
+            if self.job_manager is not None:
+                self.review_changed.emit(self.review_state())
+                self.suggestions_accepted.emit(suggestions)
+                super(AnalysisDialog, self).accept()
+                return
+            self._accept_after_cancel = True
+            self._close_review()
+
         if self.existing_segments:
-            answer = QMessageBox.question(
-                self,
+            show_message(
+                self, "question",
                 "Add alongside existing segments?",
                 f"This project already has {self.existing_segments} segment(s). Add "
                 f"{len(suggestions)} checked suggestion(s) without replacing anything?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
+                use,
             )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-        self._accepted_suggestions = suggestions
-        self._accept_after_cancel = True
-        self._close_review()
+            return
+        use(True)
 
     def _close_review(self) -> None:
         self._commit_draft_editors()
-        self._close_after_cancel = True
         self.review_changed.emit(self.review_state())
+        if self.job_manager is not None:
+            self.hide()
+            return
+        self._close_after_cancel = True
         if self.worker is not None:
             self.refined_table.setEnabled(False)
             self.local_table.setEnabled(False)
@@ -1181,10 +1465,11 @@ class AnalysisDialog(QDialog):
     def cancel_scan(self) -> None:
         self._whisper_after_refinement = False
         diagnostic_event("analysis_cancel_requested", running=self.worker is not None)
-        if self.worker is not None:
+        workers = [worker for worker in (self.worker, self.refinement_worker) if worker is not None]
+        if workers:
             self._scan_canceled = True
-        if self.worker and self.worker.isRunning():
-            self.worker.requestInterruption()
+        for worker in workers:
+            worker.requestInterruption()
             self.scan_button.setText("Canceling...")
             self.cancel_button.setEnabled(False)
             self.progress_label.setText("Canceling analysis; current captions will be kept...")

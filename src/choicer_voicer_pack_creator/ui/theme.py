@@ -4,7 +4,8 @@ QWidget {
     font-family: "Segoe UI", "Inter", sans-serif;
     font-size: 10pt;
 }
-QMainWindow, QDialog { background: #080d14; }
+QMainWindow, QDialog, QWidget#projectEditor, QWidget#projectEditorContent { background: #080d14; }
+QFrame#projectEditorPanel { background: #0d141f; }
 QMenuBar, QMenu, QToolBar, QStatusBar { background: #0d141f; color: #dbe7f7; }
 QMenuBar::item:selected, QMenu::item:selected { background: #19344c; }
 QToolBar { border: 0; border-bottom: 1px solid #233246; spacing: 6px; padding: 6px; }

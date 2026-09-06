@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QThread, QTimer, Signal, Slot
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QDialog,
@@ -22,9 +22,16 @@ from choicer_voicer_pack_creator.separation import (
     SeparationDownloadRequired,
     SeparationManager,
 )
+from choicer_voicer_pack_creator.ui.analysis_dialog import (
+    _current_dialog_request,
+    _workspace_for,
+    register_job_detail,
+    show_message,
+)
+from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 
 
-class BackingWorker(QThread):
+class BackingWorker(JobWorker):
     progress = Signal(str, int)
     completed = Signal(object)
     failed = Signal(str)
@@ -58,6 +65,8 @@ class BackingWorker(QThread):
                 progress=report,
                 cancelled=self.isInterruptionRequested,
             )
+            if not isinstance(result, Path) or not result.is_file():
+                raise ValueError("Backing generation returned no usable audio file.")
             self.completed.emit(result)
         except SeparationDownloadRequired:
             self.download_required.emit()
@@ -75,15 +84,26 @@ class BackingDialog(QDialog):
         video: Path,
         data_root: Path,
         parent: QWidget | None = None,
+        *,
+        job_manager=None,
+        project_id: str | None = None,
+        source_snapshot=None,
     ) -> None:
         super().__init__(parent)
         self.media = media
         self.video = video
+        self.data_root = data_root
+        self.job_manager = job_manager
+        self.project_id = project_id
+        self.source_snapshot = source_snapshot
+        if job_manager is not None:
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.manager = SeparationManager(data_root)
         self.worker: BackingWorker | None = None
         self.backing_path: Path | None = None
         self._outcome = ""
         self._closing = False
+        self._pending_consent = False
         self.setWindowTitle("Generate backing track")
         self.setMinimumWidth(540)
         layout = QVBoxLayout(self)
@@ -108,13 +128,17 @@ class BackingDialog(QDialog):
         self.retry_button.clicked.connect(lambda: self.start())
         buttons.addWidget(self.retry_button)
         self.close_button = QPushButton("Cancel")
-        self.close_button.clicked.connect(self.reject)
+        self.close_button.clicked.connect(self.cancel_generation)
         buttons.addWidget(self.close_button)
+        if job_manager is not None:
+            hide_button = QPushButton("Hide")
+            hide_button.clicked.connect(self.hide)
+            buttons.addWidget(hide_button)
         layout.addLayout(buttons)
         QTimer.singleShot(0, self.start)
 
     def start(self, *, allow_download: bool = False) -> None:
-        if self.worker is not None or self._closing:
+        if self.worker is not None or self._closing or self._pending_consent:
             return
         self._outcome = ""
         self.backing_path = None
@@ -126,6 +150,13 @@ class BackingDialog(QDialog):
             self.manager, self.media, self.video, allow_download=allow_download,
         )
         self.worker = worker
+        if self.job_manager is not None:
+            worker.configure_job(
+                self.job_manager, self.project_id, "backing", "Generate backing track",
+                resource_class="cpu", read_paths=(self.video,),
+                resource_keys=("local-inference", f"separation:{self.data_root.resolve()}"),
+                source_snapshot=self.source_snapshot,
+            )
         worker.progress.connect(self._progress)
         worker.completed.connect(self._completed)
         worker.download_required.connect(self._download_required)
@@ -134,6 +165,17 @@ class BackingDialog(QDialog):
         worker.finished.connect(self._worker_finished)
         worker.finished.connect(worker.deleteLater)
         worker.start()
+        editor = self.parentWidget()
+        session = getattr(editor, "session", None)
+        backing_revision = session.backing_revision if session is not None else None
+        register_job_detail(
+            self, worker, retry=self.start,
+            available=lambda: (
+                self.worker is None and not self._pending_consent and not self._closing
+                and (session is None or session.backing_revision == backing_revision)
+                and getattr(editor, "_backing_dialog", self) is self
+            ),
+        )
 
     @Slot(str, int)
     def _progress(self, message: str, value: int) -> None:
@@ -179,24 +221,39 @@ class BackingDialog(QDialog):
             super().accept()
         elif self._outcome == "download":
             size = self.manager.model_download_bytes / 1024**2
-            answer = QMessageBox.question(
-                self,
-                "Download local music-separation model?",
-                f"Download approximately {size:.0f} MiB of checksum-verified model data? "
-                "The model is stored in your local application data and reused offline. "
-                "A missing or damaged model needs this download before generation can continue.\n\n"
-                "Audio stays on this computer. Canceling keeps your imported video and dialogue "
-                "work; you can generate backing later from Tools.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Yes,
-            )
-            diagnostic_event(
-                "backing_download_consent", accepted=answer == QMessageBox.StandardButton.Yes,
-            )
-            if answer == QMessageBox.StandardButton.Yes:
-                self.start(allow_download=True)
+            self._pending_consent = True
+
+            def consent(accepted: bool) -> None:
+                self._pending_consent = False
+                diagnostic_event("backing_download_consent", accepted=accepted)
+                if accepted and not self._closing:
+                    self.start(allow_download=True)
+                else:
+                    self.progress_label.setText("Backing generation not started; download declined.")
+                    self.close_button.setText("Close")
+                    self.retry_button.setVisible(True)
+                    if self.job_manager is None:
+                        super(BackingDialog, self).reject()
+
+            coordinator = getattr(_workspace_for(self), "setup_consent", None)
+            if coordinator is not None:
+                model = self.manager.manifest["model"]
+                coordinator.request(
+                    self.project_id,
+                    {f"separation:{model['sha256']}": f"Music-separation model (~{size:.0f} MiB)"},
+                    consent, _current_dialog_request(self),
+                )
             else:
-                super().reject()
+                show_message(
+                    self, "question",
+                    "Download local music-separation model?",
+                    f"Download approximately {size:.0f} MiB of checksum-verified model data? "
+                    "The model is stored in your local application data and reused offline. "
+                    "A missing or damaged model needs this download before generation can continue.\n\n"
+                    "Audio stays on this computer. Canceling keeps your imported video and dialogue "
+                    "work; you can generate backing later from Tools.",
+                    consent, QMessageBox.StandardButton.Yes,
+                )
         else:
             if self._outcome != "failed":
                 self._failed("Backing generation stopped without returning a result.")
@@ -208,6 +265,12 @@ class BackingDialog(QDialog):
             super().accept()
 
     def reject(self) -> None:
+        if self.job_manager is not None:
+            self.hide()
+            return
+        self.cancel_generation()
+
+    def cancel_generation(self) -> None:
         self._closing = True
         if self.worker is not None:
             self.worker.requestInterruption()
@@ -217,7 +280,10 @@ class BackingDialog(QDialog):
         super().reject()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        if self.worker is not None:
+        if self.job_manager is not None:
+            self.hide()
+            event.ignore()
+        elif self.worker is not None:
             self.reject()
             event.ignore()
         else:

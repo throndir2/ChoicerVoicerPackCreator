@@ -4,11 +4,13 @@ import hashlib
 import json
 import math
 import tempfile
+import threading
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, Protocol
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -73,6 +75,8 @@ class ProjectSnapshot:
     path: Path | None = None
     dirty: bool = False
     saved_hash: str | None = None
+    project_id: str | None = None
+    loading: bool = False
 
     @property
     def revision(self) -> str:
@@ -83,6 +87,8 @@ class ProjectSnapshot:
             segment["start"] = float(segment["start"])
             segment["end"] = float(segment["end"])
         payload = {
+            "project_id": self.project_id,
+            "loading": self.loading,
             "project": project_data,
             "path": str(self.path) if self.path else None,
             "dirty": self.dirty,
@@ -94,11 +100,17 @@ class ProjectSnapshot:
 
     def copy(self) -> ProjectSnapshot:
         return ProjectSnapshot(
-            deepcopy(self.project), self.path, self.dirty, self.saved_hash
+            deepcopy(self.project), self.path, self.dirty, self.saved_hash, self.project_id, self.loading
         )
 
 
+def require_ready(snapshot: ProjectSnapshot) -> None:
+    if snapshot.loading:
+        raise ValueError("Project is still loading. Wait and call get_project again before editing.")
+
+
 def require_revision(snapshot: ProjectSnapshot, expected: str) -> None:
+    require_ready(snapshot)
     if snapshot.revision != expected:
         raise ValueError("Project changed. Call get_project and retry using its current revision.")
 
@@ -120,6 +132,7 @@ def protected_assets(project: PackProject) -> list[Path]:
 
 
 def save_snapshot(snapshot: ProjectSnapshot, destination: Path, overwrite: bool) -> ProjectSnapshot:
+    require_ready(snapshot)
     if not destination.name.casefold().endswith(".cvpack.json"):
         raise ValueError("Project destination must end in .cvpack.json.")
     assets = protected_assets(snapshot.project)
@@ -144,11 +157,23 @@ def save_snapshot(snapshot: ProjectSnapshot, destination: Path, overwrite: bool)
     elif destination == snapshot.path and snapshot.saved_hash is not None:
         raise ValueError("Saved project was removed on disk. Save to a new path or reopen it.")
     ProjectStore.save(snapshot.project, destination)
-    return ProjectSnapshot(snapshot.project, destination, False, sha256(destination))
+    return ProjectSnapshot(
+        snapshot.project, destination, False, sha256(destination), snapshot.project_id
+    )
 
 
 class ProjectAccess(Protocol):
     live: bool
+
+    def bind(self, project_id: str | None = None) -> ProjectAccess: ...
+
+    def list_projects(self) -> dict[str, Any]: ...
+
+    def activate(self, project_id: str) -> ProjectSnapshot: ...
+
+    def open_existing(self, path: Path) -> ProjectSnapshot | None: ...
+
+    def create(self, snapshot: ProjectSnapshot) -> ProjectSnapshot: ...
 
     def snapshot(self) -> ProjectSnapshot: ...
 
@@ -162,20 +187,90 @@ class ProjectAccess(Protocol):
 class HeadlessProjectAccess:
     live = False
 
-    def __init__(self) -> None:
-        self.current = ProjectSnapshot(PackProject())
+    def __init__(self, snapshot: ProjectSnapshot | None = None) -> None:
+        self._root = self
+        self._project_id: str | None = None
+        self._lock = threading.RLock()
+        self._active_id = (snapshot.project_id if snapshot else None) or uuid4().hex
+        initial = snapshot.copy() if snapshot else ProjectSnapshot(PackProject())
+        initial.project_id = self._active_id
+        self._projects = {self._active_id: initial}
+
+    @property
+    def current(self) -> ProjectSnapshot:
+        project_id = self._root._active_id if self._project_id is None else self._project_id
+        if project_id not in self._root._projects:
+            raise ValueError(f"Unknown project_id: {project_id}")
+        return self._root._projects[project_id]
+
+    @current.setter
+    def current(self, snapshot: ProjectSnapshot) -> None:
+        project_id = self._root._active_id if self._project_id is None else self._project_id
+        snapshot.project_id = project_id
+        self._root._projects[project_id] = snapshot
+
+    def bind(self, project_id: str | None = None) -> HeadlessProjectAccess:
+        with self._root._lock:
+            bound = object.__new__(HeadlessProjectAccess)
+            bound._root = self._root
+            bound._project_id = self.current.project_id if project_id is None else project_id
+            bound.snapshot()
+            return bound
+
+    def list_projects(self) -> dict[str, Any]:
+        with self._root._lock:
+            return {
+                "active_project_id": self._root._active_id,
+                "projects": [
+                    {"project_id": item.project_id, "title": item.project.title,
+                     "project_path": str(item.path) if item.path else None,
+                     "dirty": item.dirty, "loading": item.loading, "revision": item.revision}
+                    for item in self._root._projects.values()
+                ],
+            }
+
+    def activate(self, project_id: str) -> ProjectSnapshot:
+        with self._root._lock:
+            bound = self.bind(project_id)
+            self._root._active_id = project_id
+            return bound.snapshot()
+
+    def create(self, snapshot: ProjectSnapshot) -> ProjectSnapshot:
+        with self._root._lock:
+            if snapshot.path is not None:
+                existing = self.open_existing(snapshot.path)
+                if existing is not None:
+                    return existing
+            snapshot = snapshot.copy()
+            snapshot.project_id = uuid4().hex
+            self._root._projects[snapshot.project_id] = snapshot
+            self._root._active_id = snapshot.project_id
+            return snapshot.copy()
+
+    def open_existing(self, path: Path) -> ProjectSnapshot | None:
+        with self._root._lock:
+            for current in self._root._projects.values():
+                if current.path == path:
+                    return self.activate(current.project_id)
+            return None
 
     def snapshot(self) -> ProjectSnapshot:
-        return self.current.copy()
+        with self._root._lock:
+            return self.current.copy()
 
     def replace(self, snapshot: ProjectSnapshot, expected_revision: str) -> None:
-        require_revision(self.current, expected_revision)
-        self.current = snapshot.copy()
+        with self._root._lock:
+            require_revision(self.current, expected_revision)
+            self.current = snapshot.copy()
 
     def save(self, destination: Path, expected_revision: str, overwrite: bool) -> ProjectSnapshot:
-        require_revision(self.current, expected_revision)
-        self.current = save_snapshot(self.current, destination, overwrite)
-        return self.snapshot()
+        with self._root._lock:
+            require_revision(self.current, expected_revision)
+            for item in self._root._projects.values():
+                if item.project_id != self.current.project_id and item.path == destination:
+                    raise ValueError("Destination belongs to another open project.")
+            self.current = save_snapshot(self.current, destination, overwrite)
+            return self.snapshot()
 
     def show(self, segment_id: str | None, timestamp: float | None) -> None:
         raise ValueError("No editor in headless mode. Restart the MCP server without --headless.")
@@ -189,6 +284,9 @@ class PackAutomation:
         self.data_root = data_root
         self._media = media
 
+    def for_project(self, project_id: str | None = None) -> PackAutomation:
+        return PackAutomation(self.access.bind(project_id), self.data_root, self._media)
+
     @property
     def media(self) -> MediaTools:
         if self._media is None:
@@ -200,6 +298,8 @@ class PackAutomation:
         data = snapshot.project.to_dict()
         segments = data.pop("segments")
         return {
+            "project_id": snapshot.project_id,
+            "loading": snapshot.loading,
             "project": data,
             "segments": segments[offset:offset + limit],
             "total_segments": len(segments),
@@ -214,21 +314,15 @@ class PackAutomation:
             raise ValueError("offset must be non-negative and limit must be between 1 and 500.")
         return self.describe(self.access.snapshot(), offset, limit)
 
-    def _transition(self, discard_dirty: bool) -> ProjectSnapshot:
-        snapshot = self.access.snapshot()
-        if snapshot.dirty and not discard_dirty:
-            raise ValueError("Unsaved changes. Save first, or explicitly set discard_dirty=true.")
-        return snapshot
-
     def _publish(self, updated: ProjectSnapshot, previous: ProjectSnapshot) -> dict[str, Any]:
         json.dumps(updated.project.to_dict(), allow_nan=False)
+        updated.project_id = previous.project_id
         self.access.replace(updated, previous.revision)
         return self.describe(self.access.snapshot())
 
     def new_project(
         self, video_path: str, title: str, authors: list[str], discard_dirty: bool = False
     ) -> dict[str, Any]:
-        previous = self._transition(discard_dirty)
         source = local_path(video_path)
         info = self.media.probe(source)
         if not info.has_audio or not math.isfinite(info.duration) or info.duration <= 0:
@@ -238,21 +332,24 @@ class PackAutomation:
         project = PackProject(
             title=title, authors=authors, video_path=str(source), video_duration=info.duration
         )
-        return self._publish(ProjectSnapshot(project, dirty=True), previous)
+        return self.describe(self.access.create(ProjectSnapshot(project, dirty=True)))
 
     def open_project(self, path: str, discard_dirty: bool = False) -> dict[str, Any]:
-        previous = self._transition(discard_dirty)
+        existing = self.access.open_existing(local_path(path, exists=False))
+        if existing is not None:
+            return self.describe(existing)
         source = local_path(path)
         before = sha256(source)
         project = ProjectStore.load(source)
         if before != sha256(source):
             raise ValueError("Project changed while opening it. Retry.")
-        return self._publish(ProjectSnapshot(project, source, False, before), previous)
+        json.dumps(project.to_dict(), allow_nan=False)
+        return self.describe(self.access.create(ProjectSnapshot(project, source, False, before)))
 
     def import_pack(self, path: str, discard_dirty: bool = False) -> dict[str, Any]:
-        previous = self._transition(discard_dirty)
         result = PackImporter(self.media).import_folder(local_path(path, directory=True))
-        return self._publish(ProjectSnapshot(result.project, dirty=True), previous)
+        json.dumps(result.project.to_dict(), allow_nan=False)
+        return self.describe(self.access.create(ProjectSnapshot(result.project, dirty=True)))
 
     def update_project(self, patch: ProjectPatch, expected_revision: str) -> dict[str, Any]:
         previous = self.access.snapshot()
@@ -361,6 +458,7 @@ class PackAutomation:
             if not info.has_audio:
                 errors.append("Source video has no audio stream.")
         return {
+            "project_id": snapshot.project_id,
             "valid": not errors,
             "errors": errors,
             "overlaps": [asdict(item) for item in audit_timeline_overlaps(project.segments)],
@@ -392,6 +490,7 @@ class PackAutomation:
             raise ValueError("Export would replace the saved project or source assets.")
         result = PackExporter(self.media).export(snapshot.project, parent, progress=progress)
         return {
+            "project_id": snapshot.project_id,
             "pack_path": str(result.pack_path),
             "zip_path": str(result.zip_path),
             "validation": result.validation,
@@ -439,6 +538,7 @@ class PackAutomation:
         )
         return {
             **asdict(result),
+            "project_id": snapshot.project_id,
             "revision": snapshot.revision,
             "warning": "Draft evidence only; review captions, timing, and speakers. Nothing was added.",
         }

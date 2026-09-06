@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from threading import Event, current_thread, main_thread
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,7 @@ from choicer_voicer_pack_creator.analysis import (
     detect_hardware,
 )
 from choicer_voicer_pack_creator.diagnostics import analysis_log_path
+from choicer_voicer_pack_creator.jobs import JobManager
 from choicer_voicer_pack_creator.models import (
     AnalysisDraftRow,
     AnalysisReview,
@@ -31,14 +33,390 @@ from choicer_voicer_pack_creator.models import (
     SourceCaption,
 )
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
-from choicer_voicer_pack_creator.ui import analysis_dialog
+from choicer_voicer_pack_creator.ui import analysis_dialog, backing_dialog
 from choicer_voicer_pack_creator.ui.analysis_dialog import AnalysisDialog
-from choicer_voicer_pack_creator.ui.main_window import MainWindow
+from choicer_voicer_pack_creator.ui.main_window import MainWindow, ProjectEditor
 from choicer_voicer_pack_creator.ui.theme import APP_STYLESHEET
 
 
 class UnusedMedia:
     pass
+
+
+@pytest.fixture
+def managed_jobs(qtbot):
+    manager = JobManager(limits={"cpu": 2, "io": 1, "network": 1})
+    yield manager
+    manager.shutdown(cancel=True, wait=True)
+
+
+@pytest.mark.parametrize("manager_location", ["direct", "workspace"])
+@pytest.mark.parametrize("outcome", ["success", "failure"])
+def test_managed_diagnostic_bundle_uses_background_io_and_nonmodal_notice(
+    qtbot, tmp_path, monkeypatch, managed_jobs, manager_location, outcome,
+):
+    import zipfile
+
+    parent = QDialog()
+    qtbot.addWidget(parent)
+    if manager_location == "direct":
+        parent.job_manager = managed_jobs
+        parent.project_id = "project-a"
+    else:
+        parent.workspace = SimpleNamespace(job_manager=managed_jobs)
+        parent.session = SimpleNamespace(id="project-a")
+    data_root = tmp_path / "analysis"
+    log = analysis_log_path(data_root)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text('{"event": "test_diagnostics"}\n', encoding="utf-8")
+    destination = tmp_path / "diagnostics.zip"
+    started, release = Event(), Event()
+    on_gui_thread = []
+    save_bundle = analysis_dialog.save_diagnostic_bundle
+
+    def save(root, output):
+        on_gui_thread.append(current_thread() is main_thread())
+        started.set()
+        assert release.wait(5)
+        if outcome == "failure":
+            raise OSError("Destination unavailable")
+        return save_bundle(root, output)
+
+    monkeypatch.setattr(analysis_dialog, "save_diagnostic_bundle", save)
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(destination), ""))
+    for name in ("information", "warning"):
+        monkeypatch.setattr(QMessageBox, name, lambda *_a: pytest.fail("Modal diagnostic notice"))
+    try:
+        analysis_dialog.save_diagnostic_logs(parent, data_root)
+        qtbot.waitUntil(started.is_set)
+        assert not destination.exists()
+        assert on_gui_thread == [False]
+        record = managed_jobs.active_jobs()[0]
+        assert (record.project_id, record.kind, record.resource_class) == (
+            "project-a", "diagnostics", "io",
+        )
+        parent.hide()
+    finally:
+        release.set()
+        qtbot.waitUntil(lambda: not managed_jobs.active_jobs())
+    box = next(box for box in parent.findChildren(QMessageBox) if box.isVisible())
+    assert not box.isModal()
+    assert box.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    if outcome == "success":
+        assert managed_jobs.tasks()[0].state == "succeeded"
+        assert box.windowTitle() == "Diagnostic bundle saved"
+        with zipfile.ZipFile(destination) as archive:
+            assert {"analysis.log", "support-info.json"} <= set(archive.namelist())
+    else:
+        assert managed_jobs.tasks()[0].state == "failed"
+        assert "Destination unavailable" in box.text()
+        assert not destination.exists()
+    box.close()
+
+
+def test_workspace_whisper_and_refinement_start_independently_and_survive_use(
+    qtbot, tmp_path, monkeypatch, installed_whisper, managed_jobs,
+):
+    started = {False: Event(), True: Event()}
+    release = {False: Event(), True: Event()}
+    canceled = []
+
+    def analyze(*_args, source_captions, cancelled, **_kwargs):
+        refine = source_captions is not None
+        started[refine].set()
+        assert release[refine].wait(5)
+        canceled.append(cancelled())
+        return AnalysisResult(
+            [AnalysisSuggestion(1, 2, "Whisper result", "Whisper")],
+            1, 1, -30, None if refine else "tiny", "en", detect_hardware(),
+            refined_captions=[SourceCaption(1, 2, "Refined result", "Refined YouTube")]
+            if refine else None,
+        )
+
+    monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
+    monkeypatch.setattr(QMessageBox, "question", lambda *_a: pytest.fail("Modal consent"))
+    details = {}
+    host = QDialog()
+    qtbot.addWidget(host)
+    host.workspace = SimpleNamespace(tasks_panel=SimpleNamespace(
+        register_detail=lambda job_id, widget: details.__setitem__(job_id, widget),
+    ))
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0, host,
+        source_captions=[SourceCaption(1, 2, "Evidence", "YouTube")], auto_start=True,
+        job_manager=managed_jobs, project_id="project-a", source_snapshot={"revision": 7},
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    accepted = []
+    dialog.suggestions_accepted.connect(accepted.extend)
+    try:
+        qtbot.waitUntil(lambda: all(event.is_set() for event in started.values()))
+        assert dialog.worker is not None and dialog.refinement_worker is not None
+        assert details == {
+            dialog.worker.job_handle.id: dialog,
+            dialog.refinement_worker.job_handle.id: dialog,
+        }
+        assert {job.kind for job in managed_jobs.active_jobs("project-a")} == {
+            "analysis", "refinement",
+        }
+        assert all(job.source_snapshot["revision"] == 7 for job in managed_jobs.tasks())
+        assert not dialog.isModal()
+        assert dialog.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        dialog.close()
+        assert not dialog.isVisible()
+        assert not any(job.cancel_requested for job in managed_jobs.active_jobs())
+        release[False].set()
+        qtbot.waitUntil(lambda: dialog.worker is None)
+        dialog.show()
+        dialog.local_add_button.click()
+        assert accepted[0].caption == "Whisper result"
+        assert dialog.refinement_worker is not None
+        assert not dialog.refinement_worker.isInterruptionRequested()
+        assert not dialog.isVisible()
+    finally:
+        for event in release.values():
+            event.set()
+        qtbot.waitUntil(
+            lambda: dialog.worker is None and dialog.refinement_worker is None
+        )
+    assert canceled == [False, False]
+    assert dialog.refined_table.item(0, 3).text() == "Refined result"
+    assert len(accepted) == 1
+
+
+def test_workspace_backing_and_whisper_share_memory_lease_but_refinement_can_run(
+    qtbot, tmp_path, monkeypatch, installed_whisper, managed_jobs,
+):
+    backing_started, release_backing, whisper_started = Event(), Event(), Event()
+    output = tmp_path / "backing.wav"
+    output.write_bytes(b"backing")
+
+    class Separation:
+        def __init__(self, _root):
+            pass
+
+        def generate(self, *_args, **_kwargs):
+            backing_started.set()
+            assert release_backing.wait(5)
+            return output
+
+    def analyze(*_args, use_whisper, **_kwargs):
+        if use_whisper:
+            whisper_started.set()
+        return AnalysisResult(
+            [AnalysisSuggestion(1, 2, "Local result", "Whisper")],
+            1, 1, -30, "tiny", "en", detect_hardware(),
+            refined_captions=None if use_whisper else [
+                SourceCaption(1, 2, "Refined result", "Refined YouTube"),
+            ],
+        )
+
+    monkeypatch.setattr(backing_dialog, "SeparationManager", Separation)
+    monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
+    backing = backing_dialog.BackingDialog(
+        UnusedMedia(), tmp_path / "other-video.mp4", tmp_path / "backing-cache",
+        job_manager=managed_jobs, project_id="project-b",
+    )
+    qtbot.addWidget(backing)
+    dialog = None
+    try:
+        qtbot.waitUntil(backing_started.is_set)
+        dialog = AnalysisDialog(
+            UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+            source_captions=[SourceCaption(1, 2, "Evidence", "YouTube")], auto_start=True,
+            job_manager=managed_jobs, project_id="project-a",
+        )
+        qtbot.addWidget(dialog)
+        qtbot.waitUntil(lambda: dialog.refined_table.rowCount() == 1)
+        assert backing.worker is not None
+        assert dialog.worker is not None
+        assert dialog.worker.job_handle.record.state in {"queued", "waiting"}
+        assert not whisper_started.is_set()
+        assert {job.kind for job in managed_jobs.tasks("project-a")} == {
+            "analysis", "refinement",
+        }
+    finally:
+        release_backing.set()
+        qtbot.waitUntil(lambda: backing.worker is None)
+        if dialog is not None:
+            qtbot.waitUntil(
+                lambda: dialog.worker is None and dialog.refinement_worker is None
+            )
+    assert whisper_started.is_set()
+    assert {job.state for job in managed_jobs.tasks()} == {"succeeded"}
+
+
+def test_workspace_autostart_download_consent_is_nonmodal_and_does_not_delay_refinement(
+    qtbot, tmp_path, monkeypatch, managed_jobs,
+):
+    missing = tmp_path / "missing-model"
+    monkeypatch.setattr(
+        analysis_dialog, "WhisperManager",
+        lambda _root: SimpleNamespace(
+            cli_path=missing, model_path=lambda _key: missing,
+            model_download_bytes=lambda _key: 74 * 1024**2,
+        ),
+    )
+    calls = []
+    started = Event()
+    release = Event()
+
+    def analyze(*_args, use_whisper, **_kwargs):
+        calls.append(use_whisper)
+        if not use_whisper:
+            started.set()
+            assert release.wait(5)
+        return AnalysisResult(
+            [AnalysisSuggestion(1, 2, "Local result", "Whisper")],
+            1, 1, -30, "tiny", "en", detect_hardware(),
+            refined_captions=None if use_whisper else [
+                SourceCaption(1, 2, "Refined result", "Refined YouTube"),
+            ],
+        )
+
+    monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
+    monkeypatch.setattr(QMessageBox, "question", lambda *_a: pytest.fail("Modal question"))
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        source_captions=[SourceCaption(1, 2, "Evidence", "YouTube")],
+        auto_start=True, job_manager=managed_jobs, project_id="project-a",
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    try:
+        qtbot.waitUntil(started.is_set)
+        box = next(box for box in dialog.findChildren(QMessageBox) if box.isVisible())
+        assert not box.isModal()
+        assert box.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        assert calls == [False]
+        dialog.close()
+        box.button(QMessageBox.StandardButton.Yes).click()
+        qtbot.waitUntil(lambda: True in calls)
+        qtbot.waitUntil(lambda: dialog.worker is None)
+        assert dialog.refinement_worker is not None
+    finally:
+        release.set()
+        qtbot.waitUntil(
+            lambda: dialog.worker is None and dialog.refinement_worker is None
+        )
+
+
+def test_workspace_explicit_cancel_interrupts_both_jobs_without_losing_drafts(
+    qtbot, tmp_path, monkeypatch, installed_whisper, managed_jobs,
+):
+    started = {False: Event(), True: Event()}
+
+    def analyze(*_args, source_captions, cancelled, **_kwargs):
+        started[source_captions is not None].set()
+        while not cancelled():
+            Event().wait(0.01)
+        raise AnalysisCancelled("Canceled")
+
+    monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
+    review = AnalysisReview(
+        local_rows=[AnalysisDraftRow("1", "2", "Local edit", "Whisper")],
+        refined_rows=[AnalysisDraftRow("1", "2", "Refined edit", "Refined YouTube")],
+        selected_source="local",
+    )
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        source_captions=[SourceCaption(1, 2, "Evidence", "YouTube")], review=review,
+        job_manager=managed_jobs, project_id="project-a",
+    )
+    qtbot.addWidget(dialog)
+    dialog._start_worker(use_whisper=True)
+    dialog._start_worker(use_whisper=False, refine=True)
+    try:
+        qtbot.waitUntil(lambda: all(event.is_set() for event in started.values()))
+        dialog.cancel_button.click()
+        qtbot.waitUntil(
+            lambda: dialog.worker is None and dialog.refinement_worker is None
+        )
+        assert {record.state for record in managed_jobs.tasks()} == {"cancelled"}
+        assert dialog.review_state() == review
+        assert dialog.local_add_button.isEnabled()
+    finally:
+        dialog.cancel_scan()
+
+
+def test_workspace_analysis_failure_message_is_nonmodal(qtbot, tmp_path, monkeypatch, managed_jobs):
+    monkeypatch.setattr(QMessageBox, "critical", lambda *_a: pytest.fail("Modal failure"))
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        job_manager=managed_jobs, project_id="project-a",
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog._failed("Failed locally")
+    box = next(box for box in dialog.findChildren(QMessageBox) if box.isVisible())
+    assert not box.isModal()
+    assert box.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    assert "Failed locally" in box.text()
+    assert dialog.scan_button.isEnabled()
+    box.close()
+
+
+@pytest.mark.parametrize("refine", [False, True], ids=["whisper", "refinement"])
+def test_workspace_late_result_preserves_inflight_draft_edits_until_explicit_replacement(
+    qtbot, tmp_path, monkeypatch, installed_whisper, managed_jobs, refine,
+):
+    started, release = Event(), Event()
+
+    def analyze(*_args, **_kwargs):
+        started.set()
+        assert release.wait(5)
+        return AnalysisResult(
+            [AnalysisSuggestion(3, 4, "New result", "Whisper")],
+            1, 1, -30, "tiny", "en", detect_hardware(),
+            refined_captions=[SourceCaption(3, 4, "New result", "Refined YouTube")]
+            if refine else None,
+        )
+
+    monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
+    review = AnalysisReview(
+        local_rows=[AnalysisDraftRow("1", "2", "Old local", "Whisper")],
+        refined_rows=[AnalysisDraftRow("1", "2", "Old refined", "Refined YouTube")],
+        selected_source="refined" if refine else "local",
+    )
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        source_captions=[SourceCaption(1, 2, "Evidence", "YouTube")],
+        review=review, job_manager=managed_jobs, project_id="project-a",
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    table = dialog.refined_table if refine else dialog.local_table
+    accepted = []
+    dialog.suggestions_accepted.connect(accepted.extend)
+    try:
+        dialog._start_worker(use_whisper=not refine, refine=refine)
+        qtbot.waitUntil(started.is_set)
+        assert table.isEnabled()
+        table.item(0, 1).setText("1.250")
+        table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+        table.editItem(table.item(0, 3))
+        editor = table.findChild(QLineEdit)
+        assert editor is not None
+        editor.selectAll()
+        qtbot.keyClicks(editor, "Edited while running")
+    finally:
+        release.set()
+        qtbot.waitUntil(
+            lambda: dialog.worker is None and dialog.refinement_worker is None
+        )
+    assert table.item(0, 3).text() == "Edited while running"
+    assert table.item(0, 1).text() == "1.250"
+    assert table.item(0, 0).checkState() == Qt.CheckState.Unchecked
+    button = dialog.apply_refined_result_button if refine else dialog.apply_local_result_button
+    assert button.isVisible()
+    assert not accepted
+    button.click()
+    assert table.item(0, 3).text() == "New result"
+    assert not button.isVisible()
+    assert not accepted
+    dialog.add_button.click()
+    assert [suggestion.caption for suggestion in accepted] == ["New result"]
 
 
 def complete_refinement(dialog):
@@ -654,15 +1032,17 @@ def test_source_choice_imports_its_own_segmentation_and_saves_it(
         "local": dialog.local_add_button,
     }[source].click()
     assert window.save_project()
-    window.open_path(window.project_path)
-    assert [(s.start, s.end, s.caption) for s in window.project.segments] == [
+    path = window.project_path
+    qtbot.waitUntil(lambda: not window.dirty and path.is_file())
+    saved = ProjectStore.load(path)
+    assert [(s.start, s.end, s.caption) for s in saved.segments] == [
         (s.start, s.end, s.caption) for s in expected
     ]
-    assert window.project.analysis_review.selected_source == source
-    assert window.project.analysis_review.youtube_rows == []
-    assert window.project.source_captions == captions
-    assert len(window.project.analysis_review.local_rows) == 1
-    assert len(window.project.analysis_review.refined_rows) == 1
+    assert saved.analysis_review.selected_source == source
+    assert saved.analysis_review.youtube_rows == []
+    assert saved.source_captions == captions
+    assert len(saved.analysis_review.local_rows) == 1
+    assert len(saved.analysis_review.refined_rows) == 1
     window.dirty = False
     window.close()
 
@@ -829,9 +1209,9 @@ def test_canceling_rescan_retains_local_and_youtube_drafts(qtbot, tmp_path, monk
     qtbot.addWidget(dialog)
     dialog.start_scan()
     assert dialog.review_state() == review
-    assert not dialog.local_table.isEnabled()
-    assert not dialog.add_button.isEnabled()
-    assert not dialog.local_add_button.isEnabled()
+    assert dialog.local_table.isEnabled()
+    assert dialog.add_button.isEnabled()
+    assert dialog.local_add_button.isEnabled()
     assert dialog.refined_add_button.isEnabled()
     dialog.cancel_scan()
     qtbot.waitUntil(lambda: dialog.worker is None)
@@ -864,6 +1244,7 @@ def test_source_video_change_clears_stale_drafts(qtbot, tmp_path, monkeypatch, o
             window.media, "probe", lambda _path: SimpleNamespace(duration=10), raising=False
         )
         window.choose_source_video()
+        qtbot.waitUntil(lambda: window.project.analysis_review is None)
     else:
         window.clear_source_video()
     assert window.project.analysis_review is None
@@ -882,8 +1263,10 @@ def test_new_local_video_starts_whisper_automatically(qtbot, tmp_path, monkeypat
     window = MainWindow(media, analysis_data_root=tmp_path / "analysis")
     qtbot.addWidget(window)
     scans = []
-    monkeypatch.setattr(window, "generate_backing_track", lambda: False)
-    monkeypatch.setattr(window, "open_analysis_dialog", lambda **kwargs: scans.append(kwargs))
+    monkeypatch.setattr(ProjectEditor, "generate_backing_track", lambda _self: False)
+    monkeypatch.setattr(
+        ProjectEditor, "open_analysis_dialog", lambda _self, **kwargs: scans.append(kwargs),
+    )
     window.new_from_video()
     qtbot.waitUntil(lambda: bool(scans))
     assert scans == [{"initial_scan": True, "auto_start": True}]
@@ -966,9 +1349,9 @@ def test_refinement_runs_without_whisper_and_replaces_only_its_draft(
         QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.Yes
     )
     dialog.start_refinement()
-    assert not dialog.refined_table.isEnabled()
+    assert dialog.refined_table.isEnabled()
     assert dialog.local_table.isEnabled()
-    assert not dialog.refined_add_button.isEnabled()
+    assert dialog.refined_add_button.isEnabled()
     assert dialog.local_add_button.isEnabled()
     assert not dialog.pause_spin.isEnabled()
     assert not dialog.refine_button.isEnabled()
