@@ -368,17 +368,6 @@ class RecoveryStore:
         ):
             path.unlink(missing_ok=True)
 
-    def is_redundant(self, record: RecoveryRecord) -> bool:
-        if record.project_path is None or not record.project_path.is_file():
-            return False
-        try:
-            return ProjectStore.load(record.project_path).to_dict() == record.project.to_dict()
-        except Exception as error:
-            diagnostic_exception(
-                "recovery_redundancy_check_failed", error, project_path=record.project_path,
-            )
-            return False
-
     def saved_project_changed(self, record: RecoveryRecord) -> bool:
         if record.project_path is None or record.saved_project_sha256 is None:
             return False

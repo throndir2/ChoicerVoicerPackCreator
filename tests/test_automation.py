@@ -237,7 +237,7 @@ def test_unserializable_projects_never_replace_active_state(automation, tmp_path
     malformed = tmp_path / "malformed.cvpack.json"
     malformed.write_text(invalid, encoding="utf-8")
     with pytest.raises(ValueError):
-        automation.open_project(str(malformed), discard_dirty=True)
+        automation.open_project(str(malformed))
     assert automation.get_project() == before
     automation.save_project(before["revision"], str(tmp_path / "still-usable.cvpack.json"))
 

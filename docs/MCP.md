@@ -145,7 +145,8 @@ reference for argument names, limits, and defaults. `get_help` returns the app v
 
 `new_project`, `open_project`, and `import_pack` create documents without discarding other drafts.
 Opening an already-open canonical project path focuses that document without reloading/discarding
-its edits. The legacy `discard_dirty` argument is accepted but no longer needed.
+its edits. `open_project` requires a `.cvpack.json` project with an explicit supported
+`schema_version`.
 
 Every project result includes a process-local stable `project_id` and opaque `revision`.
 `loading` identifies an initial open/probe placeholder: inspection is allowed, but mutations
@@ -180,7 +181,7 @@ returns draft evidence and never applies suggestions automatically. Export resul
 `exported_revision`. Later edits remain dirty and are not overwritten by old completions.
 
 Analysis/export in A does not globally disable editing or saving B/C. Bounded scheduling and
-shared source/destination reservations may queue conflicting work. The legacy `export_pack`
+shared source/destination reservations may queue conflicting work. The waiting `export_pack`
 and `analyze_video` calls wait for these same live jobs; cancelling their MCP wait does not
 cancel the task. Inspect Tasks before retrying. Headless retains waiting processing calls;
 background task tools explicitly report that they require live mode. No hidden Qt application
@@ -349,29 +350,6 @@ and exporting. A replacement may leave old ranges outside the new video's durati
 
 The source-video path cannot be cleared. Optional `backing_track_path` and `icon_path` references
 can be cleared with `""`. These edits change project references, not the source media files.
-
-### Migrate a legacy character-moments manifest
-
-A legacy character-moments `pack-manifest.json` is **not** a `.cvpack.json` project. Renaming it
-does not convert its schema, and `open_project` is not a legacy-manifest importer. Read its
-contents as data and migrate the edit decisions explicitly:
-
-1. Resolve `source.video` to an absolute local path and pass it as `new_project.video_path`,
-   with the intended pack title and author credits.
-2. Read the new project's revision. Map each legacy line's `start`, `end`, `caption`, and
-   `characters` into an `edit_segments.upsert` entry. Omit IDs for these new segments.
-3. If supplied, resolve `media.backing_stem` to an absolute path and assign it to
-   `update_project.patch.backing_track_path`.
-4. A full vocals stem is **not** a per-segment prompt recording. Prepare individual cuts
-   separately before referencing them as segment file audio: the server uses each supplied
-   recording in full and does not slice a full-length stem at the segment's timestamps.
-5. Review the migrated timing, captions, speakers, and assets against the source. Keep unknown
-   text/speakers as drafts instead of inventing them; incomplete segments cannot be exported.
-6. Use the current `expected_revision` for edits and saves, save a real `.cvpack.json` project,
-   validate, then export the clean saved project.
-
-Migration changes neither the legacy manifest nor its source media. Respect the media's
-permissions and credits; converting a manifest does not grant redistribution rights.
 
 ### Analysis and prepared assets
 

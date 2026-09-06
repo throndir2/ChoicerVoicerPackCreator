@@ -178,7 +178,6 @@ class ProjectEditor(QWidget):
     def __init__(
         self,
         media: MediaTools,
-        initial_path: Path | None = None,
         *,
         settings: QSettings | None = None,
         recovery_store: RecoveryStore | None = None,
@@ -257,9 +256,6 @@ class ProjectEditor(QWidget):
         self._set_project(self.project, self.project_path, mark_dirty=session.dirty)
         self._document_layout.addWidget(self._status_bar)
         QTimer.singleShot(0, self._restore_layout_state)
-
-        if initial_path:
-            QTimer.singleShot(0, lambda: self._open_initial_path(initial_path))
 
     def statusBar(self) -> QStatusBar:  # noqa: N802
         return self._status_bar
@@ -1024,64 +1020,6 @@ class ProjectEditor(QWidget):
         job.failed.connect(lambda message: self.statusBar().showMessage(
             f"Could not remove recovery snapshot: {message}"
         ))
-
-    def _open_initial_path(self, initial_path: Path) -> None:
-        self.open_path(initial_path)
-        self._offer_recovery()
-
-    def _offer_recovery(self) -> None:
-        if not self.recovery_store:
-            return
-        try:
-            record = self.recovery_store.load()
-        except Exception as error:
-            QMessageBox.warning(
-                self,
-                "Recovery snapshot could not be read",
-                f"An automatic recovery file exists but is not readable. It has been left "
-                f"untouched for manual inspection.\n\n{error}",
-            )
-            return
-        if record is None:
-            return
-        if self.recovery_store.is_redundant(record):
-            self._clear_recovery_snapshot()
-            return
-        original = str(record.project_path) if record.project_path else "an unsaved new project"
-        saved_project_changed = self.recovery_store.saved_project_changed(record)
-        conflict_note = (
-            "\n\nThe saved project changed after this snapshot was recorded. No is the safer "
-            "choice and keeps the newer saved project; choose Yes only to inspect the snapshot "
-            "as unsaved edits."
-            if saved_project_changed
-            else ""
-        )
-        answer = QMessageBox.question(
-            self,
-            "Recover unsaved project changes?",
-            f"The editor found automatic recovery data for {original}.\n\n"
-            f"Snapshot time: {record.created_at_utc or 'unknown'}\n\n"
-            "Choose Yes to recover the unsaved edits. The saved project is not overwritten; "
-            "after recovery, use Save to replace it or Save As to preserve both versions. "
-            f"Choose No to discard this recovery snapshot.{conflict_note}",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            (
-                QMessageBox.StandardButton.No
-                if saved_project_changed
-                else QMessageBox.StandardButton.Yes
-            ),
-        )
-        if self._automation_disconnected:
-            return
-        if answer == QMessageBox.StandardButton.No:
-            self._clear_recovery_snapshot()
-            return
-        self._set_project(record.project, record.project_path, mark_dirty=True)
-        if self.project.segments:
-            self.select_segment(self.project.segments[0].id)
-        self.statusBar().showMessage(
-            "Recovered unsaved edits. Use Save As to preserve the currently saved project."
-        )
 
     def restore_previous_save(self) -> None:
         if self.project_path is None:
@@ -3629,15 +3567,10 @@ class MainWindow(QMainWindow):
                         restored.append((identity, ProjectStore.load(path), path, False, item))
                     except (OSError, ValueError) as error:
                         notices.append(f"Could not restore {path}: {error}")
-            try:
-                legacy = root.load()
-            except (OSError, ValueError, TypeError) as error:
-                notices.append(f"Legacy recovery was retained but could not be read: {error}")
-                legacy = None
-            return restored, notices, legacy, manifest.get("active_id")
+            return restored, notices, manifest.get("active_id")
 
         def ready(value):
-            restored, notices, legacy, active_id = value
+            restored, notices, active_id = value
             for identity, project, path, dirty, item in restored:
                 if identity in self.editors:
                     continue
@@ -3663,31 +3596,6 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, lambda editor=editor, item=item: self._restore_view(
                     editor, item.get("view", {})
                 ))
-            if legacy is not None:
-                box = QMessageBox(
-                    QMessageBox.Icon.Question, "Recover previous workspace?",
-                    "A legacy automatic recovery snapshot was found. Open it in a separate tab? "
-                    "The snapshot will remain on disk until its new recovery copy is saved.", parent=self,
-                )
-                box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-
-                def migrate(result):
-                    if result != QMessageBox.StandardButton.Yes:
-                        return
-                    editor = self.add_project(legacy.project, dirty=True)
-                    snapshot, target = editor.session.snapshot(), editor.recovery_store
-
-                    def copy(_ctx):
-                        target.save(snapshot, None)
-                        root.clear()
-                    job = self.job_manager.submit(
-                        editor.session.id, "recovery", "Migrating recovered project", copy,
-                        resource_class="io", resource_keys=(f"document-save:{editor.session.id}",),
-                        write_paths=(root.path, target.path),
-                    )
-                    job.failed.connect(lambda error: self.notice("Recovery migration failed", error))
-                box.finished.connect(migrate)
-                self._show_decision(box)
             if active_id in self.editors and not self.editors[active_id].session.hidden:
                 self.focus_project(active_id)
             if notices:
@@ -3697,7 +3605,7 @@ class MainWindow(QMainWindow):
         job = self.job_manager.submit(
             None, "workspace", "Restoring workspace", load, resource_class="io",
             resource_keys=("workspace-state",),
-            read_paths=(store.path, root.path, root.path.parent / "recovery"),
+            read_paths=(store.path, root.path.parent / "recovery"),
         )
         job.completed.connect(ready)
         job.failed.connect(lambda message: self.notice("Could not restore workspace", message))

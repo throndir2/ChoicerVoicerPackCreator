@@ -33,14 +33,24 @@ def test_tool_schemas_errors_and_headless_state(tmp_path):
             assert tools["get_project"].annotations.readOnlyHint
             assert "expected_revision" in tools["edit_segments"].inputSchema["required"]
             assert tools["update_project"].inputSchema["$defs"]["ProjectPatch"]["additionalProperties"] is False
+            for name in ("new_project", "open_project", "import_pack"):
+                assert "discard_dirty" not in tools[name].inputSchema["properties"]
             help_result = await client.call_tool("get_help", {})
             assert not help_result.isError
             assert help_result.structuredContent["mode"] == "headless"
             assert not help_result.structuredContent["ui_test_hooks"]
+            guide = help_result.structuredContent["help"]
+            assert "Migrate an older manifest" not in guide
+            assert "pack-manifest.json" not in guide
+            assert "discard_dirty" not in guide
             resources = await client.list_resources()
             assert str(resources.resources[0].uri) == "choicer-voicer://help"
             assert (await client.read_resource("choicer-voicer://help")).contents
             before = (await client.call_tool("get_project", {})).structuredContent
+            unrelated = tmp_path / "not-a-project.cvpack.json"
+            unrelated.write_text('{"source": {"video": "source.mp4"}, "lines": []}', encoding="utf-8")
+            assert (await client.call_tool("open_project", {"path": str(unrelated)})).isError
+            assert (await client.call_tool("get_project", {})).structuredContent == before
             bad = await client.call_tool("update_project", {
                 "expected_revision": before["revision"], "patch": {"video_fps": 0},
             })

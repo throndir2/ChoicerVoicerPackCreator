@@ -70,7 +70,7 @@ def create_server(
     async def invoke(
         name: str, function: Callable[..., T], *args: Any, project_id: str | None = None,
     ) -> T:
-        # Resolve active-project compatibility calls before waiting for any work/lock.
+        # Capture the active document before waiting for any work/lock.
         target = await bind(project_id)
         snapshot = await to_thread.run_sync(target.access.snapshot)
         key = snapshot.project_id
@@ -124,25 +124,22 @@ def create_server(
 
     @server.tool(annotations=edit)
     async def new_project(
-        video_path: str, title: str, authors: list[str], discard_dirty: bool = False,
+        video_path: str, title: str, authors: list[str],
     ) -> dict[str, Any]:
-        """Create a new document from local video; never discards other documents.
-
-        discard_dirty is retained for compatibility and is no longer needed.
-        """
+        """Create a new document from local video; never discards other documents."""
         return await invoke(
-            "New project", automation.new_project, video_path, title, authors, discard_dirty
+            "New project", automation.new_project, video_path, title, authors
         )
 
     @server.tool(annotations=edit)
-    async def open_project(path: str, discard_dirty: bool = False) -> dict[str, Any]:
+    async def open_project(path: str) -> dict[str, Any]:
         """Open a saved .cvpack.json, resolving its relative media references."""
-        return await invoke("Open project", automation.open_project, path, discard_dirty)
+        return await invoke("Open project", automation.open_project, path)
 
     @server.tool(annotations=edit)
-    async def import_pack(path: str, discard_dirty: bool = False) -> dict[str, Any]:
+    async def import_pack(path: str) -> dict[str, Any]:
         """Import an existing pack folder, preserving its prompt recordings and images."""
-        return await invoke("Import pack", automation.import_pack, path, discard_dirty)
+        return await invoke("Import pack", automation.import_pack, path)
 
     @server.tool(annotations=edit)
     async def update_project(

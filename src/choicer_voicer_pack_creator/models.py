@@ -100,7 +100,6 @@ class AnalysisDraftRow:
 
 @dataclass(frozen=True, slots=True)
 class AnalysisReview:
-    youtube_rows: list[AnalysisDraftRow] = field(default_factory=list)
     local_rows: list[AnalysisDraftRow] = field(default_factory=list)
     selected_source: str = "local"
     local_source: str = "Whisper"
@@ -111,7 +110,6 @@ class AnalysisReview:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "youtube_rows": [row.to_dict() for row in self.youtube_rows],
             "local_rows": [row.to_dict() for row in self.local_rows],
             "selected_source": self.selected_source,
             "local_source": self.local_source,
@@ -124,14 +122,14 @@ class AnalysisReview:
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> AnalysisReview:
         rows: dict[str, list[AnalysisDraftRow]] = {}
-        for key in ("youtube_rows", "local_rows", "refined_rows"):
+        for key in ("local_rows", "refined_rows"):
             items = value.get(key, [])
             if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
                 raise ValueError("Analysis draft rows must be an array of JSON objects")
             rows[key] = [AnalysisDraftRow.from_dict(item) for item in items]
         selected_source = str(value.get("selected_source", "local"))
         local_source = str(value.get("local_source", "Whisper"))
-        if selected_source not in {"youtube", "local", "refined"}:
+        if selected_source not in {"local", "refined"}:
             raise ValueError("Unknown analysis transcript selection")
         if local_source not in {"Whisper", "Audio activity"}:
             raise ValueError("Unknown local analysis source")
@@ -148,7 +146,7 @@ class AnalysisReview:
         ):
             raise ValueError("Caption pause threshold must be between 0.2 and 1.0 seconds")
         return cls(
-            rows["youtube_rows"], rows["local_rows"], selected_source, local_source,
+            rows["local_rows"], selected_source, local_source,
             rows["refined_rows"], float(pause_threshold), local_model_name, local_detected_language,
         )
 
@@ -395,8 +393,12 @@ class PackProject:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> PackProject:
-        if int(value.get("schema_version", 1)) != 1:
-            raise ValueError(f"Unsupported project schema: {value.get('schema_version')}")
+        version = value.get("schema_version")
+        if type(version) is not int or version != 1:
+            raise ValueError(
+                f"Unsupported project schema: {version!r}. "
+                "Open a .cvpack.json project with schema_version 1."
+            )
         authors = value.get("authors", [])
         if not isinstance(authors, list):
             authors = [str(authors)] if authors else []

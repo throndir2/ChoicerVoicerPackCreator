@@ -351,10 +351,8 @@ class AnalysisDialog(QDialog):
         self._accept_after_cancel = False
         self._accepted_suggestions: list[AnalysisSuggestion] = []
         self.source_captions = list(source_captions or [])
-        # Retain legacy original-draft edits in project files, never as a selectable transcript.
-        self._original_youtube_rows = list(review.youtube_rows) if review else []
         self.source_choice = youtube_import or bool(self.source_captions) or bool(
-            review and (review.youtube_rows or review.refined_rows)
+            review and review.refined_rows
         )
         self.local_source = review.local_source if review else "Whisper"
         self.local_model_name = review.local_model_name if review else ""
@@ -509,8 +507,6 @@ class AnalysisDialog(QDialog):
         selected = review.selected_source if review else (
             "refined" if self.source_captions else "local"
         )
-        if selected == "youtube":
-            selected = "refined"
         {
             "refined": self.refined_radio,
             "local": self.local_radio,
@@ -708,7 +704,7 @@ class AnalysisDialog(QDialog):
 
     def review_state(self) -> AnalysisReview:
         return AnalysisReview(
-            list(self._original_youtube_rows), self._draft_rows(self.local_table),
+            self._draft_rows(self.local_table),
             self.selected_source, self.local_source,
             self._draft_rows(self.refined_table), self.pause_spin.value(),
             self.local_model_name, self.local_detected_language,
