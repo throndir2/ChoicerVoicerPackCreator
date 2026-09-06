@@ -90,6 +90,17 @@ def make_window(qtbot, tmp_path: Path, dialogs):
             settings=settings,
             analysis_data_root=tmp_path / "analysis",
         )
+        original_decision = window._show_decision
+
+        def show_decision(box):
+            title = box.windowTitle()
+            if title.startswith("Unsaved changes -"):
+                title = "Unsaved changes"
+            answer = dialogs.respond("question", window, title, box.text())
+            original_decision(box)
+            QTimer.singleShot(0, lambda: box.done(int(answer)))
+
+        window._show_decision = show_decision
         windows.append(window)
         qtbot.addWidget(window)
         window.show()
@@ -105,7 +116,6 @@ def make_window(qtbot, tmp_path: Path, dialogs):
         updater.prompt_timer.stop()
         if updater.worker is not None:
             updater._cancel_worker()
-            assert updater.worker.wait(5000)
             qtbot.waitUntil(lambda updater=updater: updater.worker is None)
         updater.prepared = None
         updater.downloaded = None
@@ -578,7 +588,13 @@ def test_cancel_after_worker_exits_discards_queued_result_and_next_check_resets_
     qtbot, monkeypatch, make_window, dialogs, release, prepared, cancel_via
 ) -> None:
     monkeypatch.setattr(update_controller, "installation_directory", lambda: prepared.target)
-    monkeypatch.setattr(update_controller, "prepare_update", lambda *_args: prepared)
+    entered, allow_result, result_ready = threading.Event(), threading.Event(), threading.Event()
+
+    def prepare(*_args):
+        entered.set()
+        assert allow_result.wait(5)
+        return prepared
+    monkeypatch.setattr(update_controller, "prepare_update", prepare)
     monkeypatch.setattr(update_controller, "find_release", lambda **_kwargs: None)
     dialogs.answers["Update available"] = QMessageBox.StandardButton.Yes
     window = make_window()
@@ -587,8 +603,10 @@ def test_cancel_after_worker_exits_discards_queued_result_and_next_check_resets_
     worker = updater.worker
     assert worker is not None
 
-    # Join without pumping Qt events: the success result exists, but its slot is queued.
-    assert worker.wait(5000)
+    worker.completed.connect(lambda _result: result_ready.set(), Qt.ConnectionType.DirectConnection)
+    qtbot.waitUntil(entered.is_set)
+    allow_result.set()
+    assert result_ready.wait(5)
     assert worker.result is prepared
     assert not worker.was_cancelled
     assert updater.worker is worker
@@ -699,7 +717,7 @@ def test_restart_prompt_waits_until_editor_is_available(
     ids=["save", "discard", "cancel"],
 )
 def test_restart_uses_real_close_event_to_protect_unsaved_project(
-    monkeypatch, make_window, dialogs, prepared, tmp_path: Path, answer
+    qtbot, monkeypatch, make_window, dialogs, prepared, tmp_path: Path, answer
 ) -> None:
     window = make_window()
     project_path = tmp_path / "project.cvpack.json"
@@ -718,6 +736,9 @@ def test_restart_uses_real_close_event_to_protect_unsaved_project(
     window.updater.downloaded = prepared
 
     window.updater._ready_to_install()
+    qtbot.waitUntil(lambda: window.updater.prepared is None and not window._closing)
+    if answer != QMessageBox.StandardButton.Cancel:
+        qtbot.waitUntil(lambda: not window.isVisible())
 
     assert dialogs.titles == ["Update ready", "Unsaved changes"]
     assert window.project.title == "Unsaved title"
@@ -740,7 +761,7 @@ def test_restart_uses_real_close_event_to_protect_unsaved_project(
 
 @pytest.mark.parametrize("save_failure", ["cancel-dialog", "write-error"])
 def test_restart_is_aborted_when_requested_save_does_not_complete(
-    monkeypatch, make_window, dialogs, prepared, tmp_path: Path, save_failure
+    qtbot, monkeypatch, make_window, dialogs, prepared, tmp_path: Path, save_failure
 ) -> None:
     window = make_window()
     window.title_edit.setText("Unsaved project")
@@ -763,6 +784,7 @@ def test_restart_is_aborted_when_requested_save_does_not_complete(
     window.updater.downloaded = prepared
 
     window.updater._ready_to_install()
+    qtbot.waitUntil(lambda: window.updater.prepared is None and not window._closing)
 
     assert dialogs.titles[:2] == ["Update ready", "Unsaved changes"]
     assert ("Could not save project" in dialogs.titles) is (save_failure == "write-error")

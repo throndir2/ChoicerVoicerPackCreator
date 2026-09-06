@@ -61,6 +61,7 @@ from choicer_voicer_pack_creator.exporter import (
 from choicer_voicer_pack_creator.jobs import JobManager
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import AnalysisReview, PackProject, Segment
+from choicer_voicer_pack_creator.operations import OperationCancelled
 from choicer_voicer_pack_creator.pack_io import PackImporter
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore, WorkspaceStore
 from choicer_voicer_pack_creator.project_session import ProjectSession, canonical_project_path
@@ -123,6 +124,7 @@ class ExportWorker(JobWorker):
     progress = Signal(object)
     completed = Signal(object)
     failed = Signal(str)
+    canceled = Signal()
 
     def __init__(self, exporter: PackExporter, project: PackProject, destination: Path) -> None:
         super().__init__()
@@ -138,7 +140,11 @@ class ExportWorker(JobWorker):
                 create_zip=True,
                 progress=self.progress.emit,
             )
+            if not isinstance(result, ExportResult):
+                raise TypeError("Exporter returned an unexpected result")
             self.completed.emit(result)
+        except OperationCancelled:
+            self.canceled.emit()
         except Exception as error:
             diagnostic_exception("export_worker_failed", error)
             self.failed.emit(str(error))
@@ -2591,6 +2597,7 @@ class ProjectEditor(QWidget):
         worker.progress.connect(dialog.report_progress)
         worker.completed.connect(self._export_completed)
         worker.failed.connect(self._export_failed)
+        worker.canceled.connect(self._export_cancelled)
         worker.finished.connect(self._export_finished)
         worker.finished.connect(worker.deleteLater)
         dialog.show()
@@ -2636,6 +2643,14 @@ class ProjectEditor(QWidget):
         if self._export_dialog is not None:
             self._export_dialog.show_error(message)
         self.statusBar().showMessage("Export failed")
+
+    @Slot()
+    def _export_cancelled(self) -> None:
+        if self._export_dialog is not None:
+            self._export_dialog.show_error("Export cancelled. Existing published output was preserved.")
+            self._export_dialog.setWindowTitle("Export cancelled")
+            self._export_dialog.progress_label.setText("Export cancelled")
+        self.statusBar().showMessage("Export cancelled")
 
     @Slot()
     def _export_finished(self) -> None:
@@ -2860,6 +2875,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.tasks_panel)
         self.tasks_panel.hide()
         editor = self.add_project(PackProject(authors=[getpass.getuser()]), dirty=False)
+        self._initial_editor_id = editor.session.id
         self.updater = UpdateController(self, editor.help_menu)
         if initial_path:
             QTimer.singleShot(0, lambda: self.open_path(initial_path))
@@ -2927,6 +2943,18 @@ class MainWindow(QMainWindow):
         editor._set_dirty(dirty)
         if focus:
             self.tabs.setCurrentIndex(index)
+        initial_id = self.__dict__.get("_initial_editor_id")
+        initial = self.editors.get(initial_id)
+        if (
+            initial is not None and initial is not editor and not initial.dirty
+            and initial.project_path is None and not initial.project.video_path
+            and not initial.project.segments and initial.project.title == "Untitled Dub Pack"
+            and not self.job_manager.active_jobs(initial_id)
+        ):
+            self.tabs.removeTab(self.tabs.indexOf(initial))
+            self.editors.pop(initial_id)
+            initial.deleteLater()
+            self._initial_editor_id = None
         self.refresh_tabs()
         return editor
 
@@ -2977,6 +3005,7 @@ class MainWindow(QMainWindow):
                 canonical_project_path(editor.project_path) == canonical_project_path(path)
             ):
                 self.focus_project(editor.session.id)
+                editor._remember_recent_project(editor.project_path)
                 return
         editor = self.add_project(PackProject(title=path.stem), dirty=False)
         self._opening_paths[key] = editor.session.id
@@ -3128,6 +3157,7 @@ class MainWindow(QMainWindow):
         job.completed.connect(saved)
         def failed(message):
             self._closing = False
+            self.updater.cancel_close_update()
             self.notice("Could not save project", message)
 
         def finished():
@@ -3296,6 +3326,21 @@ class MainWindow(QMainWindow):
             for identity, project, path, dirty, item in restored:
                 if identity in self.editors:
                     continue
+                if path is not None:
+                    key = canonical_project_path(path)
+                    existing = key in self._opening_paths or any(
+                        editor.project_path is not None
+                        and canonical_project_path(editor.project_path) == key
+                        for editor in self.editors.values()
+                    )
+                    if existing:
+                        if not dirty:
+                            continue
+                        path = None
+                        notices.append(
+                            f"{project.title}: recovered edits opened as a separate unsaved tab "
+                            "because the saved project is already open."
+                        )
                 editor = self.add_project(
                     project, path, dirty=dirty, session_id=identity, focus=False,
                 )

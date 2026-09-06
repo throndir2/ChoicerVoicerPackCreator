@@ -11,13 +11,13 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QProgressDialog
 
 from choicer_voicer_pack_creator import __version__
-from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.diagnostics import (
     DiagnosticProgress,
     diagnostic_event,
     diagnostic_exception,
     diagnostic_operation,
 )
+from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.updates import (
     RELEASES_URL,
     PreparedUpdate,
@@ -302,7 +302,10 @@ class UpdateController(QObject):
         if prepared is None or self.shutting_down:
             return
         # Wait for import/analysis dialogs and exports before offering a restart.
-        if QApplication.activeModalWidget() or self.window.job_manager.active_jobs():
+        if (
+            QApplication.activeModalWidget() or self.window.job_manager.active_jobs()
+            or any(editor._export_worker for editor in self.window.editors.values())
+        ):
             QTimer.singleShot(1000, self._ready_to_install)
             return
         answer = QMessageBox.question(

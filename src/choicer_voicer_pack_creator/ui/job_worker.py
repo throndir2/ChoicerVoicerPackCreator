@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import Qt, QThread, Slot
 
 from choicer_voicer_pack_creator.export_progress import ExportProgress
+from choicer_voicer_pack_creator.operations import OperationCancelled
 
 if TYPE_CHECKING:
     from choicer_voicer_pack_creator.jobs import JobContext, JobHandle, JobManager
@@ -71,7 +72,11 @@ class JobWorker(QThread):
         self._job_exception = sys.exception()
 
     def _capture_cancelled(self) -> None:
-        self._job_exception = sys.exception()
+        error = sys.exception()
+        self._job_exception = (
+            error if isinstance(error, OperationCancelled) else
+            OperationCancelled(str(error) if error else "Operation cancelled")
+        )
 
     def _capture_result(self, *values: object) -> None:
         self._job_result = values[0] if len(values) == 1 else values

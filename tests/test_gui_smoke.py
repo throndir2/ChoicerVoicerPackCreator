@@ -10,6 +10,7 @@ from PySide6.QtGui import QColor, QKeyEvent
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QMessageBox, QPushButton
 
+from choicer_voicer_pack_creator.exporter import ExportResult
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
 from choicer_voicer_pack_creator.ui.main_window import (
@@ -1028,7 +1029,7 @@ def test_worker_results_are_delivered_on_gui_thread(qtbot, tmp_path: Path, monke
         def export(self, _project, _destination, *, create_zip, progress):
             assert create_zip
             progress("working")
-            return object()
+            return ExportResult(tmp_path, None, {}, {}, [])
 
     class TrackingEditor(ProjectEditor):
         @Slot(int, str, float, list)
