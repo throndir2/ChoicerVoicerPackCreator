@@ -31,6 +31,7 @@ class ExportProgressDialog(QDialog):
         self.background = background
         self._running = True
         self._outcome: bool | None = None
+        self._cancelled = False
         self._elapsed = QElapsedTimer()
         self._elapsed.start()
         self._step_started = 0
@@ -137,7 +138,10 @@ class ExportProgressDialog(QDialog):
                 self.overall_bar.setFormat("Estimated overall progress: %p%")
         else:
             self.step_eta_label.clear()
-            self.overall_eta_label.setText("Export complete" if self._outcome else "Export failed")
+            self.overall_eta_label.setText(
+                "Export cancelled" if self._cancelled else
+                "Export complete" if self._outcome else "Export failed"
+            )
         encoding = self._outcome is None and self._step == VIDEO_CONVERSION_STEP and self._live
         self.activity_label.setVisible(encoding)
         if encoding:
@@ -227,6 +231,15 @@ class ExportProgressDialog(QDialog):
         self.overall_bar.setFormat("Failed")
         self.details.appendPlainText(f"Last operation: {failed_step}\n\n{message}")
 
+    def show_cancelled(self) -> None:
+        self.show_error("Export cancelled. Existing published output was preserved.")
+        self._cancelled = True
+        self.setWindowTitle("Export cancelled")
+        self.progress_label.setText("Export cancelled")
+        self.progress_bar.setFormat("Cancelled")
+        self.overall_bar.setFormat("Cancelled")
+        self._update_elapsed()
+
     def worker_finished(self) -> None:
         if self._outcome is None:
             self.show_error("The exporter stopped without returning a result.")
@@ -234,6 +247,7 @@ class ExportProgressDialog(QDialog):
         self._update_elapsed()
         self._timer.stop()
         self.note_label.setText(
+            "Export cancelled; existing output was preserved." if self._cancelled else
             "Export finished. Output locations and any cleanup notes are listed above."
             if self._outcome
             else "Export did not complete. Review the error details above before trying again."

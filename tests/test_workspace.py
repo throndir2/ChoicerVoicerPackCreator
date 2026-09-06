@@ -5,12 +5,13 @@ import threading
 import pytest
 from PySide6.QtCore import QSettings, Qt, QThread, Signal
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
+from shiboken6 import isValid
 
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.operations import OperationCancelled
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
-from choicer_voicer_pack_creator.ui.main_window import MainWindow
+from choicer_voicer_pack_creator.ui.main_window import MainWindow, WaveformWorker
 
 
 class QuietMedia:
@@ -231,6 +232,88 @@ def test_managed_worker_cancellation_is_terminal_on_gui_thread(workspace, qtbot)
     assert worker.wait(0)
 
 
+@pytest.mark.parametrize("unhandled", [False, True])
+def test_waveform_task_failure_preserves_request_identity_and_error(
+    workspace, qtbot, tmp_path, unhandled,
+):
+    class FailedMedia:
+        def waveform_peaks(self, *_args, **_kwargs):
+            raise RuntimeError("Synthetic waveform failure")
+
+    class FailedWorker(WaveformWorker):
+        def run(self):
+            raise RuntimeError("Synthetic waveform failure")
+
+    worker_type = FailedWorker if unhandled else WaveformWorker
+    source = str(tmp_path / "missing.mp4")
+    worker = worker_type(FailedMedia(), 7, source, 1)
+    worker.setParent(workspace.active_editor)
+    worker.configure_job(
+        workspace.job_manager, workspace.active_editor.session.id, "waveform", "Waveform",
+    )
+    failures = []
+    worker.failed.connect(lambda *values: failures.append(values))
+    worker.start()
+    qtbot.waitUntil(lambda: not worker.isRunning())
+    assert worker.job_handle.record.state == "failed"
+    assert worker.job_handle.record.error.endswith("Synthetic waveform failure")
+    expected = (
+        "RuntimeError: Synthetic waveform failure" if unhandled else "Synthetic waveform failure"
+    )
+    assert failures == [(7, source, expected)]
+
+
+@pytest.mark.parametrize("close_workspace", [False, True])
+def test_close_keeps_qobjects_alive_until_operation_cleanup_finishes(
+    workspace, qtbot, close_workspace,
+):
+    editor = workspace.active_editor
+    cleanup_started, cleanup_release = threading.Event(), threading.Event()
+    completed_on = []
+
+    class Worker(JobWorker):
+        canceled = Signal()
+
+        def run(self):
+            while not self.isInterruptionRequested():
+                QThread.msleep(5)
+            cleanup_started.set()
+            assert cleanup_release.wait(5)
+            self.canceled.emit()
+
+    worker = Worker()
+    worker.setParent(editor)
+    worker.configure_job(workspace.job_manager, editor.session.id, "scan", "Held cleanup")
+    worker.finished.connect(lambda: completed_on.append(QThread.currentThread()))
+    worker.start()
+    qtbot.waitUntil(lambda: worker.job_handle.record.state == "running")
+    if close_workspace:
+        assert not workspace.close()
+        box = workspace._decisions[-1]
+        button = box.button(QMessageBox.StandardButton.Yes)
+    else:
+        workspace.close_project_tab(workspace.tabs.indexOf(editor))
+        box = workspace._decisions[-1]
+        button = next(b for b in box.buttons() if b.objectName() == "projectCloseCancelTasks")
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(cleanup_started.is_set)
+    assert workspace.isVisible()
+    assert isValid(editor) and isValid(worker) and isValid(workspace.job_manager)
+    assert worker.job_handle.record.active
+    assert not completed_on
+    cleanup_release.set()
+    qtbot.waitUntil(lambda: bool(completed_on))
+    assert completed_on == [workspace.thread()]
+    if close_workspace:
+        qtbot.waitUntil(lambda: not workspace.isVisible())
+        assert not workspace.job_manager.active_jobs()
+    else:
+        qtbot.waitUntil(lambda: not isValid(editor))
+        assert editor.session.id not in workspace.editors
+        assert not isValid(worker)
+        assert workspace.isVisible()
+
+
 def test_backing_completion_keeps_newer_choice_and_never_targets_active_tab(
     workspace, qtbot, tmp_path, monkeypatch,
 ):
@@ -300,13 +383,13 @@ def test_legacy_recovery_is_preserved_on_dismissal_and_migrates_after_acceptance
         windows.append(window)
         qtbot.addWidget(window)
         window.show()
-        qtbot.waitUntil(lambda: bool(window._decisions))
+        qtbot.waitUntil(lambda window=window: bool(window._decisions))
         box = next(box for box in window._decisions if box.windowTitle() == "Recover previous workspace?")
         qtbot.mouseClick(
             box.button(QMessageBox.StandardButton.Yes if accept else QMessageBox.StandardButton.No),
             Qt.MouseButton.LeftButton,
         )
-        qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
+        qtbot.waitUntil(lambda window=window: not window.job_manager.active_jobs())
         if accept:
             assert not recovery.path.exists()
             assert window.project.title == "Legacy edits"
