@@ -113,7 +113,7 @@ def test_combine_preserved_or_unknown_source_audio_is_atomic(audio_mode, known_r
     )
     project = PackProject(segments=[first, second])
     before = project.to_dict()
-    with pytest.raises(ValueError, match="Apply Range"):
+    with pytest.raises(ValueError, match="Update Segment Timing"):
         project.combine_segments([first.id, second.id])
     assert project.to_dict() == before
 
