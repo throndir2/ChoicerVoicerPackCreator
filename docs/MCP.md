@@ -228,8 +228,9 @@ Export details expose `exportDetailsClose`; project-close decisions expose
 `projectCloseSave`, `projectCloseDiscard`, and `projectCloseCancel`. Scrolling selectors are
 `projectEditorScroll`, `projectEditorScrollbar`, `projectDetailsScrollbar`, and `selectedSegmentScrollbar`.
 Editor selectors are scoped to the visible `project_id`; select that tab before typing.
-Closed/discarded document IDs retire after their tasks finish; retained background documents
-keep their identity. Reopening a retired document creates a new identity.
+Closed/discarded document IDs are rejected immediately, even while their task cleanup finishes.
+Documents explicitly kept processing in the background retain their identity.
+Reopening a retired document creates a new identity.
 Omit `project_id` for global Tasks/decision controls. Ambiguous visible selectors are rejected.
 Allowed keys: `Enter`, `Escape`, `Tab`, `Backspace`, `Space`, `Delete`,
 `PageUp`, `PageDown`, `Home`, `End`, `Up`, `Down`.
