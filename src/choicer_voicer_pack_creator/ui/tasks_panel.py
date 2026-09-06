@@ -33,6 +33,7 @@ class TasksPanel(QDockWidget):
         self.workspace = workspace
         self.project_id: str | None = None
         self._records: dict[str, JobRecord] = {}
+        self._project_names: dict[str, str] = {}
         self._logs: dict[str, list[str]] = {}
         self._starts: dict[str, float] = {}
         self._elapsed: dict[str, float] = {}
@@ -93,6 +94,7 @@ class TasksPanel(QDockWidget):
 
     def register_detail(self, job_id: str, widget: QWidget) -> None:
         self._details[job_id] = widget
+        widget.destroyed.connect(lambda: self._details.pop(job_id, None))
         self._selection_changed()
 
     def register_retry(self, job_id: str, callback: Callable[[], None]) -> None:
@@ -100,6 +102,8 @@ class TasksPanel(QDockWidget):
         self._selection_changed()
 
     def _changed(self, record: JobRecord) -> None:
+        if record.kind in {"recovery", "workspace"} and record.state not in {"failed", "blocked"}:
+            return
         if not self._shown_for_task and record.kind not in {"save", "recovery", "workspace"}:
             self._shown_for_task = True
             self.show()
@@ -130,14 +134,17 @@ class TasksPanel(QDockWidget):
         selected = self._selected_id()
         records = [
             record for record in self.manager.tasks()
-            if self.filter.currentIndex() == 0 or record.project_id == self.project_id
+            if (self.filter.currentIndex() == 0 or record.project_id == self.project_id)
+            and (record.kind not in {"recovery", "workspace"} or record.state in {"failed", "blocked"})
         ]
         self.table.blockSignals(True)
         self.table.setRowCount(len(records))
         for row, record in enumerate(records):
             self._records[record.id] = record
             editor = self.workspace.editors.get(record.project_id)
-            label = editor.project.title if editor else "Application"
+            if editor is not None:
+                self._project_names[record.project_id] = editor.project.title
+            label = self._project_names.get(record.project_id, "Application")
             fraction = "" if record.fraction is None else f" ({record.fraction:.0%} of stage)"
             elapsed = self._elapsed.get(
                 record.id, time.monotonic() - self._starts.get(record.id, time.monotonic())
@@ -167,6 +174,11 @@ class TasksPanel(QDockWidget):
         value = record.result
         if isinstance(value, Path):
             return value
+        if isinstance(value, dict):
+            for key in ("pack_path", "video_path", "project_path"):
+                path = value.get(key)
+                if isinstance(path, str) and Path(path).is_absolute():
+                    return Path(path)
         for attribute in ("pack_path", "video_path"):
             path = getattr(value, attribute, None)
             if isinstance(path, Path):

@@ -132,6 +132,8 @@ class UpdateController(QObject):
         self.prerelease_action.toggled.connect(
             lambda enabled: window.settings.setValue("updates/prereleases", enabled)
         )
+        for action in (self.check_action, self.auto_action, self.prerelease_action):
+            action.setParent(window)
         menu.addSeparator()
         self.prompt_timer = QTimer(self)
         self.prompt_timer.setInterval(1000)
