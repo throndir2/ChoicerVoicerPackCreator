@@ -183,6 +183,8 @@ def test_main_window_opens_popup_and_retires_worker_only_after_finished(
         allow_result.set()
         allow_finish.set()
         qtbot.waitUntil(lambda: window._export_worker is None)
+        record = next(job for job in window.job_manager.tasks() if job.kind == "export")
+        assert record.state == ("succeeded" if outcome == "success" else "failed")
         assert not dialog.isVisible()
         assert dialog.close_button.isEnabled()
         assert window.action_export.isEnabled()

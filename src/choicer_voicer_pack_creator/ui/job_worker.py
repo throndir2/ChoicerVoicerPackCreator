@@ -68,8 +68,8 @@ class JobWorker(QThread):
             )
             context.report(str(message), fraction)
 
-    def _capture_error(self, message: str) -> None:
-        self._job_error = message
+    def _capture_error(self, *values: object) -> None:
+        self._job_error = str(values[-1])
         self._job_exception = sys.exception()
 
     def _capture_cancelled(self) -> None:
@@ -113,8 +113,11 @@ class JobWorker(QThread):
         if record.state == "cancelled" and not self._job_cancel_emitted and hasattr(self, "canceled"):
             self.canceled.emit()
         elif record.state in {"failed", "blocked"} and not self._job_error and hasattr(self, "failed"):
-            self.failed.emit(record.error or record.message)
+            self._emit_job_failure(record.error or record.message)
         self.finished.emit()
+
+    def _emit_job_failure(self, message: str) -> None:
+        self.failed.emit(message)
 
     def isInterruptionRequested(self) -> bool:  # noqa: N802
         if self._job_context is not None:

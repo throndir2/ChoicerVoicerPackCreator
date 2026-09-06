@@ -204,6 +204,15 @@ class WorkspaceStore:
             or not isinstance(value.get("documents"), list)
         ):
             raise ValueError("Unsupported or invalid workspace restore file")
+        for document in value["documents"]:
+            if (
+                not isinstance(document, dict) or not isinstance(document.get("id"), str)
+                or not document["id"]
+                or any(character not in "0123456789abcdef-" for character in document["id"])
+                or not isinstance(document.get("path", ""), str)
+                or not isinstance(document.get("view", {}), dict)
+            ):
+                raise ValueError("Invalid workspace document record")
         return value
 
 
@@ -224,9 +233,11 @@ class RecoveryStore:
         records = []
         folder = self.path.parent / "recovery"
         if folder.is_dir():
-            for path in sorted(folder.glob("*.json")):
+            paths = set(folder.glob("*.json"))
+            paths.update(path.with_suffix("") for path in folder.glob("*.json.previous"))
+            for path in sorted(paths):
                 try:
-                    record = RecoveryStore(path).load()
+                    record = self.for_session(path.stem).load()
                 except (OSError, ValueError, TypeError) as error:
                     if errors is None:
                         raise

@@ -121,6 +121,9 @@ class WaveformWorker(JobWorker):
             diagnostic_exception("waveform_worker_failed", error, request_id=self.request_id)
             self.failed.emit(self.request_id, self.path, str(error))
 
+    def _emit_job_failure(self, message: str) -> None:
+        self.failed.emit(self.request_id, self.path, message)
+
 
 class ExportWorker(JobWorker):
     progress = Signal(object)
@@ -2650,9 +2653,7 @@ class ProjectEditor(QWidget):
     @Slot()
     def _export_cancelled(self) -> None:
         if self._export_dialog is not None:
-            self._export_dialog.show_error("Export cancelled. Existing published output was preserved.")
-            self._export_dialog.setWindowTitle("Export cancelled")
-            self._export_dialog.progress_label.setText("Export cancelled")
+            self._export_dialog.show_cancelled()
         self.statusBar().showMessage("Export cancelled")
 
     @Slot()
@@ -2774,48 +2775,10 @@ class ProjectEditor(QWidget):
         McpHelpDialog(self).exec()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        diagnostic_event("window_close_requested", dirty=self.dirty)
-        if self._automation_active:
-            self.statusBar().showMessage("Wait for the current MCP operation to finish before closing.")
-            event.ignore()
-            return
-        if not self.updater.can_close():
-            event.ignore()
-            return
-        if self._export_worker is not None:
-            QMessageBox.information(self, "Export running", "Wait for the current export to finish.")
-            event.ignore()
-            return
-        if self._backing_dialog is not None:
-            self._backing_dialog.reject()
-            event.ignore()
-            return
-        if not self._automation_disconnected and not self._maybe_save():
-            event.ignore()
-            return
-        if self._automation_disconnected and self.dirty:
-            self._write_recovery_snapshot()
-        self._save_layout_state()
-        self._reset_transport_state()
-        self.player.stop()
-        for worker in self._waveform_workers:
-            worker.requestInterruption()
-        for worker in self._waveform_workers:
-            if not worker.wait(3500):
-                QMessageBox.warning(
-                    self,
-                    "Waveform analysis is stopping",
-                    "The source-media analyzer is still shutting down. Wait a moment, then close again.",
-                )
-                event.ignore()
-                return
-        if not self.updater.install_on_close():
-            event.ignore()
-            return
-        if self._discard_recovery_on_transition:
-            self._clear_recovery_snapshot()
-        diagnostic_event("window_close_accepted")
-        event.accept()
+        event.ignore()
+        index = self.workspace.tabs.indexOf(self)
+        if index >= 0:
+            self.workspace.close_project_tab(index)
 
 
 class MainWindow(QMainWindow):
@@ -3114,6 +3077,7 @@ class MainWindow(QMainWindow):
 
     def notice(self, title: str, message: str) -> None:
         box = QMessageBox(QMessageBox.Icon.Warning, title, message, parent=self)
+        box.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
         self._show_decision(box)
 
@@ -3548,7 +3512,7 @@ class MainWindow(QMainWindow):
                 editor.player.stop()
                 editor.prompt_player.stop()
                 editor._recovery_timer.stop()
-            self.job_manager.shutdown(cancel=True, wait=False)
+            self.job_manager.shutdown(cancel=False, wait=True)
             event.accept()
             return
         event.ignore()
@@ -3626,6 +3590,11 @@ class MainWindow(QMainWindow):
             return
         for editor in self.editors.values():
             editor._save_layout_state()
+            editor._reset_transport_state()
+            editor.player.stop()
+            editor.prompt_player.stop()
+            editor._recovery_timer.stop()
+        self.job_manager.shutdown(cancel=False, wait=True)
         self._close_approved = True
         self._closing = False
         QTimer.singleShot(0, self.close)

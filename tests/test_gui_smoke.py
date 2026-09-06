@@ -9,6 +9,7 @@ from PySide6.QtCore import QEvent, QPoint, QSettings, Qt, QThread, QUrl, Slot
 from PySide6.QtGui import QColor, QKeyEvent
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QMessageBox, QPushButton
+from shiboken6 import isValid
 
 from choicer_voicer_pack_creator.exporter import ExportResult
 from choicer_voicer_pack_creator.models import PackProject, Segment
@@ -26,6 +27,28 @@ from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
 class UnusedMedia:
     def probe_audio_duration(self, _path: Path) -> float:
         return 1.75
+
+
+@pytest.fixture(autouse=True)
+def drain_workspace_tasks(qtbot):
+    yield
+    windows = [
+        widget for widget in QApplication.topLevelWidgets() if isinstance(widget, MainWindow)
+    ]
+    for window in windows:
+        if not isValid(window):
+            continue
+        for editor in window.editors.values():
+            editor._recovery_timer.stop()
+        manager = window.job_manager
+        for job in manager.active_jobs():
+            manager.cancel(job.id)
+        qtbot.waitUntil(
+            lambda manager=manager: not isValid(manager) or not manager.active_jobs(),
+            timeout=10000,
+        )
+        if isValid(manager):
+            manager.shutdown(cancel=False, wait=True)
 
 
 def test_main_window_starts_with_empty_editor(qtbot) -> None:
@@ -753,6 +776,8 @@ def test_segment_clicks_cue_start_even_when_already_selected(
     window.editor_splitter.setSizes([700, 470])
     window.select_segment(first.id)
     if surface == "table":
+        QApplication.processEvents()
+        window.segment_table.scrollToItem(window.segment_table.item(1, 4))
         target = window.segment_table.viewport()
         point = window.segment_table.visualItemRect(window.segment_table.item(1, 4)).center()
     else:
