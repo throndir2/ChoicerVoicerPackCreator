@@ -80,7 +80,8 @@ the client stops the process.**
   changes to the active saved project are rejected rather than overwritten.
   `validate_pack` can check a folder and optional ZIP afterward.
 
-Live processing uses the same bounded scheduler as the visible Tasks panel.
+Live processing uses the same bounded scheduler as the optional Tools > Tasks window.
+Jobs never open that window automatically; closing it does not cancel processing.
 `start_export(output_parent, expected_revision, project_id?, overwrite=false)`
 and `start_analysis(expected_revision, project_id?, ...)` return a `job_id`
 immediately, NOT finished output. `list_jobs(project_id?)`, `get_job(job_id)`,
@@ -120,8 +121,11 @@ text; select/close_tab use zero-based indices. Poll `get_ui_state.actions`
 for the returned action_id; queued acceptance is not completed interaction.
 Select a project's real tab before sending its project-scoped field input.
 Selectors include projectTabs, projectTitle, segmentCaption, segmentsTable,
-saveProject/exportProject/analyzeProject, tasksDock/tasksTable/taskLog,
-taskProjectFilter/taskShowProject/taskCancel/taskRetry/taskOpenOutput/taskDetails.
+saveProject/exportProject/analyzeProject, showTasks/tasksWindow/tasksTable/taskLog,
+taskProjectFilter/taskRestoreProject/taskCancel/taskRetry/taskOpenOutput/taskDetails.
+Click showTasks to open the separate nonmodal window before using task controls.
+Send Escape to tasksWindow to close it without cancelling work. Switch open projects through
+projectTabs; taskRestoreProject only restores tabs closed with Keep processing.
 Details expose exportDetailsClose. Close decisions expose projectCloseKeepProcessing,
 projectCloseCancelTasks, projectCloseKeepOpen, projectCloseSave, projectCloseDiscard,
 and projectCloseCancel.

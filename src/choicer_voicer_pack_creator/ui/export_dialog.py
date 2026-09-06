@@ -88,7 +88,7 @@ class ExportProgressDialog(QDialog):
         self.details.setMaximumBlockCount(2000)
         layout.addWidget(self.details, 1)
         self.note_label = QLabel(
-            ("You can close these details and keep editing. Track or cancel export in Tasks. "
+            ("You can close these details and keep editing. Track or cancel export via Tools > Tasks. "
              if background else "Please keep this window open until export finishes. ")
             +
             "Existing output is kept as a rollback backup during publishing."

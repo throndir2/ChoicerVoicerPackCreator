@@ -312,6 +312,14 @@ def test_ui_hooks_use_real_fields_tabs_and_window_image(qtbot, live_editor):
     assert in_worker(qtbot, automation.get_project)["project"]["title"] == "UI title"
     state = in_worker(qtbot, hooks.state)
     assert all(item["state"] == "completed" for item in state["actions"])
+    in_worker(qtbot, lambda: hooks.interact("showTasks", "click"))
+    qtbot.waitUntil(window.tasks_window.isVisible)
+    assert not window.tasks_window.isModal()
+    assert window.active_editor is first
+    in_worker(qtbot, lambda: hooks.interact("tasksWindow", "key", key="Escape"))
+    qtbot.waitUntil(lambda: not window.tasks_window.isVisible())
+    state = in_worker(qtbot, hooks.state)
+    assert all(item["state"] == "completed" for item in state["actions"])
 
 
 def test_background_job_capture_cancel_and_edits_do_not_cross_projects(qtbot, live_editor):

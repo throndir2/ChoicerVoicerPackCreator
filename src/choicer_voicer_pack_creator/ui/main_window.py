@@ -87,7 +87,7 @@ from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.ui.readable_table import ReadableTableWidget
 from choicer_voicer_pack_creator.ui.setup_consent import SetupConsent
 from choicer_voicer_pack_creator.ui.subtitles import SubtitleVideoWidget
-from choicer_voicer_pack_creator.ui.tasks_panel import TasksPanel
+from choicer_voicer_pack_creator.ui.tasks_window import TasksWindow
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
 from choicer_voicer_pack_creator.ui.update_controller import UpdateController
 from choicer_voicer_pack_creator.ui.youtube_dialog import YouTubeDialog
@@ -400,7 +400,7 @@ class ProjectEditor(QWidget):
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self.action_analyze)
         tools_menu.addAction(self.action_backing)
-        tools_menu.addAction(self.workspace.tasks_panel.toggleViewAction())
+        tools_menu.addAction(self.workspace.tasks_window.show_action)
         help_menu = self.menuBar().addMenu("&Help")
         self.help_menu = help_menu
         self.action_mcp_help = help_menu.addAction("LLM / MCP Help")
@@ -2653,7 +2653,7 @@ class ProjectEditor(QWidget):
         worker.finished.connect(worker.deleteLater)
         dialog.show()
         worker.start()
-        self.workspace.tasks_panel.register_detail(worker.job_handle.id, dialog)
+        self.workspace.tasks_window.register_detail(worker.job_handle.id, dialog)
         token = self.session.source_token()
 
         def retry_export() -> None:
@@ -2662,7 +2662,7 @@ class ProjectEditor(QWidget):
                 self._export_dialog = None
             self.export_pack()
 
-        self.workspace.tasks_panel.register_retry(
+        self.workspace.tasks_window.register_retry(
             worker.job_handle.id, retry_export,
             available=lambda: self._export_worker is None and self.session.source_token() == token,
         )
@@ -2908,10 +2908,8 @@ class MainWindow(QMainWindow):
         self._close_approved = False
         self._closed_ids: set[str] = set()
         self._exit_discarded: set[str] = set()
-        self.tasks_panel = TasksPanel(self.job_manager, self)
+        self.tasks_window = TasksWindow(self.job_manager, self)
         self.setup_consent = SetupConsent(self)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.tasks_panel)
-        self.tasks_panel.hide()
         self.job_manager.changed.connect(
             lambda record: QTimer.singleShot(0, self._retire_closed_editors)
             if not record.active else None
@@ -2939,7 +2937,7 @@ class MainWindow(QMainWindow):
         editor = self.__dict__.get("_active_editor")
         if (
             editor is not None and name not in self.__dict__
-            and name not in {"updater", "job_manager", "tasks_panel"}
+            and name not in {"updater", "job_manager", "tasks_window"}
             and not hasattr(type(self), name) and hasattr(editor, name)
         ):
             setattr(editor, name, value)
@@ -3083,9 +3081,9 @@ class MainWindow(QMainWindow):
             previous.player.pause()
             previous.prompt_player.stop()
         self._active_editor = current if isinstance(current, ProjectEditor) else None
-        if "tasks_panel" in self.__dict__:
-            self.tasks_panel.project_id = current.session.id if self._active_editor else None
-            self.tasks_panel.refresh()
+        if "tasks_window" in self.__dict__:
+            self.tasks_window.project_id = current.session.id if self._active_editor else None
+            self.tasks_window.refresh()
         self.refresh_tabs()
 
     def refresh_tabs(self) -> None:
@@ -3672,6 +3670,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self._close_approved:
             self.setup_consent.cancel_all()
+            self.tasks_window.close()
             for editor in self.editors.values():
                 editor._save_layout_state()
                 editor._reset_transport_state()

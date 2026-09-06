@@ -164,7 +164,8 @@ sensitivity="balanced", model="base", language="auto")`. They return records con
 `source_snapshot:{project_id,revision,asset_revision}`, `result`, and `error`.
 **A queued/running response is not successful export or analysis completion.**
 Poll `get_job(job_id)` until terminal; only `succeeded` has completed results.
-`list_jobs(project_id?)` reads the same scheduler as the visible Tasks panel.
+`list_jobs(project_id?)` reads the same scheduler as the optional **Tools > Tasks** window.
+Jobs never open that window automatically; closing it does not cancel processing.
 
 States are `queued`, `waiting`, `running`, `cancelling`, `succeeded`, `failed`, `cancelled`,
 and `blocked`. `cancel_job(job_id)` requests cancellation; wait for terminal cleanup rather
@@ -221,8 +222,11 @@ for the returned `action_id` reaching `completed` or `failed` (a modal can leave
 Acceptance is not proof the intended workflow finished; inspect widgets, Tasks, and projects.
 
 Stable selectors: `projectTabs`, `projectTitle`, `segmentCaption`, `segmentsTable`,
-`saveProject`, `exportProject`, `analyzeProject`, `tasksDock`, `taskProjectFilter`, `tasksTable`,
-`taskLog`, `taskShowProject`, `taskCancel`, `taskRetry`, `taskOpenOutput`, `taskDetails`.
+`saveProject`, `exportProject`, `analyzeProject`, `showTasks`, `tasksWindow`, `taskProjectFilter`,
+`tasksTable`, `taskLog`, `taskRestoreProject`, `taskCancel`, `taskRetry`, `taskOpenOutput`, `taskDetails`.
+Click `showTasks` to open the separate nonmodal window before interacting with task controls.
+Send `Escape` to `tasksWindow` to close it without cancelling work. Switch open projects through
+`projectTabs`; `taskRestoreProject` only restores tabs closed with **Keep processing**.
 Export details expose `exportDetailsClose`; project-close decisions expose
 `projectCloseKeepProcessing`, `projectCloseCancelTasks`, `projectCloseKeepOpen`,
 `projectCloseSave`, `projectCloseDiscard`, and `projectCloseCancel`. Scrolling selectors are

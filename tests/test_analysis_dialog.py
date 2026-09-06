@@ -138,7 +138,7 @@ def test_workspace_whisper_and_refinement_start_independently_and_survive_use(
     details = {}
     host = QDialog()
     qtbot.addWidget(host)
-    host.workspace = SimpleNamespace(tasks_panel=SimpleNamespace(
+    host.workspace = SimpleNamespace(tasks_window=SimpleNamespace(
         register_detail=lambda job_id, widget: details.__setitem__(job_id, widget),
     ))
     dialog = AnalysisDialog(

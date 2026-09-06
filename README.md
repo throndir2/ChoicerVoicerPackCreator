@@ -7,7 +7,7 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 ## What it does
 
 - Creates a new project from MP4, MKV, MOV, WebM, OGV, or AVI video.
-- Keeps multiple projects in independent tabs, with a shared dockable **Tasks** panel.
+- Keeps multiple projects in independent tabs, with an optional separate **Tasks** window.
 - Downloads a single YouTube video from its URL and offers YouTube and local Whisper transcripts
   side by side, each with its own text and timings.
 - Plays the source video inside the editor. Press **Space** in the video preview, timeline,
@@ -250,9 +250,11 @@ of opening a duplicate. Videos use the same background import and initial proces
 ordinary text dragging still edits text. Folders, web links, and other file types are not
 accepted; if a drop mixes supported and unsupported items, none are opened.
 
-**Tools > Tasks** shows the shared dock. Filter it to all projects or the current project, inspect
-stage progress and elapsed time, cancel supported work, reopen review/details, or open a successful
-output. CPU, I/O, and network budgets bound concurrent work; jobs sharing output files or inference
+Switch projects using their tabs. **Tools > Tasks** opens a separate, nonmodal window only when
+requested; it never opens automatically or takes space from the editor. Filter it to all projects
+or the current project, inspect stage progress and elapsed time, cancel supported work, reopen
+review/details, or open a successful output. Closing the Tasks window does not stop processing.
+CPU, I/O, and network budgets bound concurrent work; jobs sharing output files or inference
 components wait rather than overwrite each other. You can edit or save another project while a
 pack exports, a source opens, or analysis runs.
 
@@ -267,8 +269,9 @@ requesting project does not dismiss another project's prompt. Setup/download pro
 within its processing task; it is not a separate permanent global job.
 
 Closing a tab with active work offers **Keep processing**, **Cancel tasks and close**, or
-**Keep open**. Keep processing retains a hidden document and its recovery data; **Show project**
-in Tasks restores that same tab. Processing does not survive application exit.
+**Keep open**. Keep processing retains a hidden document and its recovery data; **Restore tab**
+in **Tools > Tasks** restores that same tab. Open projects are selected through their tabs, not
+the Tasks window. Processing does not survive application exit.
 
 Export opens a progress dialog with the current operation, total and current-step elapsed
 time, and a scrollable activity history without repetitive timestamp prefixes. Video conversion
@@ -288,7 +291,7 @@ creation (when requested), final validation, and cleanup. Estimates can move bac
 change; an unmeasured step that outlasts its estimate shows **re-estimating** instead of a false
 zero-second countdown. Only a successful export reaches 100%. The current-step bar shows measured
 video progress separately and stays indeterminate for operations without measurable progress.
-The details window is nonmodal and can be closed while the export continues in Tasks. It retains
+The details window is nonmodal and can be closed while the export continues in the background. It retains
 output locations, cleanup notes, and failures for later inspection. Export uses a snapshot; edits
 made during export affect the next export, not the one already running.
 
@@ -492,7 +495,7 @@ If automatic refinement fails, is canceled, or returns no rows, no original rows
 fallback. The independent Whisper task is unaffected; either pass can be retried manually.
 Any previously completed refined draft is retained.
 **Cancel Scan** keeps the analysis window open. **Keep Drafts & Close** hides the review while
-manager-owned work continues in **Tasks**, and
+manager-owned work continues in the background (inspect it through **Tools > Tasks**), and
 retains all available drafts, including edits, checked rows, source selection, and the pause setting, without adding
 segments. Draft changes are included in recovery snapshots and **Save Project**, just like other
 project edits. **Tools → Analyze Video & Suggest Segments** restores completed drafts without
