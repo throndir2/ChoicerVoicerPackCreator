@@ -21,7 +21,12 @@ from choicer_voicer_pack_creator.diagnostics import (
     diagnostic_operation,
 )
 from choicer_voicer_pack_creator.exporter import PackExporter, sha256
-from choicer_voicer_pack_creator.media import MediaError, MediaInfo, MediaTools
+from choicer_voicer_pack_creator.media import (
+    MediaError,
+    MediaInfo,
+    MediaTools,
+    VideoEncodingProgress,
+)
 from choicer_voicer_pack_creator.models import PackProject, Segment, SourceCaption
 from choicer_voicer_pack_creator.pack_io import PackImporter
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
@@ -360,6 +365,10 @@ def test_downloader_log_omits_payloads_and_bounds_messages(tmp_path: Path) -> No
 
 
 class ExportMedia:
+    def convert_video(self, _source, destination, _height, _fps, *, encoding_progress):
+        encoding_progress(VideoEncodingProgress(45, 30, 1))
+        destination.write_bytes(b"media")
+
     def probe(self, _path):
         return MediaInfo(10, 1280, 720, 30, True, "theora", "vorbis", "yuv420p", 48000, 2)
 
@@ -382,7 +391,10 @@ class ExportMedia:
         return float("-inf")
 
 
-def test_pack_export_and_import_report_counts_not_metadata(tmp_path: Path) -> None:
+@pytest.mark.parametrize("preserve_video", [True, False])
+def test_pack_export_and_import_report_counts_not_metadata(
+    tmp_path: Path, preserve_video: bool,
+) -> None:
     source = tmp_path / "source.ogv"
     audio = tmp_path / "source.mp3"
     image = tmp_path / "source.png"
@@ -390,7 +402,7 @@ def test_pack_export_and_import_report_counts_not_metadata(tmp_path: Path) -> No
         path.write_bytes(b"media")
     project = PackProject(
         title="Pack", authors=[PRIVATE_AUTHOR], video_path=str(source), video_duration=10,
-        preserve_source_video=True, video_height=720, video_fps=30,
+        preserve_source_video=preserve_video, video_height=720, video_fps=30,
         segments=[Segment(
             1, 2, PRIVATE_CAPTION, [PRIVATE_AUTHOR], audio_mode="file",
             audio_path=str(audio), image_path=str(image),

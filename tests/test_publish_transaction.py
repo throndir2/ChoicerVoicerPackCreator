@@ -39,7 +39,7 @@ def test_publish_restores_previous_pack_when_final_validation_fails(tmp_path: Pa
             progress=messages.append,
         )
 
-    assert "restoring previous output" in messages[-1]
+    assert "restoring previous output" in messages[-1].message
     assert (target / "old.txt").read_text(encoding="utf-8") == "old"
     assert not (target / "new.txt").exists()
     assert not list(tmp_path.glob(".Pack.previous-*"))

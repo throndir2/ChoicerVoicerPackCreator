@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
 from choicer_voicer_pack_creator import __version__
 from choicer_voicer_pack_creator.analysis import AnalysisSuggestion
 from choicer_voicer_pack_creator.diagnostics import diagnostic_event, diagnostic_exception
+from choicer_voicer_pack_creator.export_progress import ExportProgress, format_time
 from choicer_voicer_pack_creator.exporter import (
     ExportResult,
     PackExporter,
@@ -112,7 +113,7 @@ class WaveformWorker(QThread):
 
 
 class ExportWorker(QThread):
-    progress = Signal(str)
+    progress = Signal(object)
     completed = Signal(object)
     failed = Signal(str)
 
@@ -134,13 +135,6 @@ class ExportWorker(QThread):
         except Exception as error:
             diagnostic_exception("export_worker_failed", error)
             self.failed.emit(str(error))
-
-
-def format_time(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    minutes = int(seconds // 60)
-    remainder = seconds - minutes * 60
-    return f"{minutes:02d}:{remainder:06.3f}"
 
 
 class MainWindow(QMainWindow):
@@ -2524,7 +2518,7 @@ class MainWindow(QMainWindow):
         self._export_dialog = dialog
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.finished.connect(self._export_dialog_closed)
-        worker.progress.connect(self.progress_label.setText)
+        worker.progress.connect(self._export_progress)
         worker.progress.connect(dialog.report_progress)
         worker.completed.connect(self._export_completed)
         worker.failed.connect(self._export_failed)
@@ -2532,6 +2526,10 @@ class MainWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         dialog.show()
         worker.start()
+
+    @Slot(object)
+    def _export_progress(self, update: ExportProgress) -> None:
+        self.progress_label.setText(update.message.splitlines()[0])
 
     def _confirm_backing_export(self) -> bool:
         if self.project.backing_track_path:

@@ -89,15 +89,30 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
         ],
     )
 
-    messages = []
-    result = PackExporter(media).export(project, tmp_path / "output", progress=messages.append)
+    updates = []
+    result = PackExporter(media).export(project, tmp_path / "output", progress=updates.append)
+    messages = [update.message for update in updates]
     assert messages[0] == "Inspecting source video and audio..."
-    assert any("Converting video" in message for message in messages)
+    assert any("Converting full video" in message for message in messages)
+    encoding = [update for update in updates if update.live and update.position is not None]
+    assert encoding
+    assert encoding[-1].position == pytest.approx(2.0)
+    assert 0 < encoding[-1].fraction < 1
+    assert "frames" in encoding[-1].message
+    plan = next(update.plan for update in updates if update.plan)
+    observed_steps = list(dict.fromkeys(update.step for update in updates if update.step))
+    assert observed_steps == [step.key for step in plan]
     assert "Creating pack icon..." in messages
     for index, speaker in enumerate(("Alice", "Bob"), start=1):
-        assert f"Prompt {index}/2: preparing audio for {speaker}" in messages
-        assert f"Prompt {index}/2: preparing still image..." in messages
-        assert f"Prompt {index}/2: checking audio duration, padding, and audibility..." in messages
+        for operation in (
+            "Preparing prompt audio", "Preparing prompt still image",
+            "Checking prompt audio duration, padding, and audibility",
+            "Writing prompt caption and character metadata",
+        ):
+            assert any(
+                message.startswith(operation) and f"Prompt {index}/2 - {speaker}" in message
+                and project.segments[index - 1].caption in message for message in messages
+            )
         for phase in ("Validating staged pack", "Revalidating published pack"):
             assert f"{phase}: fully decoding Ogg video and audio" in messages
             assert f"{phase}: prompt {index}/2: checking and decoding audio" in messages
@@ -145,13 +160,19 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
     original_image_hash = file_hash(result.pack_path / "001_Alice.png")
     imported.title = "Modified Integration Pack"
     imported.segments[0].caption = "Edited first line"
-    messages.clear()
+    updates.clear()
     modified = PackExporter(media).export(
-        imported, tmp_path / "modified-output", create_zip=False, progress=messages.append,
+        imported, tmp_path / "modified-output", create_zip=False, progress=updates.append,
     )
+    messages = [update.message for update in updates]
     assert any("Preserving existing Ogg video" in message for message in messages)
-    assert "Prompt 1/2: preparing audio for Alice" in messages
+    assert any("Preparing prompt audio\nPrompt 1/2 - Alice" in message for message in messages)
     assert not any("compressing file" in message for message in messages)
+    plan = next(update.plan for update in updates if update.plan)
+    assert not any(step.kind in {"video-encode", "zip", "zip-check"} for step in plan)
+    assert list(dict.fromkeys(update.step for update in updates if update.step)) == [
+        step.key for step in plan
+    ]
     assert modified.zip_path is None
     assert modified.validation["status"] == "passed"
     assert any("without backing music" in warning for warning in modified.warnings)

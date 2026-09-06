@@ -193,10 +193,24 @@ If `py` is unavailable, invoke your installed Python executable directly.
 11. Choose **Export Pack + ZIP** and select an output directory.
 
 Export opens a progress dialog with the current operation, total and current-step elapsed
-time, and a scrollable activity history. It reports video conversion, each prompt's audio
-and image preparation, staged and published media validation, ZIP creation, and publication.
-The activity bar stays indeterminate because these operations do not have a reliable overall
-percentage. Keep the dialog open while export runs; **Close** becomes available only after
+time, and a scrollable activity history without repetitive timestamp prefixes. Video conversion
+processes the **full video before extracting prompts**. Its live status shows encoded video
+position, frame count, percentage, and encoding speed when FFmpeg supplies those measurements.
+It identifies the prompt at that position (number, speaker,
+source range, and caption), or the gap between prompts. If no newer frame is reported for 15
+seconds, the dialog says it is waiting for a newer frame report rather than implying progress.
+Live updates replace the current history entry instead of filling the log.
+
+Each prompt's audio, image, and metadata steps show its identity and source range. The dialog
+also reports staged and published media validation, ZIP creation, and publication.
+The **current-step time remaining** and **whole-export time remaining** start with rough workload
+estimates, then adapt to measured video throughput and completed prompt/validation timings.
+The separate **estimated overall progress** bar includes all remaining steps, including ZIP
+creation (when requested), final validation, and cleanup. Estimates can move backward as timings
+change; an unmeasured step that outlasts its estimate shows **re-estimating** instead of a false
+zero-second countdown. Only a successful export reaches 100%. The current-step bar shows measured
+video progress separately and stays indeterminate for operations without measurable progress.
+Keep the dialog open while export runs; **Close** becomes available only after
 the worker finishes. The dialog then keeps the output locations, cleanup notes, or failure
 details visible until dismissed.
 
