@@ -6,6 +6,7 @@ import stat
 import uuid
 import zipfile
 import zlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +19,16 @@ from choicer_voicer_pack_creator.diagnostics import (
 )
 from choicer_voicer_pack_creator.media import MediaError, MediaTools
 from choicer_voicer_pack_creator.models import PackProject, Segment
+from choicer_voicer_pack_creator.operations import (
+    OperationCancelled,
+    SourceChangedError,
+    SourceSnapshot,
+    check_cancelled,
+    critical_stage,
+    operation_scope,
+    path_leases,
+    report,
+)
 
 _DIGITS = re.compile(r"(\d+)")
 _MAX_ZIP_MEMBERS = 10_000
@@ -27,6 +38,12 @@ _WINDOWS_RESERVED_NAME = re.compile(
     r"^(?:CON|PRN|AUX|NUL|CLOCK\$|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])$",
     re.IGNORECASE,
 )
+
+
+def _notify(message: str, fraction: float | None = None) -> None:
+    check_cancelled()
+    report(message, fraction)
+    check_cancelled()
 
 
 def _zip_member_parts(entry: zipfile.ZipInfo) -> tuple[str, ...]:
@@ -65,7 +82,8 @@ def _zip_inventory(
     nodes: dict[tuple[str, ...], tuple[tuple[str, ...], bool]] = {}
     roots: list[tuple[str, ...]] = []
     total = 0
-    for entry in entries:
+    for index, entry in enumerate(entries, 1):
+        _notify(f"Checking ZIP entry {index}/{len(entries)}", (index - 1) / len(entries))
         parts = _zip_member_parts(entry)
         mode = stat.S_IFMT(entry.external_attr >> 16)
         if (
@@ -134,7 +152,10 @@ def _extract_pack_zip(
     destination: Path,
 ) -> None:
     total = 0
-    for entry, parts in members:
+    expected_total = sum(entry.file_size for entry, _ in members)
+    for index, (entry, parts) in enumerate(members, 1):
+        message = f"Extracting ZIP entry {index}/{len(members)}: {entry.filename}"
+        _notify(message, total / max(1, expected_total))
         target = destination.joinpath(*parts)
         if entry.is_dir():
             target.mkdir(parents=True, exist_ok=True)
@@ -145,7 +166,11 @@ def _extract_pack_zip(
         target.parent.mkdir(parents=True, exist_ok=True)
         written = 0
         with archive.open(entry) as source, target.open("xb") as output:
-            while chunk := source.read(_ZIP_BUFFER_SIZE):
+            while True:
+                check_cancelled()
+                chunk = source.read(_ZIP_BUFFER_SIZE)
+                if not chunk:
+                    break
                 written += len(chunk)
                 total += len(chunk)
                 if total > _MAX_ZIP_EXPANDED_BYTES or written > entry.file_size:
@@ -154,11 +179,13 @@ def _extract_pack_zip(
                         "Use a smaller, valid pack ZIP."
                     )
                 output.write(chunk)
+                _notify(message, total / max(1, expected_total))
         if written != entry.file_size:
             raise ValueError(
                 f"The pack ZIP has incomplete data for {entry.filename!r}. "
                 "Download or create the ZIP again."
             )
+    check_cancelled()
 
 
 def _natural_key(path: Path) -> list[object]:
@@ -204,18 +231,29 @@ class PackImporter:
         self.media = media
 
     @diagnostic_operation("pack_zip_import")
-    def import_zip(self, archive_path: Path, destination_parent: Path) -> ImportResult:
+    def import_zip(
+        self, archive_path: Path, destination_parent: Path, *,
+        cancelled: Callable[[], bool] | None = None,
+        progress: Callable[[str, float | None], None] | None = None,
+    ) -> ImportResult:
         """Keep a validated ZIP import in a unique, durable directory owned by this import."""
+        with operation_scope(cancelled=cancelled, progress=progress):
+            source = archive_path.resolve()
+            candidate = destination_parent.resolve() / f"pack-import-{uuid.uuid4().hex}"
+            with path_leases(read_paths=[source], write_paths=[candidate]):
+                return self._import_zip(source, candidate)
+
+    def _import_zip(self, archive_path: Path, candidate: Path) -> ImportResult:
         source = archive_path.resolve()
         owned_root: Path | None = None
         complete = False
         diagnostic_event("pack_zip_import_requested", path=source)
         try:
+            snapshot = SourceSnapshot.capture([source])
+            _notify("Inspecting pack ZIP...")
             with zipfile.ZipFile(source) as archive:
                 members, pack_parts = _zip_inventory(archive)
-                parent = destination_parent.resolve()
-                parent.mkdir(parents=True, exist_ok=True)
-                candidate = parent / f"pack-import-{uuid.uuid4().hex}"
+                candidate.parent.mkdir(parents=True, exist_ok=True)
                 candidate.mkdir()
                 owned_root = candidate
                 diagnostic_event(
@@ -223,12 +261,17 @@ class PackImporter:
                 )
                 _extract_pack_zip(archive, members, owned_root)
                 result = self.import_folder(owned_root.joinpath(*pack_parts))
-            diagnostic_event(
-                "pack_zip_import_ready", path=result.project.source_pack_path,
-                warning_count=len(result.warnings),
-            )
-            complete = True
-            return result
+            _notify("Verifying source ZIP has not changed...")
+            snapshot.verify()
+            with critical_stage("Finishing pack ZIP import; cancellation is deferred..."):
+                diagnostic_event(
+                    "pack_zip_import_ready", path=result.project.source_pack_path,
+                    warning_count=len(result.warnings),
+                )
+                complete = True
+                return result
+        except (OperationCancelled, SourceChangedError):
+            raise
         except (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError, zlib.error) as error:
             raise ValueError(
                 f"The pack ZIP is damaged or incomplete (CRC/decompression failure): {error}. "
@@ -249,7 +292,22 @@ class PackImporter:
                 shutil.rmtree(owned_root)
 
     @diagnostic_operation("pack_import")
-    def import_folder(self, folder: Path) -> ImportResult:
+    def import_folder(
+        self, folder: Path, *, cancelled: Callable[[], bool] | None = None,
+        progress: Callable[[str, float | None], None] | None = None,
+    ) -> ImportResult:
+        with operation_scope(cancelled=cancelled, progress=progress):
+            root = folder.resolve()
+            with path_leases(read_paths=[root]):
+                if not root.is_dir():
+                    raise ValueError(f"Pack folder does not exist: {root}")
+                snapshot = SourceSnapshot.capture([root])
+                result = self._import_folder(root)
+                check_cancelled()
+                snapshot.verify()
+                return result
+
+    def _import_folder(self, folder: Path) -> ImportResult:
         root = folder.resolve()
         diagnostic_event("pack_import_requested", path=root)
         if not root.is_dir():
@@ -258,6 +316,7 @@ class PackImporter:
         pack_info_path = root / "_pack_info.ini"
         if not pack_info_path.is_file():
             raise ValueError("The selected folder does not contain _pack_info.ini")
+        _notify("Reading pack metadata...")
         recognized_files = {pack_info_path.resolve()}
         pack_config = read_config(pack_info_path)
         pack_data = pack_config.get("data", {})
@@ -294,6 +353,7 @@ class PackImporter:
         preserve_source_video = False
         if video:
             recognized_files.add(video.resolve())
+            _notify("Inspecting pack video and audio...")
             try:
                 video_info = self.media.probe(video)
                 duration = video_info.duration
@@ -338,14 +398,14 @@ class PackImporter:
         if icon.is_file():
             recognized_files.add(icon.resolve())
 
-        candidates = sorted(
-            [
-                path
-                for path in (*root.glob("*.txt"), *root.glob("*.ini"))
-                if path.name.casefold() != "_pack_info.ini"
-            ],
-            key=_natural_key,
-        )
+        _notify("Finding clip metadata...")
+        candidates = []
+        for pattern in ("*.txt", "*.ini"):
+            for path in root.glob(pattern):
+                check_cancelled()
+                if path.name.casefold() != "_pack_info.ini":
+                    candidates.append(path)
+        candidates.sort(key=_natural_key)
         diagnostic_event(
             "pack_import_inventory", candidate_count=len(candidates),
             has_video=video is not None, has_backing_track=backing is not None,
@@ -353,6 +413,9 @@ class PackImporter:
         segments: list[Segment] = []
         logged_progress = DiagnosticProgress("pack_import_progress")
         for index, metadata_path in enumerate(candidates, 1):
+            _notify(
+                f"Reading clip metadata {index}/{len(candidates)}", (index - 1) / len(candidates),
+            )
             logged_progress.report(
                 f"Reading clip metadata {index}/{len(candidates)}", (index - 1) / len(candidates),
             )
@@ -399,6 +462,10 @@ class PackImporter:
             audio_duration = 3.0
             if audio:
                 recognized_files.add(audio.resolve())
+                _notify(
+                    f"Inspecting prompt audio {index}/{len(candidates)}",
+                    (index - 1) / len(candidates),
+                )
                 try:
                     audio_duration = self.media.probe_audio_duration(audio)
                 except MediaError as error:
@@ -422,6 +489,7 @@ class PackImporter:
                 recognized_files.add(image.resolve())
 
             for timestamp in timestamps:
+                check_cancelled()
                 segment_end = timestamp + audio_duration
                 if duration > 0:
                     segment_end = min(duration, segment_end)
@@ -448,11 +516,13 @@ class PackImporter:
         if not segments:
             raise ValueError("No clip metadata with dub_timestamps was found in the selected folder")
 
-        unrecognized_files = sorted(
-            path.relative_to(root).as_posix()
-            for path in root.rglob("*")
-            if path.is_file() and path.resolve() not in recognized_files
-        )
+        _notify("Checking source pack inventory...")
+        unrecognized_files = []
+        for path in root.rglob("*"):
+            check_cancelled()
+            if path.is_file() and path.resolve() not in recognized_files:
+                unrecognized_files.append(path.relative_to(root).as_posix())
+        unrecognized_files.sort()
         if unrecognized_files:
             preview = ", ".join(unrecognized_files[:8])
             suffix = f" (+{len(unrecognized_files) - 8} more)" if len(unrecognized_files) > 8 else ""
@@ -477,6 +547,7 @@ class PackImporter:
             import_warnings=list(warnings),
         )
         project.sort_segments()
+        _notify("Pack import ready", 1.0)
         logged_progress.report("Pack import ready", 1.0)
         diagnostic_event(
             "pack_import_ready", path=root, segment_count=len(segments), warning_count=len(warnings),

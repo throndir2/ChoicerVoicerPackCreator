@@ -8,6 +8,7 @@ from typing import Any
 
 from choicer_voicer_pack_creator.config_format import read_config
 from choicer_voicer_pack_creator.media import MediaTools
+from choicer_voicer_pack_creator.operations import check_cancelled
 
 
 class PackValidationError(RuntimeError):
@@ -23,8 +24,10 @@ class PackValidator:
         *, progress: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         def notify(message: str) -> None:
+            check_cancelled()
             if progress:
                 progress(message)
+            check_cancelled()
 
         notify("checking required files and pack metadata")
         root = folder.resolve()
@@ -164,13 +167,18 @@ class PackValidator:
             expected_names.update({metadata_path.name, audio_path.name, image_path.name})
 
         notify("checking complete pack file inventory")
-        actual_names = {path.name for path in root.iterdir() if path.is_file()}
+        actual_names = set()
+        for path in root.iterdir():
+            check_cancelled()
+            if path.is_file():
+                actual_names.add(path.name)
         if actual_names != expected_names:
             missing_names = sorted(expected_names - actual_names)
             extra_names = sorted(actual_names - expected_names)
             raise PackValidationError(
                 f"Pack inventory mismatch; missing={missing_names}, extra={extra_names}"
             )
+        check_cancelled()
         return {
             "status": "passed",
             "title": pack_data["title"],
@@ -190,28 +198,38 @@ class PackValidator:
 
     @staticmethod
     def _require_canonical_crlf(path: Path) -> None:
+        check_cancelled()
         raw = path.read_bytes()
+        check_cancelled()
         without_crlf = raw.replace(b"\r\n", b"")
         if b"\r" in without_crlf or b"\n" in without_crlf:
             raise PackValidationError(f"{path.name} does not use canonical CRLF line endings")
 
     @staticmethod
     def validate_zip(path: Path, folder_name: str, expected_files: set[str]) -> None:
+        check_cancelled()
+        prefix = folder_name.rstrip("/") + "/"
         with zipfile.ZipFile(path) as archive:
-            bad_file = archive.testzip()
-            if bad_file:
-                raise PackValidationError(f"ZIP CRC failed for {bad_file}")
-            prefix = folder_name.rstrip("/") + "/"
-            members = {
-                name[len(prefix) :]
-                for name in archive.namelist()
-                if name.startswith(prefix) and not name.endswith("/")
-            }
+            members: set[str] = set()
+            unexpected = []
+            for entry in archive.infolist():
+                check_cancelled()
+                try:
+                    with archive.open(entry) as stream:
+                        while True:
+                            check_cancelled()
+                            if not stream.read(1024 * 1024):
+                                break
+                except zipfile.BadZipFile as error:
+                    raise PackValidationError(f"ZIP CRC failed for {entry.filename}") from error
+                if not entry.is_dir():
+                    if entry.filename.startswith(prefix):
+                        members.add(entry.filename[len(prefix):])
+                    else:
+                        unexpected.append(entry.filename)
+            check_cancelled()
             if members != expected_files:
                 raise PackValidationError("ZIP inventory differs from the validated pack folder")
-            unexpected = [
-                name for name in archive.namelist() if not name.startswith(prefix) and not name.endswith("/")
-            ]
             if unexpected:
                 raise PackValidationError(f"ZIP has files outside its pack folder: {unexpected}")
 
