@@ -10,8 +10,14 @@ from PySide6.QtWidgets import QDialog, QMessageBox
 
 from choicer_voicer_pack_creator.jobs import JobManager
 from choicer_voicer_pack_creator.models import SourceCaption
+from choicer_voicer_pack_creator.operations import SourceSnapshot
 from choicer_voicer_pack_creator.ui import main_window, youtube_dialog
-from choicer_voicer_pack_creator.youtube import YouTubeCancelled, YouTubeDownload
+from choicer_voicer_pack_creator.youtube import (
+    ExistingYouTubeImport,
+    YouTubeCancelled,
+    YouTubeDownload,
+    YouTubeImportConflict,
+)
 
 
 class UnusedMedia:
@@ -146,6 +152,126 @@ def make_download(tmp_path):
         video, "Example", 10, "https://www.youtube.com/watch?v=abcdefghijk", "en",
         [SourceCaption(1, 2, "Hello", "YouTube creator (en)")], [],
     )
+
+
+@pytest.mark.parametrize("managed", [False, True])
+@pytest.mark.parametrize("choice", ["reuse", "overwrite", "cancel"])
+def test_existing_import_choice_runs_after_worker_and_does_not_block_jobs(
+    qtbot, tmp_path, monkeypatch, managed, choice,
+):
+    result = make_download(tmp_path)
+    existing = ExistingYouTubeImport(
+        result.video_path.parent, SourceSnapshot.capture((result.video_path.parent,)),
+        result.video_path, result.duration, "",
+    )
+    calls = []
+
+    def download(*_args, existing, overwrite, **_kwargs):
+        calls.append((existing, overwrite))
+        return YouTubeImportConflict((candidate,)) if existing is None else result
+
+    candidate = existing
+    monkeypatch.setattr(youtube_dialog, "download_youtube", download)
+    jobs = JobManager(limits={"network": 1}) if managed else None
+    dialog = youtube_dialog.YouTubeDialog(
+        UnusedMedia(), str(tmp_path), job_manager=jobs, project_id="pending-project",
+    )
+    qtbot.addWidget(dialog)
+    dialog.url_edit.setText(result.url)
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(True))
+    try:
+        dialog.start_download()
+        qtbot.waitUntil(lambda: dialog._conflict_dialog is not None)
+        prompt = dialog._conflict_dialog
+        assert dialog.worker is None
+        assert not prompt.isModal()
+        assert prompt.reuse_button.isEnabled()
+        assert not accepted
+        assert calls == [(None, False)]
+        if jobs:
+            assert not jobs.active_jobs()
+            job = jobs.submit(
+                "another-project", "test", "Independent work", lambda _context: True,
+                resource_class="network", write_paths=(tmp_path,),
+            )
+            qtbot.waitUntil(lambda: not job.record.active)
+            assert job.record.state == "succeeded"
+        if choice == "cancel":
+            prompt.reject()
+            assert calls == [(None, False)]
+            assert dialog.download_result is None
+            assert dialog.download_button.isEnabled()
+            assert not accepted
+        else:
+            button = prompt.reuse_button if choice == "reuse" else prompt.overwrite_button
+            qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+            qtbot.waitUntil(lambda: bool(accepted))
+            assert calls == [(None, False), (existing, choice == "overwrite")]
+            assert dialog.download_result == result
+            assert dialog.worker is None
+        existing.snapshot.verify()
+    finally:
+        if jobs:
+            jobs.shutdown(wait=True)
+
+
+def test_conflict_dialog_disables_reuse_for_incomplete_selected_folder(qtbot, tmp_path):
+    result = make_download(tmp_path)
+    snapshot = SourceSnapshot.capture((result.video_path.parent,))
+    incomplete = ExistingYouTubeImport(
+        result.video_path.parent, snapshot, None, 0, "No complete source video.",
+    )
+    complete = ExistingYouTubeImport(
+        result.video_path.parent, snapshot, result.video_path, result.duration, "",
+    )
+    parent = QDialog()
+    qtbot.addWidget(parent)
+    dialog = youtube_dialog.YouTubeConflictDialog(
+        YouTubeImportConflict((incomplete, complete)), parent,
+    )
+    qtbot.addWidget(dialog)
+    assert dialog.selected_import == complete
+    assert dialog.reuse_button.isEnabled()
+    dialog.folder_combo.setCurrentIndex(0)
+    assert not dialog.reuse_button.isEnabled()
+    assert dialog.overwrite_button.isEnabled()
+    assert dialog.status_label.text() == incomplete.reuse_problem
+
+
+@pytest.mark.parametrize("cancel_parent", [False, True])
+def test_conflict_choice_cannot_resume_canceled_or_stale_import(
+    qtbot, tmp_path, monkeypatch, cancel_parent,
+):
+    result = make_download(tmp_path)
+    existing = ExistingYouTubeImport(
+        result.video_path.parent, SourceSnapshot.capture((result.video_path.parent,)),
+        result.video_path, result.duration, "",
+    )
+    calls = []
+    monkeypatch.setattr(
+        youtube_dialog, "download_youtube",
+        lambda *_args, **_kwargs: calls.append(True) or YouTubeImportConflict((existing,)),
+    )
+    current = True
+    monkeypatch.setattr(youtube_dialog, "_current_dialog_request", lambda _dialog: lambda: current)
+    dialog = youtube_dialog.YouTubeDialog(UnusedMedia(), str(tmp_path))
+    qtbot.addWidget(dialog)
+    dialog.url_edit.setText(result.url)
+    dialog.start_download()
+    qtbot.waitUntil(lambda: dialog._conflict_dialog is not None)
+    prompt = dialog._conflict_dialog
+    if cancel_parent:
+        dialog.cancel_download()
+        assert dialog.result() == QDialog.DialogCode.Rejected
+    else:
+        current = False
+        prompt.reuse_button.click()
+        assert "project or source changed" in dialog.progress_label.text()
+    assert calls == [True]
+    assert dialog.worker is None
+    assert dialog._conflict_dialog is None
+    assert dialog.download_result is None
 
 
 def test_download_dialog_waits_for_worker_before_accepting(qtbot, tmp_path, monkeypatch):

@@ -27,14 +27,17 @@ from choicer_voicer_pack_creator.diagnostics import (
 )
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.ui.analysis_dialog import (
+    _current_dialog_request,
     register_job_detail,
     save_diagnostic_logs,
     show_message,
 )
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.youtube import (
+    ExistingYouTubeImport,
     YouTubeCancelled,
     YouTubeDownload,
+    YouTubeImportConflict,
     download_youtube,
     normalize_youtube_url,
 )
@@ -49,10 +52,12 @@ class YouTubeWorker(JobWorker):
     def __init__(
         self, media: MediaTools, url: str, folder: Path, language: str,
         *, create_folder: bool = False,
+        existing: ExistingYouTubeImport | None = None, overwrite: bool = False,
     ) -> None:
         super().__init__()
         self.media, self.url, self.folder, self.language = media, url, folder, language
         self.create_folder = create_folder
+        self.existing, self.overwrite = existing, overwrite
 
     def run(self) -> None:
         diagnostics = DiagnosticProgress("youtube_worker_progress")
@@ -74,6 +79,7 @@ class YouTubeWorker(JobWorker):
             result = download_youtube(
                 self.media, self.url, self.folder, self.language,
                 progress=report, cancelled=self.isInterruptionRequested,
+                existing=self.existing, overwrite=self.overwrite,
             )
             self.completed.emit(result)
             diagnostic_event("youtube_worker_completed")
@@ -83,6 +89,59 @@ class YouTubeWorker(JobWorker):
         except Exception as error:
             diagnostic_exception("youtube_worker_failed", error)
             self.failed.emit(str(error))
+
+
+class YouTubeConflictDialog(QDialog):
+    def __init__(self, conflict: YouTubeImportConflict, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.imports = conflict.imports
+        self.overwrite = False
+        self.setWindowTitle("YouTube import already exists")
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.resize(650, 250)
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "An import of this video already exists. Use its complete video and fetch the "
+            "title/captions again, or download a replacement. Overwrite replaces source download "
+            "files only after the new video is ready; other files are kept. "
+            "Projects using the replaced source files may be affected."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self.folder_combo = QComboBox()
+        for item in self.imports:
+            self.folder_combo.addItem(str(item.folder))
+        self.folder_combo.setCurrentIndex(next(
+            (index for index, item in enumerate(self.imports) if not item.reuse_problem), 0,
+        ))
+        layout.addWidget(self.folder_combo)
+        self.status_label = QLabel()
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        self.reuse_button = buttons.addButton("Use Existing", QDialogButtonBox.ButtonRole.AcceptRole)
+        self.overwrite_button = buttons.addButton("Overwrite", QDialogButtonBox.ButtonRole.ActionRole)
+        self.reuse_button.clicked.connect(self.accept)
+        self.overwrite_button.clicked.connect(self._overwrite)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.folder_combo.currentIndexChanged.connect(self._selection_changed)
+        self._selection_changed()
+
+    @property
+    def selected_import(self) -> ExistingYouTubeImport:
+        return self.imports[self.folder_combo.currentIndex()]
+
+    def _selection_changed(self) -> None:
+        problem = self.selected_import.reuse_problem
+        self.status_label.setText(problem or "Complete video with audio found. No video download needed.")
+        self.reuse_button.setEnabled(not problem)
+        self.reuse_button.setDefault(not problem)
+        self.overwrite_button.setAutoDefault(False)
+
+    def _overwrite(self) -> None:
+        self.overwrite = True
+        self.accept()
 
 
 class YouTubeDialog(QDialog):
@@ -105,6 +164,8 @@ class YouTubeDialog(QDialog):
         )) / "analysis"
         self.worker: YouTubeWorker | None = None
         self.download_result: YouTubeDownload | None = None
+        self._pending_conflict: YouTubeImportConflict | None = None
+        self._conflict_dialog: YouTubeConflictDialog | None = None
         self._close_after_cancel = False
         self.setWindowTitle("New from YouTube")
         self.resize(650, 300)
@@ -146,7 +207,8 @@ class YouTubeDialog(QDialog):
         form.addRow("Caption language", self.language_combo)
         layout.addLayout(form)
         note = QLabel(
-            "Each import creates a separate media folder; existing files are never replaced. "
+            "If this video was imported before, choose whether to use its existing video "
+            "or explicitly overwrite it. New videos get a separate media folder. "
             "Keep this folder with your saved project. Playlists and live streams are not imported."
         )
         note.setWordWrap(True)
@@ -187,7 +249,7 @@ class YouTubeDialog(QDialog):
             self.folder_edit.setText(folder)
 
     def start_download(self) -> None:
-        if self.worker is not None:
+        if self.worker is not None or self._conflict_dialog is not None:
             return
         try:
             url = normalize_youtube_url(self.url_edit.text())
@@ -214,18 +276,25 @@ class YouTubeDialog(QDialog):
             self.language_combo.currentIndex()
         ):
             language = self.language_combo.currentText().strip()
+        self._start_worker(url, folder, str(language or "auto"), create_folder=create_folder)
+
+    def _start_worker(
+        self, url: str, folder: Path, language: str, *, create_folder: bool = False,
+        existing: ExistingYouTubeImport | None = None, overwrite: bool = False,
+    ) -> None:
         worker = YouTubeWorker(
-            self.media, url, folder, str(language or "auto"),
-            create_folder=create_folder,
+            self.media, url, folder, language,
+            create_folder=create_folder, existing=existing, overwrite=overwrite,
         )
         self.worker = worker
         if self.job_manager is not None:
             worker.configure_job(
-                self.job_manager, self.project_id, "youtube", "Download YouTube video",
+                self.job_manager, self.project_id, "youtube", "Import YouTube video",
                 resource_class="network", write_paths=(folder,),
                 source_snapshot=self.source_snapshot,
             )
         self.download_result = None
+        self._pending_conflict = None
         self._close_after_cancel = False
         self._progress("Fetching YouTube video details...", -1)
         for widget in (
@@ -244,7 +313,10 @@ class YouTubeDialog(QDialog):
         worker.start()
         register_job_detail(
             self, worker, retry=self.start_download,
-            available=lambda: self.worker is None and self.download_result is None,
+            available=lambda: (
+                self.worker is None and self.download_result is None
+                and self._conflict_dialog is None
+            ),
         )
 
     @Slot(str, int)
@@ -263,6 +335,9 @@ class YouTubeDialog(QDialog):
     def _completed(self, result: object) -> None:
         if self._close_after_cancel:
             return
+        if isinstance(result, YouTubeImportConflict):
+            self._pending_conflict = result
+            return
         if not isinstance(result, YouTubeDownload):
             self._failed("The downloader returned an invalid result.")
             return
@@ -280,7 +355,7 @@ class YouTubeDialog(QDialog):
     def _failed(self, message: str) -> None:
         diagnostic_event("youtube_failure_displayed", message=message)
         self.progress_label.setText(
-            f"Download failed: {message}\nExisting media and project are unchanged. "
+            f"Import failed: {message}\n"
             "Use Save Diagnostic Bundle to collect logs for support."
         )
         self.progress_bar.setRange(0, 1000)
@@ -294,17 +369,58 @@ class YouTubeDialog(QDialog):
 
     @Slot()
     def _finished(self) -> None:
+        worker = self.worker
         self.worker = None
         if self._close_after_cancel:
             super().reject()
         elif self.download_result is not None:
             super().accept()
+        elif self._pending_conflict is not None and worker is not None:
+            self._show_conflict(self._pending_conflict, worker)
         else:
-            for widget in (
-                self.url_edit, self.folder_edit, self.browse_button,
-                self.language_combo, self.download_button,
+            self._enable_inputs()
+
+    def _enable_inputs(self) -> None:
+        for widget in (
+            self.url_edit, self.folder_edit, self.browse_button,
+            self.language_combo, self.download_button,
+        ):
+            widget.setEnabled(True)
+
+    def _show_conflict(self, conflict: YouTubeImportConflict, worker: YouTubeWorker) -> None:
+        self._pending_conflict = None
+        dialog = YouTubeConflictDialog(conflict, self)
+        self._conflict_dialog = dialog
+        url, folder, language = worker.url, worker.folder, worker.language
+        current = _current_dialog_request(self)
+        self.progress_label.setText("Waiting for your existing-import choice.")
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Waiting for choice")
+
+        def chosen(result: int) -> None:
+            self._conflict_dialog = None
+            existing, overwrite = dialog.selected_import, dialog.overwrite
+            dialog.deleteLater()
+            diagnostic_event(
+                "youtube_existing_import_choice", folder=existing.folder,
+                accepted=result == QDialog.DialogCode.Accepted, overwrite=overwrite,
+            )
+            if (
+                result == QDialog.DialogCode.Accepted and not self._close_after_cancel
+                and current()
             ):
-                widget.setEnabled(True)
+                self._start_worker(url, folder, language, existing=existing, overwrite=overwrite)
+            else:
+                self._canceled()
+                self._enable_inputs()
+                if not current():
+                    self.progress_label.setText(
+                        "The project or source changed. Start a new YouTube import."
+                    )
+
+        dialog.finished.connect(chosen)
+        dialog.show()
 
     def reject(self) -> None:
         if self.job_manager is not None:
@@ -313,6 +429,8 @@ class YouTubeDialog(QDialog):
         self.cancel_download()
 
     def cancel_download(self) -> None:
+        if self._conflict_dialog is not None:
+            self._conflict_dialog.reject()
         if self.worker is not None:
             diagnostic_event("youtube_cancel_requested")
             self._close_after_cancel = True

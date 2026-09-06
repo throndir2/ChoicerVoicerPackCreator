@@ -187,6 +187,20 @@ def test_real_spawned_transfer_probe_and_diagnostics_publish_only_complete_media
     assert any(row["event"] == "youtube_transfer" and row.get("worker_pid") for row in records)
     assert any(row["event"] == "media_probed" and row.get("worker_pid") for row in records)
 
+    existing = youtube.download_youtube(
+        media, URL, tmp_path, "auto", progress=lambda *_args: None, cancelled=lambda: False,
+    ).imports[0]
+    assert not existing.reuse_problem
+    for overwrite in (False, True):
+        reused = youtube.download_youtube(
+            media, URL, tmp_path, "auto", existing=existing, overwrite=overwrite,
+            progress=lambda *_args: None, cancelled=lambda: False,
+        )
+        assert reused.video_path == result.video_path
+        assert reused.video_path.read_bytes() == source.read_bytes()
+        assert reused.duration == pytest.approx(1.0, abs=0.1)
+        assert not list(tmp_path.glob(".cvpc-youtube-*"))
+
 
 def test_http_access_errors_are_not_network_retry_candidates():
     from yt_dlp.networking.common import Response
