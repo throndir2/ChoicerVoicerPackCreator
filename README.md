@@ -326,6 +326,16 @@ may pause when sizes change or a transfer retries, but do not move backward. Unk
 transfers, merging, checking, and publication show indeterminate progress. **Ready** means the
 checked video has been successfully published to its media folder.
 
+Network work runs in isolated processes so **Cancel** can stop a blocked connection, DNS
+lookup, or media tool. Video-detail requests have a 60-second limit per attempt; caption
+requests have a 30-second limit. A stalled or failed connection is retried once using IPv4,
+which can help networks with broken IPv6 connectivity. This does not bypass YouTube access
+restrictions. Waiting stages show elapsed time and are included in diagnostic bundles.
+Transfers stop after 2 minutes without advancing bytes; media preparation allows up to
+10 minutes without progress, and the final video check allows 60 seconds. Healthy transfers
+have no overall duration limit. Failed caption requests still fall back to local Whisper,
+and canceled or failed imports never publish partial media.
+
 YouTube can provide timestamped creator captions or automatic speech-recognition captions.
 The importer prefers creator captions in the selected language and otherwise uses available
 automatic captions. **Original language (auto)** uses YouTube's language metadata where available;

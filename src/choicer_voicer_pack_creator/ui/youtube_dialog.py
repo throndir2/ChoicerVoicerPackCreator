@@ -262,7 +262,7 @@ class YouTubeDialog(QDialog):
             self._close_after_cancel = True
             self.worker.requestInterruption()
             self.progress_label.setText(
-                "Canceling download; waiting for the current network request or media merge..."
+                "Canceling download; stopping its network and media processes..."
             )
         else:
             super().reject()

@@ -236,6 +236,8 @@ def main() -> int:
         raise RuntimeError("Packaged YouTube JavaScript runtime did not start correctly")
     if not report.get("youtube_ejs_present"):
         raise RuntimeError("Packaged YouTube JavaScript solver files are missing")
+    if report.get("youtube_worker_probe_duration") != 1.0:
+        raise RuntimeError("Packaged YouTube worker could not run its isolated media check")
     for package in ("yt-dlp", "yt-dlp-ejs", "deno"):
         if not (executable.parent / "licenses" / package / "LICENSE").is_file():
             raise RuntimeError(f"Packaged {package} license notice is missing")

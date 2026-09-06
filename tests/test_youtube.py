@@ -4,6 +4,7 @@ import io
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from http.cookiejar import CookieJar
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -92,8 +93,9 @@ class FakeMedia:
 
 
 @pytest.fixture
-def downloader(monkeypatch):
+def downloader(monkeypatch, inline_youtube_worker):
     class FakeDownloader:
+        sanitize_info = staticmethod(YoutubeDL.sanitize_info)
         options = None
         fail_video = False
         fail_captions = False
@@ -115,6 +117,7 @@ def downloader(monkeypatch):
         def __init__(self, options, *, auto_init):
             assert not auto_init
             type(self).options = options
+            self.cookiejar = CookieJar()
 
         def __enter__(self):
             return self
@@ -461,3 +464,176 @@ def test_frozen_runtime_must_come_from_application_bundle(tmp_path: Path, monkey
     executable.parent.mkdir(parents=True)
     executable.write_bytes(b"runtime")
     assert youtube.youtube_runtime_path() == executable
+
+
+@pytest.mark.parametrize("stage", ["metadata", "captions", "media"])
+def test_stalled_connections_retry_once_with_ipv4_and_keep_it_for_later_stages(
+    tmp_path, downloader, inline_youtube_worker, monkeypatch, stage,
+):
+    attempts = []
+    events = []
+
+    def run(target, args, **kwargs):
+        request, action, _payload = args
+        attempts.append((action, request.ipv4, kwargs["timeout"]))
+        if action == stage and not request.ipv4:
+            raise youtube.ProcessWorkerTimeout("blocked network request")
+        return inline_youtube_worker(target, args, **kwargs)
+
+    monkeypatch.setattr(youtube, "run_process_worker", run)
+    result = run_download(tmp_path, progress=lambda *event: events.append(event))
+    assert result.video_path.is_file()
+    assert any("IPv4" in note for note in result.warnings)
+    index = next(i for i, attempt in enumerate(attempts) if attempt[0] == stage)
+    assert attempts[index][1] is False
+    assert attempts[index + 1][0:2] == (stage, True)
+    assert all(ipv4 for _, ipv4, _ in attempts[index + 1:])
+    assert attempts[0][2] == youtube.METADATA_TIMEOUT
+    assert next(timeout for action, _, timeout in attempts if action == "captions") == (
+        youtube.CAPTION_TIMEOUT
+    )
+    assert next(timeout for action, _, timeout in attempts if action == "media") is None
+    assert downloader.options["source_address"] == "0.0.0.0"
+    assert sum("retrying using IPv4" in message for message, _ in events) == 1
+    assert events[-1] == ("YouTube video ready", 1.0)
+
+
+def test_metadata_stall_on_both_address_families_fails_without_partial_media(
+    tmp_path, downloader, monkeypatch,
+):
+    attempts = []
+
+    def stalled(_target, args, **_kwargs):
+        request, action, _payload = args
+        attempts.append((action, request.ipv4))
+        raise youtube.ProcessWorkerTimeout("blocked DNS")
+
+    monkeypatch.setattr(youtube, "run_process_worker", stalled)
+    with pytest.raises(youtube.YouTubeError, match="proxy/VPN"):
+        run_download(tmp_path)
+    assert attempts == [("metadata", False), ("metadata", True)]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_caption_stalls_remain_optional_after_bounded_ipv4_retry(
+    tmp_path, downloader, inline_youtube_worker, monkeypatch,
+):
+    def run(target, args, **kwargs):
+        if args[1] == "captions":
+            raise youtube.ProcessWorkerTimeout("caption request stalled")
+        return inline_youtube_worker(target, args, **kwargs)
+
+    monkeypatch.setattr(youtube, "run_process_worker", run)
+    result = run_download(tmp_path)
+    assert result.video_path.is_file()
+    assert not result.captions
+    assert any("Whisper can draft" in note for note in result.warnings)
+
+
+@pytest.mark.parametrize("stage", ["metadata", "captions", "media", "probe"])
+def test_worker_cancellation_never_retries_or_publishes(
+    tmp_path, downloader, inline_youtube_worker, monkeypatch, stage,
+):
+    attempts = []
+
+    def run(target, args, **kwargs):
+        attempts.append(args[1])
+        if args[1] == stage:
+            raise youtube.ProcessWorkerCancelled("Canceled")
+        return inline_youtube_worker(target, args, **kwargs)
+
+    monkeypatch.setattr(youtube, "run_process_worker", run)
+    with pytest.raises(youtube.YouTubeCancelled):
+        run_download(tmp_path)
+    assert attempts.count(stage) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("failure", ["YouTubeError", "HTTPError"])
+def test_access_errors_do_not_trigger_ipv4_retry(tmp_path, downloader, monkeypatch, failure):
+    calls = []
+
+    def run(_target, args, **_kwargs):
+        calls.append(args[1])
+        raise youtube.ProcessWorkerError("Access denied", error_type=failure)
+
+    monkeypatch.setattr(youtube, "run_process_worker", run)
+    with pytest.raises(youtube.YouTubeError, match="Access denied"):
+        run_download(tmp_path)
+    assert calls == ["metadata"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_waiting_status_and_activity_deadlines_do_not_treat_logs_as_progress(
+    tmp_path, monkeypatch,
+):
+    clock = [0.0]
+    monkeypatch.setattr(youtube.time, "monotonic", lambda: clock[0])
+    events = []
+
+    def run(_target, _args, *, on_event, idle_timeout, waiting, **_kwargs):
+        assert idle_timeout() == youtube.TRANSFER_IDLE_TIMEOUT
+        assert not on_event("diagnostic", {"event": "retry", "details": {}})
+        assert not on_event("progress", {"message": "Downloading", "fraction": 0.2})
+        assert on_event("activity", {})
+        clock[0] = 5
+        waiting(5)
+        assert on_event("phase", {"postprocessing": True})
+        assert not on_event("phase", {"postprocessing": True})
+        assert idle_timeout() == youtube.POSTPROCESS_IDLE_TIMEOUT
+        raise youtube.ProcessWorkerTimeout("merge stalled")
+
+    monkeypatch.setattr(youtube, "run_process_worker", run)
+    request = youtube._YouTubeRequest(tmp_path, URL, "", tmp_path)
+    with pytest.raises(youtube.YouTubeError, match="media exceeded its wait limit"):
+        youtube._run_youtube_stage(
+            request, "media", {}, [], lambda *event: events.append(event), lambda: False,
+        )
+    assert events[-1] == ("Downloading Waiting (5s elapsed); you can cancel.", 0.2)
+    assert not request.ipv4
+
+
+def test_only_advancing_bytes_count_as_transfer_activity():
+    updates = []
+    tracker = youtube._DownloadProgress(
+        lambda *_args: None, lambda: False, lambda: updates.append(True),
+    )
+    tracker.prepare({"requested_formats": [VIDEO_FORMAT]})
+    for size in (0, 0, 10, 10, 0, 5):
+        tracker.download_hook(transfer_event("137", size))
+    assert len(updates) == 2
+
+
+def test_download_errors_preserve_underlying_network_classification():
+    from yt_dlp.networking.exceptions import TransportError
+    from yt_dlp.utils import ExtractorError
+
+    network = ExtractorError("connection failed", cause=TransportError("timed out"))
+    wrapped = DownloadError("download failed", exc_info=(type(network), network, None))
+    assert youtube._is_network_error(wrapped)
+    assert not youtube._is_network_error(DownloadError("Video unavailable"))
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_cleanup_failure_is_not_hidden_by_cancellation_or_optional_caption_fallback(
+    tmp_path, downloader, inline_youtube_worker, monkeypatch, cancel,
+):
+    canceled = False
+    attempts = []
+
+    def run(target, args, **kwargs):
+        nonlocal canceled
+        attempts.append(args[1])
+        if args[1] == "captions":
+            canceled = cancel
+            raise youtube.ProcessWorkerError(
+                "Timed out waiting for worker process tree cleanup",
+                error_type="WorkerCleanupTimeout",
+            )
+        return inline_youtube_worker(target, args, **kwargs)
+
+    monkeypatch.setattr(youtube, "run_process_worker", run)
+    with pytest.raises(youtube.YouTubeProcessError, match="Could not finish stopping"):
+        run_download(tmp_path, cancelled=lambda: canceled)
+    assert attempts == ["metadata", "captions"]
+    assert list(tmp_path.iterdir()) == []

@@ -170,6 +170,8 @@ def _run_application(
     if smoke_report:
         import yt_dlp_ejs.yt.solver as youtube_solver
 
+        from choicer_voicer_pack_creator.youtube import _run_youtube_stage, _YouTubeRequest
+
         youtube_runtime = youtube_runtime_path()
         youtube_runtime_version = media.run(
             [str(youtube_runtime), "--version"], "Checking YouTube JavaScript runtime"
@@ -182,6 +184,7 @@ def _run_application(
         analysis_manager = WhisperManager(Path(smoke_report).parent / "analysis-smoke")
         hardware = detect_hardware()
         activity_probe = Path(smoke_report).with_name("analysis-activity-smoke.wav")
+        youtube_probe_path = Path(smoke_report).with_name("youtube-worker-smoke.mp4")
         try:
             samples = array(
                 "h",
@@ -200,8 +203,19 @@ def _run_application(
                 lambda *_args: None,
                 lambda: False,
             )
+            media.run([
+                media.ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=s=32x32:r=10",
+                "-i", str(activity_probe), "-t", "1", "-c:v", "mpeg4", "-c:a", "aac",
+                str(youtube_probe_path),
+            ], "Creating YouTube worker smoke fixture")
+            youtube_probe = _run_youtube_stage(
+                _YouTubeRequest(activity_probe.parent, "", media.ffmpeg, youtube_runtime),
+                "probe", (media, youtube_probe_path), [],
+                lambda *_args: None, lambda: False,
+            )
         finally:
             activity_probe.unlink(missing_ok=True)
+            youtube_probe_path.unlink(missing_ok=True)
         Path(smoke_report).write_text(
             json.dumps(
                 {
@@ -220,6 +234,7 @@ def _run_application(
                     "activity_scan_threshold_db": activity_threshold,
                     "youtube_runtime": str(youtube_runtime),
                     "youtube_runtime_version": youtube_runtime_version.splitlines()[0],
+                    "youtube_worker_probe_duration": youtube_probe.duration,
                     "youtube_ejs_present": all(
                         (solver_root / name).is_file() for name in ("core.min.js", "lib.min.js")
                     ),
