@@ -372,7 +372,8 @@ def test_video_import_starts_analysis_without_waiting_for_backing(
     monkeypatch.setattr(main_window.WaveformWorker, "start", lambda _self: None)
     calls = []
     monkeypatch.setattr(
-        main_window.ProjectEditor, "generate_backing_track", lambda _self: calls.append("backing"),
+        main_window.ProjectEditor, "generate_backing_track",
+        lambda _self, **kwargs: calls.append(("backing", kwargs)),
     )
     monkeypatch.setattr(
         main_window.ProjectEditor, "open_analysis_dialog",
@@ -380,7 +381,7 @@ def test_video_import_starts_analysis_without_waiting_for_backing(
     )
     window.new_from_video()
     qtbot.waitUntil(lambda: len(calls) == 2)
-    assert calls == ["analysis", "backing"]
+    assert calls == ["analysis", ("backing", {"background": True})]
     assert window.project.video_path == str(source)
     window.dirty = False
     window.close()

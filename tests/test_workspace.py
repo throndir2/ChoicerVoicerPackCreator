@@ -634,8 +634,9 @@ def test_two_projects_share_exact_whisper_component_consent(workspace, qtbot, tm
     assert all(not editor._analysis_dialog._pending_scan for editor in editors)
 
 
+@pytest.mark.parametrize("background", [False, True])
 def test_backing_consent_keeps_other_project_request_when_one_closes(
-    workspace, qtbot, tmp_path, monkeypatch,
+    workspace, qtbot, tmp_path, monkeypatch, background,
 ):
     from choicer_voicer_pack_creator.separation import SeparationDownloadRequired
     from choicer_voicer_pack_creator.ui.backing_dialog import SeparationManager
@@ -659,8 +660,9 @@ def test_backing_consent_keeps_other_project_request_when_one_closes(
             PackProject(title=name, video_path=str(source), video_duration=5), dirty=False,
         )
         editors.append(editor)
-        editor.generate_backing_track()
+        editor.generate_backing_track(background=background)
     qtbot.waitUntil(lambda: all(editor._backing_dialog._pending_consent for editor in editors))
+    assert all(editor._backing_dialog.isVisible() is not background for editor in editors)
     box = workspace.setup_consent.box
     assert box is not None and box.text().count("Music-separation model") == 1
     first_id = editors[0].session.id

@@ -404,7 +404,7 @@ def test_main_window_loads_download_and_starts_caption_comparison(
     backing_runs = []
     monkeypatch.setattr(
         main_window.ProjectEditor, "generate_backing_track",
-        lambda editor: backing_runs.append(editor.project.video_path),
+        lambda editor, **kwargs: backing_runs.append((editor.project.video_path, kwargs)),
     )
     monkeypatch.setattr(
         main_window.ProjectEditor, "open_analysis_dialog",
@@ -413,7 +413,7 @@ def test_main_window_loads_download_and_starts_caption_comparison(
     window.new_from_youtube()
     qtbot.waitUntil(lambda: bool(scans))
     assert scans == [{"initial_scan": True, "auto_start": True}]
-    assert backing_runs == [str(result.video_path)]
+    assert backing_runs == [(str(result.video_path), {"background": True})]
     assert window.project.video_path == str(result.video_path)
     assert window.project.source_captions == result.captions
     assert window.project.source_url == result.url

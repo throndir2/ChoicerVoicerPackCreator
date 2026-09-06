@@ -6,7 +6,7 @@ from threading import Event, current_thread, main_thread
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QSettings, Qt
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -185,9 +185,11 @@ def test_workspace_whisper_and_refinement_start_independently_and_survive_use(
     assert len(accepted) == 1
 
 
-def test_workspace_backing_and_whisper_share_memory_lease_but_refinement_can_run(
-    qtbot, tmp_path, monkeypatch, installed_whisper, managed_jobs,
+@pytest.mark.parametrize("cpu_limit", [1, 2])
+def test_workspace_backing_and_whisper_overlap_within_cpu_budget(
+    qtbot, tmp_path, monkeypatch, installed_whisper, managed_jobs, cpu_limit,
 ):
+    managed_jobs.limits["cpu"] = cpu_limit
     backing_started, release_backing, whisper_started = Event(), Event(), Event()
     output = tmp_path / "backing.wav"
     output.write_bytes(b"backing")
@@ -204,6 +206,7 @@ def test_workspace_backing_and_whisper_share_memory_lease_but_refinement_can_run
     def analyze(*_args, use_whisper, **_kwargs):
         if use_whisper:
             whisper_started.set()
+            assert release_backing.wait(5)
         return AnalysisResult(
             [AnalysisSuggestion(1, 2, "Local result", "Whisper")],
             1, 1, -30, "tiny", "en", detect_hardware(),
@@ -215,8 +218,8 @@ def test_workspace_backing_and_whisper_share_memory_lease_but_refinement_can_run
     monkeypatch.setattr(backing_dialog, "SeparationManager", Separation)
     monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
     backing = backing_dialog.BackingDialog(
-        UnusedMedia(), tmp_path / "other-video.mp4", tmp_path / "backing-cache",
-        job_manager=managed_jobs, project_id="project-b",
+        UnusedMedia(), tmp_path / "video.mp4", tmp_path / "backing-cache",
+        job_manager=managed_jobs, project_id="project-a",
     )
     qtbot.addWidget(backing)
     dialog = None
@@ -228,13 +231,18 @@ def test_workspace_backing_and_whisper_share_memory_lease_but_refinement_can_run
             job_manager=managed_jobs, project_id="project-a",
         )
         qtbot.addWidget(dialog)
-        qtbot.waitUntil(lambda: dialog.refined_table.rowCount() == 1)
+        qtbot.waitUntil(lambda: dialog.worker is not None)
         assert backing.worker is not None
-        assert dialog.worker is not None
-        assert dialog.worker.job_handle.record.state in {"queued", "waiting"}
-        assert not whisper_started.is_set()
+        if cpu_limit == 2:
+            qtbot.waitUntil(whisper_started.is_set)
+            assert dialog.refined_table.rowCount() == 1
+            assert backing.worker.job_handle.record.state == "running"
+            assert dialog.worker.job_handle.record.state == "running"
+        else:
+            assert dialog.worker.job_handle.record.state in {"queued", "waiting"}
+            assert not whisper_started.is_set()
         assert {job.kind for job in managed_jobs.tasks("project-a")} == {
-            "analysis", "refinement",
+            "analysis", "refinement", "backing",
         }
     finally:
         release_backing.set()
@@ -245,6 +253,168 @@ def test_workspace_backing_and_whisper_share_memory_lease_but_refinement_can_run
             )
     assert whisper_started.is_set()
     assert {job.state for job in managed_jobs.tasks()} == {"succeeded"}
+
+
+@pytest.mark.parametrize("engine", ["whisper", "backing"])
+def test_same_inference_engine_stays_serial_across_projects(
+    qtbot, tmp_path, monkeypatch, installed_whisper, managed_jobs, engine,
+):
+    started, release = Event(), Event()
+    calls = []
+    output = tmp_path / "backing.wav"
+    output.write_bytes(b"backing")
+
+    def process(*_args, **_kwargs):
+        calls.append(len(calls))
+        started.set()
+        assert release.wait(5)
+        if engine == "backing":
+            return output
+        return AnalysisResult(
+            [AnalysisSuggestion(1, 2, "Local result", "Whisper")],
+            1, 1, -30, "tiny", "en", detect_hardware(),
+        )
+
+    monkeypatch.setattr(backing_dialog.SeparationManager, "generate", process)
+    monkeypatch.setattr(analysis_dialog, "analyze_video", process)
+    dialogs = []
+    try:
+        for project in ("first", "second"):
+            if engine == "backing":
+                dialog = backing_dialog.BackingDialog(
+                    UnusedMedia(), tmp_path / f"{project}.mp4", tmp_path / project,
+                    job_manager=managed_jobs, project_id=project,
+                )
+            else:
+                dialog = AnalysisDialog(
+                    UnusedMedia(), tmp_path / f"{project}.mp4", 10, tmp_path / project, 0,
+                    auto_start=True, job_manager=managed_jobs, project_id=project,
+                )
+            dialogs.append(dialog)
+            qtbot.addWidget(dialog)
+            qtbot.waitUntil(lambda dialog=dialog: dialog.worker is not None)
+            if project == "first":
+                qtbot.waitUntil(started.is_set)
+        qtbot.waitUntil(lambda: dialogs[1].worker.job_handle.record.state == "waiting")
+        assert calls == [0]
+        assert dialogs[1].worker.job_handle.record.message == "Waiting for shared files or components"
+    finally:
+        release.set()
+        qtbot.waitUntil(lambda: all(dialog.worker is None for dialog in dialogs))
+    assert calls == [0, 1]
+    assert {job.state for job in managed_jobs.tasks()} == {"succeeded"}
+
+
+@pytest.mark.parametrize("review_action", ["use-whisper", "cancel-whisper", "close-review"])
+@pytest.mark.parametrize("backing_fails", [False, True])
+def test_import_backing_runs_hidden_independently_of_transcript_review(
+    qtbot, tmp_path, monkeypatch, installed_whisper, review_action, backing_fails,
+):
+    backing_started, whisper_started = Event(), Event()
+    release_backing, release_whisper = Event(), Event()
+    output = tmp_path / "backing.wav"
+    output.write_bytes(b"backing")
+    source = tmp_path / "video.mp4"
+    source.write_bytes(b"video")
+    cancelled_backing = []
+
+    def generate(*_args, progress, cancelled, **_kwargs):
+        assert current_thread() is not main_thread()
+        progress("Separating music and effects", 0.5)
+        backing_started.set()
+        assert release_backing.wait(10)
+        cancelled_backing.append(cancelled())
+        if backing_fails:
+            raise RuntimeError("Synthetic backing failure")
+        return output
+
+    def analyze(*_args, progress, cancelled, **_kwargs):
+        assert current_thread() is not main_thread()
+        progress("Transcribing with Whisper", 0.5)
+        whisper_started.set()
+        while not release_whisper.wait(0.01):
+            if cancelled():
+                raise AnalysisCancelled("Whisper canceled")
+        return AnalysisResult(
+            [AnalysisSuggestion(1, 2, "Whisper result", "Whisper")],
+            1, 1, -30, "tiny", "en", detect_hardware(),
+        )
+
+    monkeypatch.setattr(backing_dialog.SeparationManager, "generate", generate)
+    monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
+    monkeypatch.setattr("choicer_voicer_pack_creator.ui.main_window.os.cpu_count", lambda: 4)
+    window = MainWindow(
+        SimpleNamespace(waveform_peaks=lambda *_a, **_kw: []),
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat),
+        analysis_data_root=tmp_path / "analysis",
+    )
+    qtbot.addWidget(window)
+    editor = window.active_editor
+    editor._set_project(PackProject(
+        video_path=str(source), video_duration=10,
+        source_url="https://www.youtube.com/watch?v=abcdefghijk",
+    ), None, mark_dirty=False)
+    try:
+        editor._finish_new_import(editor.project)
+        qtbot.waitUntil(lambda: backing_started.is_set() and whisper_started.is_set())
+        backing = editor._backing_dialog
+        review = editor._analysis_dialog
+        handle = backing.worker.job_handle
+        assert handle.record.state == "running"
+        assert review.worker.job_handle.record.state == "running"
+        assert not backing.isVisible()
+        assert not editor.generate_backing_track(background=True)
+        assert not backing.isVisible()
+        assert not window.tasks_window.isVisible()
+
+        if review_action == "use-whisper":
+            release_whisper.set()
+            qtbot.waitUntil(lambda: review.worker is None)
+            review.local_add_button.click()
+            assert [segment.caption for segment in editor.project.segments] == ["Whisper result"]
+        elif review_action == "cancel-whisper":
+            review.cancel_button.click()
+            qtbot.waitUntil(lambda: review.worker is None)
+            assert not editor.project.segments
+            review.close()
+        else:
+            review.close()
+        assert not review.isVisible()
+        assert handle.record.active and not handle.record.cancel_requested
+        assert editor.project.backing_track_path == ""
+
+        tasks = window.tasks_window
+        tasks.show_action.trigger()
+        row = next(
+            row for row in range(tasks.table.rowCount())
+            if tasks.table.item(row, 0).data(Qt.ItemDataRole.UserRole) == handle.id
+        )
+        tasks.table.selectRow(row)
+        qtbot.waitUntil(lambda: "Separating music and effects" in tasks.details.toPlainText())
+        release_backing.set()
+        qtbot.waitUntil(lambda: not handle.record.active)
+        assert not backing.isVisible()
+        if backing_fails:
+            assert handle.record.state == "failed"
+            assert "Synthetic backing failure" in tasks.details.toPlainText()
+            qtbot.waitUntil(tasks.retry_button.isEnabled)
+            assert editor.project.backing_track_path == ""
+            backing_fails = False
+            tasks.retry_button.click()
+            qtbot.waitUntil(lambda: editor.project.backing_track_path == str(output))
+            assert not backing.isVisible()
+            assert cancelled_backing == [False, False]
+        else:
+            assert handle.record.state == "succeeded"
+            assert editor.project.backing_track_path == str(output)
+            assert "succeeded" in tasks.details.toPlainText()
+            assert cancelled_backing == [False]
+    finally:
+        release_backing.set()
+        release_whisper.set()
+        qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
+        editor.dirty = False
+        window.close()
 
 
 def test_workspace_autostart_download_consent_is_nonmodal_and_does_not_delay_refinement(
@@ -1263,7 +1433,7 @@ def test_new_local_video_starts_whisper_automatically(qtbot, tmp_path, monkeypat
     window = MainWindow(media, analysis_data_root=tmp_path / "analysis")
     qtbot.addWidget(window)
     scans = []
-    monkeypatch.setattr(ProjectEditor, "generate_backing_track", lambda _self: False)
+    monkeypatch.setattr(ProjectEditor, "generate_backing_track", lambda _self, **_kwargs: False)
     monkeypatch.setattr(
         ProjectEditor, "open_analysis_dialog", lambda _self, **kwargs: scans.append(kwargs),
     )

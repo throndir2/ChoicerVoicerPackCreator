@@ -1064,7 +1064,7 @@ class AnalysisDialog(QDialog):
                 "Refine YouTube captions" if refine else
                 "Whisper transcription" if use_whisper else "Scan audio",
                 resource_class="cpu", read_paths=(self.video,),
-                resource_keys=("local-inference",) if use_whisper else (),
+                resource_keys=("whisper-inference",) if use_whisper else (),
                 source_snapshot=self.source_snapshot,
             )
         diagnostic_event(
