@@ -216,8 +216,12 @@ or reference prepared local assets. The MCP tools also do not provide OCR or wik
 ## Create a pack
 
 1. Choose **File → New from Video**.
-2. Once the source is ready, start editing immediately. Waveform, backing generation, and local
-   analysis run as independent background tasks. A shared nonmodal prompt combines requests for
+2. Once the source is ready, start editing immediately. Transcript analysis, voice-fingerprint
+   preparation, and backing generation use the shared background queue. The inline
+   **Background processing** panel shows their progress, permission requests, and cancel/retry
+   actions; **Review** opens the transcript when you want it, without an automatic popup.
+   Voice preparation starts as dialogue ranges become available, before you name any characters.
+   A shared nonmodal prompt combines requests for
    missing runtime/model versions across projects. Declining keeps your media and drafts; other
    workflows continue. Review and explicitly use only the suggestions you want to add.
 3. Assign a speaker and verify every suggested caption and boundary against the source video.
@@ -271,9 +275,11 @@ requested; it never opens automatically or takes space from the editor. Filter i
 or the current project, inspect stage progress and elapsed time, cancel supported work, reopen
 review/details, or open a successful output. Closing the Tasks window does not stop processing.
 CPU, I/O, and network budgets bound concurrent work; jobs sharing output files or inference
-components wait rather than overwrite each other. Whisper and backing separation use independent
-inference slots and can run together when the CPU budget permits (four or more logical CPUs).
-Only one job per inference engine runs at a time across projects. You can edit or save another
+components wait rather than overwrite each other. One CPU-heavy job runs at a time across
+projects to leave room for preview and editing. Among queued jobs, waveform and transcript work
+take priority, then voice preparation, then backing generation. Already-running jobs are not
+interrupted when higher-priority work arrives. Cached voice comparisons use the I/O queue and
+can finish even while backing generation occupies the CPU queue. You can edit or save another
 project while a pack exports, a source opens, or analysis runs.
 
 **Retry** is enabled for failed/canceled analysis, refinement, YouTube imports, exports, and failed
@@ -676,10 +682,15 @@ file, or Still image to relink the missing asset.
 With **Auto-fill matching speakers in the background** enabled in the Segments panel, finish
 typing a speaker name (Enter or move focus out of the field) to compare that voice with eligible
 unassigned segments. You can keep editing captions, timings, and other projects while it runs.
+New video imports prepare name-independent fingerprints from eligible transcript draft ranges
+before those drafts are added as segments. New or retimed segments are prepared incrementally.
+Whisper and YouTube drafts keep their independent ranges; identical ranges share cached fingerprints.
+No names are guessed during preparation, and unfinished or short draft ranges are skipped.
 The first use requests permission for a checksum-verified WeSpeaker voice model (about 25 MiB).
 Inference is local, needs no account or token, and does not upload audio or transcripts.
 **Match now** starts or retries a pass; **Cancel** pauses matching until explicitly resumed.
-Progress and cancellation are also available in **Tools > Tasks**.
+Progress, permission status, and cancellation are also available in **Background processing**
+and **Tools > Tasks**. Cancel pauses both preparation and automatic matching until resumed.
 
 Only strong matches fill blank names. Existing names are never replaced. Results for segments
 edited, removed, or retimed during processing are discarded; changing a reference name causes a
@@ -695,8 +706,11 @@ The project-wide enabled setting and each segment's assignment/exclusion state s
 Automatic changes mark the project unsaved; use **Save Project** to persist them.
 
 Voice signatures are cached locally by model/preprocessing version, source-file identity, and
-audio range; a name change reuses the signatures instead of retranscribing or separating audio.
-Matching uses at most two inference threads and does not run full-video speaker diarization.
+audio range, independently of names or segment IDs. Naming a prepared line uses only cached
+signatures: it does not load or verify a model, decode audio, or launch inference. Missing,
+damaged, or stale signatures return to the bounded preparation queue rather than doing expensive
+work in the comparison task.
+Preparation uses at most two inference threads and does not run full-video speaker diarization.
 Each clip uses at most its central 12 seconds, with at least 1.5 seconds of audible activity
 required; this bounds the work but does not prove the sampled clip contains only one speaker.
 Source media and preserved prompt recordings are never modified. Closing a tab with
@@ -717,10 +731,10 @@ Use **Duplicate Segment** to create a second prompt at exactly the same timestam
 
 For newly cut segments, prompt audio comes from the source video. The exporter normalizes it and adds 150 ms head / 250 ms tail padding by default; both values are editable. Imported or manually chosen prompt files are preserved when already MP3 and converted otherwise.
 
-**New from Video** and **New from YouTube** automatically generate music/effects backing alongside
-transcript analysis, without opening a separate backing-generation popup. The analysis review's
+**New from Video** and **New from YouTube** automatically queue music/effects backing along with
+transcript analysis and voice preparation, without opening processing popups. The analysis review's
 transcript selection does not control backing generation: choosing a transcript, canceling a scan,
-or closing the review leaves backing running independently. **Tools > Tasks** retains each job's
+or closing the review leaves backing queued or running independently. **Tools > Tasks** retains each job's
 progress and error log and offers explicit cancellation, retry, and details, even after the
 transcript review is closed.
 The first run asks permission to download a pinned, checksum-verified

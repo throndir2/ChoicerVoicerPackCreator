@@ -342,7 +342,6 @@ def test_import_backing_runs_hidden_independently_of_transcript_review(
 
     monkeypatch.setattr(backing_dialog.SeparationManager, "generate", generate)
     monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
-    monkeypatch.setattr("choicer_voicer_pack_creator.ui.main_window.os.cpu_count", lambda: 4)
     window = MainWindow(
         SimpleNamespace(waveform_peaks=lambda *_a, **_kw: []),
         settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat),
@@ -356,12 +355,13 @@ def test_import_backing_runs_hidden_independently_of_transcript_review(
     ), None, mark_dirty=False)
     try:
         editor._finish_new_import(editor.project)
-        qtbot.waitUntil(lambda: backing_started.is_set() and whisper_started.is_set())
+        qtbot.waitUntil(whisper_started.is_set)
         backing = editor._backing_dialog
         review = editor._analysis_dialog
         handle = backing.worker.job_handle
-        assert handle.record.state == "running"
+        assert handle.record.state == "waiting"
         assert review.worker.job_handle.record.state == "running"
+        assert not review.isVisible()
         assert not backing.isVisible()
         assert not editor.generate_backing_track(background=True)
         assert not backing.isVisible()
@@ -379,6 +379,8 @@ def test_import_backing_runs_hidden_independently_of_transcript_review(
             review.close()
         else:
             review.close()
+            release_whisper.set()
+        qtbot.waitUntil(backing_started.is_set)
         assert not review.isVisible()
         assert handle.record.active and not handle.record.cancel_requested
         assert editor.project.backing_track_path == ""
@@ -1423,9 +1425,81 @@ def test_new_local_video_starts_whisper_automatically(qtbot, tmp_path, monkeypat
     )
     window.new_from_video()
     qtbot.waitUntil(lambda: bool(scans))
-    assert scans == [{"initial_scan": True, "auto_start": True}]
+    assert scans == [{"initial_scan": True, "auto_start": True, "background": True}]
     window.dirty = False
     window.close()
+
+
+def test_import_prepares_unnamed_transcript_before_queued_backing(
+    qtbot, tmp_path, monkeypatch, installed_whisper,
+):
+    from choicer_voicer_pack_creator.operations import SourceSnapshot
+    from choicer_voicer_pack_creator.speaker_matching import SpeakerPreparationResult
+    from choicer_voicer_pack_creator.ui import speaker_matching
+
+    source, output = tmp_path / "video.mp4", tmp_path / "backing.wav"
+    source.write_bytes(b"video")
+    output.write_bytes(b"backing")
+    order = []
+    prepared = []
+
+    def analyze(*_args, **_kwargs):
+        order.append("transcript")
+        return AnalysisResult(
+            [
+                AnalysisSuggestion(0, 3, "First line", "Whisper"),
+                AnalysisSuggestion(4, 7, "Second line", "Whisper"),
+            ],
+            2, 2, -30, "tiny", "en", detect_hardware(),
+        )
+
+    class Voices:
+        def __init__(self, _root):
+            pass
+
+        def prepare(self, _media, clips, **_kwargs):
+            assert current_thread() is not main_thread()
+            order.append("voices")
+            prepared.extend(clips)
+            return SpeakerPreparationResult(
+                SourceSnapshot.capture(clip.path for clip in clips), len(clips), 0, 0,
+            )
+
+    def generate(*_args, **_kwargs):
+        order.append("backing")
+        return output
+
+    monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
+    monkeypatch.setattr(speaker_matching, "SpeakerMatchingManager", Voices)
+    monkeypatch.setattr(backing_dialog.SeparationManager, "generate", generate)
+    window = MainWindow(
+        SimpleNamespace(waveform_peaks=lambda *_a, **_kw: []),
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat),
+        analysis_data_root=tmp_path / "analysis",
+    )
+    qtbot.addWidget(window)
+    editor = window.active_editor
+    editor._set_project(PackProject(
+        video_path=str(source), video_duration=10,
+    ), None, mark_dirty=False)
+    try:
+        editor._finish_new_import(editor.project)
+        qtbot.waitUntil(lambda: editor.project.backing_track_path == str(output), timeout=10000)
+        qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
+        assert order == ["transcript", "voices", "backing"]
+        assert len(prepared) == 2
+        assert all(not clip.characters for clip in prepared)
+        assert not editor.project.segments
+        assert not editor._analysis_dialog.isVisible()
+        assert not window.tasks_window.isVisible()
+        assert all(
+            editor.processing.group_state(group).state == "ready"
+            for group in ("transcript", "voices", "backing")
+        )
+    finally:
+        editor.speaker_matching.close_processing()
+        editor.dirty = False
+        window.close()
 
 
 def test_source_labels_and_play_action_identify_the_selected_transcript(qtbot, tmp_path):

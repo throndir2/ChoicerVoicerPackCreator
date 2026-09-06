@@ -417,7 +417,7 @@ def test_main_window_imports_youtube_title_and_saves_with_safe_filename(
     )
     window.new_from_youtube()
     qtbot.waitUntil(lambda: bool(scans))
-    assert scans == [{"initial_scan": True, "auto_start": True}]
+    assert scans == [{"initial_scan": True, "auto_start": True, "background": True}]
     assert backing_runs == [(str(result.video_path), {"background": True})]
     assert window.project.video_path == str(result.video_path)
     assert window.project.source_captions == result.captions

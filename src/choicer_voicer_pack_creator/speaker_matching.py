@@ -11,8 +11,9 @@ import math
 import os
 import shutil
 import uuid
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,16 @@ class SpeakerDownloadRequired(SpeakerMatchingError):
     """Missing or damaged optional model; downloading/repair needs explicit consent."""
 
 
+class SpeakerPreparationRequired(SpeakerMatchingError):
+    """Missing or damaged signatures; schedule preparation before retrying scoring."""
+
+    def __init__(self, segment_ids: tuple[str, ...]) -> None:
+        self.segment_ids = segment_ids
+        super().__init__(
+            f"Voice preparation is required for {len(segment_ids)} clip(s) before matching."
+        )
+
+
 class SpeakerMatchingCancelled(SpeakerMatchingError, OperationCancelled):
     pass
 
@@ -80,6 +91,17 @@ class SpeakerResult:
     matches: tuple[SpeakerMatch, ...]
     sources: SourceSnapshot
     examined: int
+    cached: int
+    skipped: int
+    skip_reasons: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SpeakerPreparationResult:
+    """Per-clip counts: prepared includes usable cache hits; cached includes cached skips."""
+
+    sources: SourceSnapshot
+    prepared: int
     cached: int
     skipped: int
     skip_reasons: tuple[tuple[str, str], ...] = ()
@@ -249,8 +271,6 @@ class SpeakerMatchingManager:
         ).hexdigest()
 
     def _read_cache(self, key: str) -> dict[str, Any] | None:
-        import numpy as np
-
         path = self.cache_directory / f"{key}.json"
         try:
             if path.stat().st_size > 32768:
@@ -262,16 +282,25 @@ class SpeakerMatchingManager:
             encoded = json.dumps(record, sort_keys=True, allow_nan=False).encode("utf-8")
             if hashlib.sha256(encoded).hexdigest() != value.get("sha256"):
                 return None
-            if record["reason"] not in {"", "short", "silence", "nonfinite", "no-audio"}:
-                return None
-            if record["reason"]:
-                return record if record["embedding"] is None else None
-            vector = np.asarray(record["embedding"], dtype=np.float32)
-            if vector.shape != (EMBEDDING_DIMENSIONS,) or not np.isfinite(vector).all():
-                return None
-            return record if abs(float(np.linalg.norm(vector)) - 1) < 1e-4 else None
+            return record if self._valid_record(record) else None
         except (OSError, ValueError, TypeError, KeyError, OverflowError):
             return None
+
+    @staticmethod
+    def _valid_record(record: Any) -> bool:
+        import numpy as np
+
+        try:
+            if record["reason"] not in {"", "short", "silence", "nonfinite", "no-audio"}:
+                return False
+            if record["reason"]:
+                return record["embedding"] is None
+            vector = np.asarray(record["embedding"], dtype=np.float32)
+            if vector.shape != (EMBEDDING_DIMENSIONS,) or not np.isfinite(vector).all():
+                return False
+            return abs(float(np.linalg.norm(vector)) - 1) < 1e-4
+        except (ValueError, TypeError, KeyError, OverflowError):
+            return False
 
     def _write_cache(self, key: str, record: dict[str, Any], job: Path) -> None:
         encoded = json.dumps(record, sort_keys=True, allow_nan=False).encode("utf-8")
@@ -289,47 +318,72 @@ class SpeakerMatchingManager:
         self, media: MediaTools, clips: tuple[SpeakerClip, ...], *,
         allow_download: bool, progress: ProgressCallback, cancelled: CancelCallback,
     ) -> SpeakerResult:
-        job = self.data_root / "speaker-jobs" / uuid.uuid4().hex
+        """Standalone matching, preparing missing signatures when necessary."""
+        with self._source_scope(clips, progress, cancelled) as sources:
+            eligible, reasons = self._eligible_clips(clips, matching=True)
+            if not self._can_match(eligible):
+                return SpeakerResult((), sources, 0, 0, len(reasons), tuple(reasons))
+            keys, records, pending, cached = self._load_records(eligible, sources)
+            self._prepare_records(
+                media, pending, records, sources, allow_download, progress, cancelled,
+            )
+            return self._score(clips, keys, records, sources, cached, reasons, progress)
+
+    def prepare(
+        self, media: MediaTools, clips: tuple[SpeakerClip, ...], *,
+        allow_download: bool, progress: ProgressCallback, cancelled: CancelCallback,
+    ) -> SpeakerPreparationResult:
+        """Cache fingerprints without using or passing character labels to inference."""
+        clips = tuple(replace(clip, characters=()) for clip in clips)
+        with self._source_scope(clips, progress, cancelled) as sources:
+            eligible, reasons = self._eligible_clips(clips, matching=False)
+            keys, records, pending, cached = self._load_records(eligible, sources)
+            self._prepare_records(
+                media, pending, records, sources, allow_download, progress, cancelled,
+            )
+            signatures = self._signatures(clips, keys, records, reasons, progress)
+            sources.verify()
+            progress(
+                f"Voice preparation finished: {len(signatures)} prepared; {len(reasons)} skipped.",
+                1.0,
+            )
+            return SpeakerPreparationResult(
+                sources, len(signatures), cached, len(reasons), tuple(reasons),
+            )
+
+    def match_cached(
+        self, media: MediaTools, clips: tuple[SpeakerClip, ...], *,
+        progress: ProgressCallback, cancelled: CancelCallback,
+    ) -> SpeakerResult:
+        """Score cached fingerprints only; media is accepted but never inspected."""
+        with self._source_scope(clips, progress, cancelled) as sources:
+            eligible, reasons = self._eligible_clips(clips, matching=True)
+            keys, records, pending, cached = self._load_records(eligible, sources)
+            if pending:
+                raise SpeakerPreparationRequired(tuple(
+                    clip.segment_id for clip in eligible if keys[clip.segment_id] in pending
+                ))
+            return self._score(clips, keys, records, sources, cached, reasons, progress)
+
+    @contextmanager
+    def _source_scope(
+        self, clips: tuple[SpeakerClip, ...], progress: ProgressCallback,
+        cancelled: CancelCallback,
+    ) -> Iterator[SourceSnapshot]:
         try:
             with operation_scope(cancelled, progress):
                 self._validate_clips(clips)
                 with path_leases(read_paths=(clip.path for clip in clips)):
                     sources = SourceSnapshot.capture(clip.path for clip in clips)
-                    eligible = tuple(
-                        clip for clip in clips
-                        if clip.end is None or clip.end - clip.start >= MIN_ACTIVE_SECONDS
-                    )
-                    if not any(len(clip.characters) == 1 for clip in eligible) or not any(
-                        not clip.characters for clip in eligible
-                    ):
-                        reasons = tuple(
-                            (
-                                clip.segment_id,
-                                "multiple-characters" if len(clip.characters) > 1 else "short",
-                            )
-                            for clip in clips
-                            if len(clip.characters) > 1 or (
-                                clip.end is not None and clip.end - clip.start < MIN_ACTIVE_SECONDS
-                            )
-                        )
-                        sources.verify()
-                        return SpeakerResult((), sources, 0, 0, len(reasons), reasons)
-                    job.mkdir(parents=True)
-                    self._ensure_model(job, allow_download, progress, cancelled)
-                    with path_leases(
-                        read_paths=(self.model_path,),
-                        write_paths=(self.cache_directory,),
-                    ):
-                        return self._match(media, clips, sources, job, progress, cancelled)
+                    yield sources
+                    check_cancelled()
+                    sources.verify()
         except OperationCancelled as error:
             raise SpeakerMatchingCancelled("Speaker matching was canceled") from error
         except SpeakerMatchingError:
             raise
         except (OSError, ValueError, SourceChangedError, ProcessWorkerError, AnalysisError) as error:
             raise SpeakerMatchingError(f"Local speaker matching failed: {error}") from error
-        finally:
-            if job.exists():
-                shutil.rmtree(job)
 
     @staticmethod
     def _validate_clips(clips: tuple[SpeakerClip, ...]) -> None:
@@ -349,32 +403,58 @@ class SpeakerMatchingManager:
                 raise SpeakerMatchingError("A speaker-matching source file is missing")
             ids.add(clip.segment_id)
 
-    def _match(
-        self, media: MediaTools, clips: tuple[SpeakerClip, ...], sources: SourceSnapshot,
-        job: Path, progress: ProgressCallback, cancelled: CancelCallback,
-    ) -> SpeakerResult:
-        from choicer_voicer_pack_creator.speaker_worker import embed_clips
+    @staticmethod
+    def _eligible_clips(
+        clips: tuple[SpeakerClip, ...], *, matching: bool,
+    ) -> tuple[tuple[SpeakerClip, ...], list[tuple[str, str]]]:
+        eligible = []
+        reasons = []
+        for clip in clips:
+            check_cancelled()
+            if matching and len(clip.characters) > 1:
+                reasons.append((clip.segment_id, "multiple-characters"))
+            elif clip.end is not None and clip.end - clip.start < MIN_ACTIVE_SECONDS:
+                reasons.append((clip.segment_id, "short"))
+            else:
+                eligible.append(clip)
+        return tuple(eligible), reasons
 
+    @staticmethod
+    def _can_match(clips: tuple[SpeakerClip, ...]) -> bool:
+        return any(len(clip.characters) == 1 for clip in clips) and any(
+            not clip.characters for clip in clips
+        )
+
+    def _load_records(
+        self, clips: tuple[SpeakerClip, ...], sources: SourceSnapshot,
+    ) -> tuple[dict[str, str], dict[str, Any], dict[str, SpeakerClip], int]:
         keys = {}
         records = {}
         pending = {}
         cached = 0
-        reasons = []
-        for clip in clips:
-            check_cancelled()
-            if len(clip.characters) > 1:
-                reasons.append((clip.segment_id, "multiple-characters"))
-                continue
-            if clip.end is not None and clip.end - clip.start < MIN_ACTIVE_SECONDS:
-                reasons.append((clip.segment_id, "short"))
-                continue
-            key = keys[clip.segment_id] = self._cache_key(clip, sources)
-            record = self._read_cache(key)
-            if record is not None:
-                records[key] = record
-                cached += 1
-            else:
-                pending.setdefault(key, clip)
+        with path_leases(read_paths=(self.cache_directory,)):
+            for clip in clips:
+                check_cancelled()
+                key = keys[clip.segment_id] = self._cache_key(clip, sources)
+                if key not in records and key not in pending:
+                    record = self._read_cache(key)
+                    if record is None:
+                        pending[key] = replace(clip, characters=())
+                    else:
+                        records[key] = record
+                cached += key in records
+        check_cancelled()
+        sources.verify()
+        return keys, records, pending, cached
+
+    def _prepare_records(
+        self, media: MediaTools, pending: dict[str, SpeakerClip], records: dict[str, Any],
+        sources: SourceSnapshot, allow_download: bool, progress: ProgressCallback,
+        cancelled: CancelCallback,
+    ) -> None:
+        if not pending:
+            return
+        from choicer_voicer_pack_creator.speaker_worker import embed_clips
 
         def on_event(event: str, details: dict) -> bool:
             if event != "progress":
@@ -382,24 +462,52 @@ class SpeakerMatchingManager:
             progress(details["message"], details["fraction"])
             return True
 
-        if pending:
-            generated = run_process_worker(
-                embed_clips,
-                (str(self.model_path), media.ffmpeg, media.ffprobe, str(job), tuple(pending.items())),
-                on_event=on_event, cancelled=cancelled,
-                timeout=180 + 120 * len(pending), idle_timeout=120,
-            )
+        job = self.data_root / "speaker-jobs" / uuid.uuid4().hex
+        try:
+            job.mkdir(parents=True)
+            self._ensure_model(job, allow_download, progress, cancelled)
+            with path_leases(read_paths=(self.model_path,)):
+                generated = run_process_worker(
+                    embed_clips,
+                    (
+                        str(self.model_path), media.ffmpeg, media.ffprobe,
+                        str(job), tuple(pending.items()),
+                    ),
+                    on_event=on_event, cancelled=cancelled,
+                    timeout=180 + 120 * len(pending), idle_timeout=120,
+                )
             check_cancelled()
             sources.verify()
-            if set(generated) != set(pending):
+            if not isinstance(generated, dict) or set(generated) != set(pending):
                 raise SpeakerMatchingError("Speaker worker returned an incomplete signature set")
-            for key, record in generated.items():
-                check_cancelled()
-                self._write_cache(key, record, job)
-                records[key] = record
+            if any(not self._valid_record(record) for record in generated.values()):
+                raise SpeakerMatchingError("Speaker worker returned an invalid signature")
+            # Do not block cached comparisons for the duration of inference.
+            with path_leases(write_paths=(self.cache_directory,)):
+                published = []
+                try:
+                    for key, record in generated.items():
+                        check_cancelled()
+                        if self._read_cache(key) is None:
+                            published.append(self.cache_directory / f"{key}.json")
+                            self._write_cache(key, record, job)
+                    check_cancelled()
+                    sources.verify()
+                except BaseException:
+                    for path in published:
+                        path.unlink(missing_ok=True)
+                    raise
+            records.update(generated)
+        finally:
+            if job.exists():
+                shutil.rmtree(job)
 
+    @staticmethod
+    def _signatures(
+        clips: tuple[SpeakerClip, ...], keys: dict[str, str], records: dict[str, Any],
+        reasons: list[tuple[str, str]], progress: ProgressCallback,
+    ) -> dict[str, Any]:
         signatures = {}
-        examined = 0
         for clip in clips:
             check_cancelled()
             if clip.segment_id not in keys:
@@ -410,7 +518,15 @@ class SpeakerMatchingManager:
                 progress(f"Skipped voice clip {clip.segment_id}: {record['reason']}.", None)
             else:
                 signatures[clip.segment_id] = record["embedding"]
-                examined += not clip.characters
+        return signatures
+
+    def _score(
+        self, clips: tuple[SpeakerClip, ...], keys: dict[str, str], records: dict[str, Any],
+        sources: SourceSnapshot, cached: int, reasons: list[tuple[str, str]],
+        progress: ProgressCallback,
+    ) -> SpeakerResult:
+        signatures = self._signatures(clips, keys, records, reasons, progress)
+        examined = sum(not clip.characters and clip.segment_id in signatures for clip in clips)
         matches = choose_matches(clips, signatures)
         matched = {match.segment_id for match in matches}
         reasons.extend(

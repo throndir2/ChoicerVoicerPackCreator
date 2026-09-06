@@ -26,6 +26,7 @@ from choicer_voicer_pack_creator.ui.analysis_dialog import (
     _current_dialog_request,
     _workspace_for,
     register_job_detail,
+    report_processing,
     show_message,
 )
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
@@ -104,6 +105,7 @@ class BackingDialog(QDialog):
         self._outcome = ""
         self._closing = False
         self._pending_consent = False
+        self._consent_callback = None
         self.setWindowTitle("Generate backing track")
         self.setMinimumWidth(540)
         layout = QVBoxLayout(self)
@@ -156,6 +158,7 @@ class BackingDialog(QDialog):
                 resource_class="cpu", read_paths=(self.video,),
                 resource_keys=("separation-inference", f"separation:{self.data_root.resolve()}"),
                 source_snapshot=self.source_snapshot,
+                priority=-10,
             )
         worker.progress.connect(self._progress)
         worker.completed.connect(self._completed)
@@ -225,11 +228,13 @@ class BackingDialog(QDialog):
 
             def consent(accepted: bool) -> None:
                 self._pending_consent = False
+                self._consent_callback = None
                 diagnostic_event("backing_download_consent", accepted=accepted)
                 if accepted and not self._closing:
                     self.start(allow_download=True)
                 else:
                     self.progress_label.setText("Backing generation not started; download declined.")
+                    report_processing(self, "backing", "cancelled", "Backing download declined; use Retry to resume.")
                     self.close_button.setText("Close")
                     self.retry_button.setVisible(True)
                     if self.job_manager is None:
@@ -238,6 +243,8 @@ class BackingDialog(QDialog):
             coordinator = getattr(_workspace_for(self), "setup_consent", None)
             if coordinator is not None:
                 model = self.manager.manifest["model"]
+                self._consent_callback = consent
+                report_processing(self, "backing", "consent", "Waiting for backing-model download permission.")
                 coordinator.request(
                     self.project_id,
                     {f"separation:{model['sha256']}": f"Music-separation model (~{size:.0f} MiB)"},
@@ -272,6 +279,11 @@ class BackingDialog(QDialog):
 
     def cancel_generation(self) -> None:
         self._closing = True
+        if self._consent_callback is not None:
+            coordinator = getattr(_workspace_for(self), "setup_consent", None)
+            if coordinator is not None:
+                coordinator.cancel_request(self._consent_callback)
+        report_processing(self, "backing", "cancelled", "Backing generation paused; existing audio kept.")
         if self.worker is not None:
             self.worker.requestInterruption()
             self.close_button.setEnabled(False)

@@ -91,6 +91,12 @@ def register_job_detail(
             dialog.destroyed.connect(lambda: tasks.unregister_retry(job_id))
 
 
+def report_processing(dialog: QWidget, kind: str, state: str, message: str) -> None:
+    model = getattr(dialog.parentWidget(), "processing", None)
+    if model is not None and _current_dialog_request(dialog)():
+        model.set_status(kind, state, message)
+
+
 def _job_manager_for(parent: QWidget):
     return getattr(parent, "job_manager", None) or getattr(
         getattr(parent, "workspace", None), "job_manager", None,
@@ -325,6 +331,7 @@ class AnalysisDialog(QDialog):
         job_manager=None,
         project_id: str | None = None,
         source_snapshot=None,
+        background: bool = False,
     ) -> None:
         super().__init__(parent)
         self.media = media
@@ -338,6 +345,8 @@ class AnalysisDialog(QDialog):
         self.job_manager = job_manager
         self.project_id = project_id
         self.source_snapshot = source_snapshot
+        self.background = background
+        self._consent_callback: Callable[[bool], None] | None = None
         if job_manager is not None:
             self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self._draft_revisions = {False: 0, True: 0}
@@ -662,7 +671,7 @@ class AnalysisDialog(QDialog):
                 QTimer.singleShot(0, self._start_pending_refinement)
         elif auto_start:
             diagnostic_event("analysis_auto_start_scheduled")
-            QTimer.singleShot(0, self.start_scan)
+            QTimer.singleShot(0, self._start_automatic_scan)
 
     @property
     def add_button(self) -> QPushButton:
@@ -904,11 +913,13 @@ class AnalysisDialog(QDialog):
 
         def start(accepted: bool) -> None:
             self._pending_scan = False
+            self._consent_callback = None
             self._update_scan_button()
             if accepted and not self._close_after_cancel:
                 self._start_worker(use_whisper=use_whisper, model_key=model_key, language=language)
             else:
                 self.progress_label.setText(f"Whisper not started. {self._recovery_hint()}")
+                report_processing(self, "analysis", "cancelled", "Transcription paused; existing drafts kept.")
 
         if use_whisper:
             try:
@@ -919,9 +930,11 @@ class AnalysisDialog(QDialog):
                 self.progress_label.setText(f"Whisper not started. {hint}")
                 self._pending_scan = False
                 self._update_scan_button()
-                show_message(
-                    self, "critical", "Whisper setup is unavailable", f"{error}\n\n{hint}"
-                )
+                report_processing(self, "analysis", "failed", f"Whisper setup is unavailable: {error}")
+                if not self.background or self.isVisible():
+                    show_message(
+                        self, "critical", "Whisper setup is unavailable", f"{error}\n\n{hint}"
+                    )
                 return
             model_missing = not manager.model_path(model_key).is_file()
             runtime_missing = not manager.cli_path.is_file()
@@ -947,6 +960,8 @@ class AnalysisDialog(QDialog):
                         components[f"whisper-model:{manager.models[model_key]['sha256']}"] = (
                             f"Whisper {model_key} model (~{download_mib:.0f} MiB)"
                         )
+                    self._consent_callback = consent
+                    report_processing(self, "analysis", "consent", "Waiting for Whisper download permission.")
                     coordinator.request(
                         self.project_id, components, consent, _current_dialog_request(self),
                     )
@@ -964,11 +979,17 @@ class AnalysisDialog(QDialog):
         start(True)
 
     def _start_automatic_refinement(self) -> None:
+        if self._scan_canceled or self._close_after_cancel:
+            return
         if self.job_manager is not None:
             self._start_pending_refinement()
             self.start_scan()
             return
         self._start_pending_refinement(start_whisper=True)
+
+    def _start_automatic_scan(self) -> None:
+        if not self._scan_canceled and not self._close_after_cancel:
+            self.start_scan()
 
     def _start_pending_refinement(self, *, start_whisper: bool = False) -> None:
         running = self.refinement_worker if self.job_manager is not None else self.worker
@@ -1062,6 +1083,7 @@ class AnalysisDialog(QDialog):
                 resource_class="cpu", read_paths=(self.video,),
                 resource_keys=("whisper-inference",) if use_whisper else (),
                 source_snapshot=self.source_snapshot,
+                priority=20,
             )
         diagnostic_event(
             "analysis_worker_start_requested", worker_id=worker.worker_id,
@@ -1299,10 +1321,11 @@ class AnalysisDialog(QDialog):
         self.progress_label.setText(status)
         (self.refined_status if refine else self.local_status).setText(status)
         self._set_idle()
-        show_message(
-            self, "critical", "Video analysis failed",
-            f"{message}\n\n{hint}\n\nDiagnostic log: {self.log_path}"
-        )
+        if not self.background or self.isVisible():
+            show_message(
+                self, "critical", "Video analysis failed",
+                f"{message}\n\n{hint}\n\nDiagnostic log: {self.log_path}"
+            )
 
     @Slot()
     def _canceled(self) -> None:
@@ -1460,6 +1483,14 @@ class AnalysisDialog(QDialog):
 
     def cancel_scan(self) -> None:
         self._whisper_after_refinement = False
+        self._scan_canceled = True
+        if self._consent_callback is not None:
+            coordinator = getattr(_workspace_for(self), "setup_consent", None)
+            if coordinator is not None:
+                coordinator.cancel_request(self._consent_callback)
+        report_processing(self, "analysis", "cancelled", "Transcription paused; existing drafts kept.")
+        if self.source_captions:
+            report_processing(self, "refinement", "cancelled", "YouTube refinement paused.")
         diagnostic_event("analysis_cancel_requested", running=self.worker is not None)
         workers = [worker for worker in (self.worker, self.refinement_worker) if worker is not None]
         if workers:
