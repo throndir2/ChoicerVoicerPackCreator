@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 from uuid import uuid4
 
-from PySide6.QtCore import QBuffer, QIODevice, QObject, Qt, QTimer
+from PySide6.QtCore import QBuffer, QIODevice, QObject, QPoint, Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -93,6 +93,21 @@ class UIAutomation:
                 return True
             owner = owner.parent()
         return False
+
+    @staticmethod
+    def _hit(widget: QWidget, point: QPoint) -> QWidget:
+        if not widget.visibleRegion().contains(point):
+            raise ValueError("The target input point is clipped. Enlarge or scroll its panel.")
+        hit = QApplication.widgetAt(widget.mapToGlobal(point))
+        if hit is None or (hit is not widget and not widget.isAncestorOf(hit)):
+            raise ValueError("The target input point is obscured by another widget or window.")
+        return hit
+
+    def _click(self, widget: QWidget, point: QPoint | None = None) -> None:
+        point = widget.rect().center() if point is None else point
+        hit = self._hit(widget, point)
+        position = hit.mapFromGlobal(widget.mapToGlobal(point))
+        QTest.mouseClick(hit, Qt.MouseButton.LeftButton, pos=position)
 
     @staticmethod
     def _describe(target: QObject) -> dict[str, Any]:
@@ -260,9 +275,11 @@ class UIAutomation:
                             raise ValueError("Action has no application menu.")
                         menu = menus[0]
                         menu.popup(self.bridge.window.mapToGlobal(self.bridge.window.rect().center()))
-                        QTest.mouseClick(menu, Qt.MouseButton.LeftButton,
-                                         pos=menu.actionGeometry(target).center())
+                        if not QTest.qWaitForWindowExposed(menu, 1000):
+                            raise ValueError("The action menu did not become visible.")
+                        self._click(menu, menu.actionGeometry(target).center())
                     elif action == "type":
+                        self._hit(target, target.rect().center())
                         target.setFocus()
                         QTest.keyClick(target, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
                         if all(" " <= char <= "~" for char in text):
@@ -280,6 +297,8 @@ class UIAutomation:
                         if isinstance(target, QLineEdit):
                             QTest.keyClick(target, Qt.Key.Key_Tab)
                     elif action == "key":
+                        self._hit(target, target.rect().center())
+                        target.setFocus()
                         QTest.keyClick(target, KEYS[key])
                     elif action == "close_tab":
                         from PySide6.QtWidgets import QTabBar
@@ -289,11 +308,10 @@ class UIAutomation:
                             button = bar.tabButton(tab_index, QTabBar.ButtonPosition.LeftSide)
                         if button is None:
                             raise ValueError("The tab has no close button.")
-                        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+                        self._click(button)
                     elif action == "select" and isinstance(target, QTabWidget):
                         bar = target.tabBar()
-                        QTest.mouseClick(bar, Qt.MouseButton.LeftButton,
-                                         pos=bar.tabRect(tab_index).center())
+                        self._click(bar, bar.tabRect(tab_index).center())
                         if target.currentWidget() is not tab:
                             raise RuntimeError("The tab click did not select the requested project.")
                     elif action == "select" and isinstance(target, QTableWidget):
@@ -310,20 +328,20 @@ class UIAutomation:
                             raise ValueError(
                                 "The target row is clipped. Enlarge its panel before selecting."
                             )
-                        QTest.mouseClick(target.viewport(), Qt.MouseButton.LeftButton,
-                                         pos=point)
+                        self._click(target.viewport(), point)
                         if not any(
                             selected.data(Qt.ItemDataRole.UserRole) == row_id
                             for selected in target.selectedItems()
                         ):
                             raise RuntimeError("The row click did not select the requested item.")
                     elif action == "select" and isinstance(target, QComboBox):
+                        self._hit(target, target.rect().center())
                         target.setFocus()
                         QTest.keyClick(target, Qt.Key.Key_Home)
                         for _ in range(index):
                             QTest.keyClick(target, Qt.Key.Key_Down)
                     else:
-                        QTest.mouseClick(target, Qt.MouseButton.LeftButton)
+                        self._click(target)
                     record["state"] = "completed"
                 except Exception as error:
                     # Input is asynchronous; expose failure through get_ui_state, not stderr-only.

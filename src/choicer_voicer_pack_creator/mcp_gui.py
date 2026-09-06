@@ -167,7 +167,7 @@ class EditorProjectAccess:
         window._commit_editors()
         return ProjectSnapshot(
             window.project, window.project_path, window.dirty, window._saved_project_hash,
-            window.session.id,
+            window.session.id, window.session.loading,
         ).copy()
 
     def snapshot(self) -> ProjectSnapshot:

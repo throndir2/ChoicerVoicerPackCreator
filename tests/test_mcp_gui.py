@@ -470,6 +470,27 @@ def test_mcp_save_respects_pending_gui_destination_reservation(
     assert not window._save_tokens
 
 
+def test_live_loading_document_is_readable_but_rejects_mutations(qtbot, live_editor, tmp_path):
+    window, _bridge, automation = live_editor
+    editor = window.active_editor
+    editor.session.loading = True
+    try:
+        current = in_worker(qtbot, automation.get_project)
+        assert current["loading"]
+        with pytest.raises(ValueError, match="still loading"):
+            in_worker(qtbot, lambda: automation.update_project(
+                ProjectPatch(title="Do not overwrite pending load"), current["revision"]
+            ))
+        with pytest.raises(ValueError, match="still loading"):
+            in_worker(qtbot, lambda: automation.save_project(
+                current["revision"], str(tmp_path / "pending.cvpack.json")
+            ))
+        assert editor.project.title == "Live"
+        assert not (tmp_path / "pending.cvpack.json").exists()
+    finally:
+        editor.session.loading = False
+
+
 def test_closed_pending_document_is_not_reactivated_by_mcp(qtbot, live_editor, tmp_path):
     from choicer_voicer_pack_creator.ui_automation import UIAutomation
 
