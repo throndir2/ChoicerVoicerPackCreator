@@ -292,6 +292,8 @@ class ProjectEditor(QWidget):
         self.action_open = QAction("Open Project…", self)
         self.action_open.setShortcut(QKeySequence.StandardKey.Open)
         self.action_open.triggered.connect(self.open_project)
+        self.action_clear_recent = QAction("Clear Recent Projects", self)
+        self.action_clear_recent.triggered.connect(lambda: self._set_recent_project_paths([]))
         self.action_import = QAction("Import Existing Pack…", self)
         self.action_import.setShortcut(QKeySequence("Ctrl+I"))
         self.action_import.triggered.connect(self.import_pack)
@@ -342,12 +344,13 @@ class ProjectEditor(QWidget):
         self.action_duplicate.triggered.connect(self.duplicate_segment)
 
         file_menu = self.menuBar().addMenu("&File")
-        file_menu.addActions(
-            [
-                self.action_new, self.action_youtube, self.action_open,
-                self.action_import, self.action_import_zip,
-            ]
-        )
+        file_menu.addActions([self.action_new, self.action_youtube, self.action_open])
+        self.recent_projects_menu = file_menu.addMenu("Open &Recent")
+        self.recent_projects_menu.setToolTipsVisible(True)
+        self.recent_projects_menu.aboutToShow.connect(self._refresh_recent_projects_menu)
+        for editor in self.workspace.editors.values():
+            editor._refresh_recent_projects_menu()
+        file_menu.addActions([self.action_import, self.action_import_zip])
         file_menu.addSeparator()
         file_menu.addActions([self.action_save, self.action_save_as, self.action_restore_previous])
         file_menu.addSeparator()
@@ -920,6 +923,51 @@ class ProjectEditor(QWidget):
         self.prompt_audio_output.setVolume(volume)
 
     # ---------- Project lifecycle ----------
+
+    def _recent_project_paths(self) -> list[Path]:
+        return [
+            Path(value) for value in self.settings.value("recentProjects", [], type=list)
+        ][:10]
+
+    def _set_recent_project_paths(self, paths: list[Path]) -> None:
+        self.settings.setValue("recentProjects", [str(path) for path in paths[:10]])
+        self.settings.sync()
+        self._refresh_recent_projects_menu()
+        if self.settings.status() != QSettings.Status.NoError:
+            QMessageBox.warning(
+                self,
+                "Could not save recent projects",
+                "The recent-project list could not be saved to your application settings. "
+                "Project files are not affected.\n\n"
+                f"Settings location: {self.settings.fileName()}",
+            )
+
+    def _remember_recent_project(self, path: Path) -> None:
+        path = path.resolve()
+        self._set_recent_project_paths(
+            [path] + [recent for recent in self._recent_project_paths() if recent != path]
+        )
+
+    def _refresh_recent_projects_menu(self) -> None:
+        self.recent_projects_menu.clear()
+        paths = self._recent_project_paths()
+        for index, path in enumerate(paths, start=1):
+            label = f"{index}. {path.name} ({path.parent})".replace("&", "&&")
+            action = self.recent_projects_menu.addAction(label)
+            action.setData(str(path))
+            action.setToolTip(str(path))
+            action.setStatusTip(str(path))
+            action.triggered.connect(
+                lambda _checked=False, path=path: self._open_recent_project(path)
+            )
+        if not paths:
+            self.recent_projects_menu.addAction("No Recent Projects").setEnabled(False)
+        self.recent_projects_menu.addSeparator()
+        self.action_clear_recent.setEnabled(bool(paths))
+        self.recent_projects_menu.addAction(self.action_clear_recent)
+
+    def _open_recent_project(self, path: Path) -> None:
+        self.workspace.open_path(path)
 
     def _write_recovery_snapshot(self) -> None:
         if not self.recovery_store or not self.dirty:
@@ -2949,6 +2997,8 @@ class MainWindow(QMainWindow):
             project, project_path, dirty, warnings, saved_hash = value
             editor._set_project(project, project_path, mark_dirty=dirty)
             editor._saved_project_hash = saved_hash
+            if project_path is not None:
+                editor._remember_recent_project(project_path)
             self.settings.setValue("lastProjectDir", str(path.parent))
             if warnings:
                 editor.session.attention = "\n".join(warnings)
@@ -3099,6 +3149,7 @@ class MainWindow(QMainWindow):
         editor._saved_project_hash = saved_hash
         editor.session.saved_revision = revision
         self.settings.setValue("lastProjectDir", str(destination.parent))
+        editor._remember_recent_project(destination)
         if not editor.dirty:
             editor._clear_recovery_snapshot()
         else:
