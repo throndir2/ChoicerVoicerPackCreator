@@ -726,9 +726,8 @@ def test_each_transcript_has_a_direct_use_button(
     assert dialog.worker is None
 
 
-@pytest.mark.parametrize("source", ["youtube", "refined"], ids=["legacy-selection", "refined"])
 def test_adding_captions_during_background_scan_waits_for_cancellation(
-    qtbot, tmp_path, monkeypatch, source,
+    qtbot, tmp_path, monkeypatch,
 ) -> None:
     import time
 
@@ -750,9 +749,8 @@ def test_adding_captions_during_background_scan_waits_for_cancellation(
         source_captions=[SourceCaption(1, 2, "Original", "YouTube creator (en)")],
         auto_start=True,
         review=AnalysisReview(
-            youtube_rows=[AnalysisDraftRow("1", "2", "Original", "YouTube")],
             refined_rows=[AnalysisDraftRow("1.1", "1.9", "Refined", "Refined YouTube")],
-            selected_source=source,
+            selected_source="refined",
         ),
     )
     qtbot.addWidget(dialog)
@@ -829,7 +827,6 @@ def test_automatic_refinement_precedes_whisper_and_keeps_its_selected_draft(
     qtbot.addWidget(dialog)
     saved = []
     dialog.review_changed.connect(saved.append)
-    original_rows = dialog.review_state().youtube_rows
     qtbot.waitUntil(lambda: bool(calls) and dialog.worker is None)
     assert len(calls) == (1 if whisper_outcome == "decline" else 2)
     assert calls[0]["source_captions"] == captions
@@ -849,7 +846,6 @@ def test_automatic_refinement_precedes_whisper_and_keeps_its_selected_draft(
         AnalysisSuggestion(cue.start, cue.end, cue.text, cue.source) for cue in refined
     ]
     assert saved[-1].selected_source == "refined"
-    assert saved[-1].youtube_rows == original_rows
     assert len(saved[-1].refined_rows) == 2
     assert dialog.selected_source == "refined"
     assert dialog.add_button.text() == "Use Refined YouTube Transcript"
@@ -956,9 +952,8 @@ def test_restoring_drafts_only_processes_missing_refinement(
     monkeypatch.setattr(AnalysisDialog, "start_scan", lambda _self: starts.append("whisper"))
     monkeypatch.setattr(AnalysisDialog, "start_refinement", lambda _self: starts.append("refined"))
     review = AnalysisReview(
-        youtube_rows=[AnalysisDraftRow("1", "3", "YouTube edit", "YouTube")],
         refined_rows=refined_rows,
-        selected_source="refined" if refined_rows else "youtube", pause_threshold=0.6,
+        selected_source="refined", pause_threshold=0.6,
     )
     dialog = AnalysisDialog(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
@@ -969,7 +964,6 @@ def test_restoring_drafts_only_processes_missing_refinement(
     assert starts == ([] if refined_rows else ["refined"])
     saved = dialog.review_state()
     assert saved.selected_source == "refined"
-    assert saved.youtube_rows == review.youtube_rows
     assert saved.refined_rows == refined_rows
     assert saved.pause_threshold == 0.6
     assert not dialog.findChildren(QTabWidget)
@@ -1039,7 +1033,6 @@ def test_source_choice_imports_its_own_segmentation_and_saves_it(
         (s.start, s.end, s.caption) for s in expected
     ]
     assert saved.analysis_review.selected_source == source
-    assert saved.analysis_review.youtube_rows == []
     assert saved.source_captions == captions
     assert len(saved.analysis_review.local_rows) == 1
     assert len(saved.analysis_review.refined_rows) == 1
@@ -1051,14 +1044,10 @@ def test_closing_review_preserves_all_edited_drafts_and_checkboxes(
     qtbot, tmp_path,
 ):
     captions = [SourceCaption(1, 2, "Original", "YouTube creator (en)")]
-    legacy_rows = [
-        AnalysisDraftRow("unfinished time", "2", "Legacy YouTube edit", "YouTube", checked=False),
-    ]
     dialog = AnalysisDialog(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
         source_captions=captions,
         review=AnalysisReview(
-            youtube_rows=legacy_rows,
             refined_rows=[AnalysisDraftRow("1", "2", "Previous draft", "Refined YouTube")],
             selected_source="refined",
         ),
@@ -1093,7 +1082,6 @@ def test_closing_review_preserves_all_edited_drafts_and_checkboxes(
     qtbot.addWidget(restored)
     assert restored.review_state() == saved[-1]
     assert restored.refined_radio.isChecked()
-    assert restored.review_state().youtube_rows == legacy_rows
     assert restored.pause_spin.value() == 0.65
     assert restored.checked_suggestions() == []
     restored.local_radio.setChecked(True)
@@ -1161,9 +1149,7 @@ def test_no_youtube_captions_still_offers_whisper_source(qtbot, tmp_path):
 def test_failed_rescan_keeps_previously_edited_local_draft(qtbot, tmp_path, monkeypatch):
     monkeypatch.setattr(QMessageBox, "critical", lambda *_args: None)
     review = AnalysisReview(
-        [AnalysisDraftRow("1", "2", "YouTube edit", "YouTube")],
-        [AnalysisDraftRow("0.5", "3", "Whisper edit", "Whisper")],
-        "local",
+        local_rows=[AnalysisDraftRow("0.5", "3", "Whisper edit", "Whisper")],
     )
     dialog = AnalysisDialog(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
@@ -1177,7 +1163,7 @@ def test_failed_rescan_keeps_previously_edited_local_draft(qtbot, tmp_path, monk
     assert dialog.add_button.isEnabled()
 
 
-def test_canceling_rescan_retains_local_and_youtube_drafts(qtbot, tmp_path, monkeypatch):
+def test_canceling_rescan_retains_local_and_refined_drafts(qtbot, tmp_path, monkeypatch):
     import time
 
     runtime = tmp_path / "runtime"
@@ -1197,9 +1183,7 @@ def test_canceling_rescan_retains_local_and_youtube_drafts(qtbot, tmp_path, monk
 
     monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
     review = AnalysisReview(
-        [AnalysisDraftRow("1", "2", "YouTube draft", "YouTube")],
-        [AnalysisDraftRow("0.5", "3", "Existing Whisper edit", "Whisper")],
-        "local",
+        local_rows=[AnalysisDraftRow("0.5", "3", "Existing Whisper edit", "Whisper")],
         refined_rows=[AnalysisDraftRow("1.1", "1.9", "Refined edit", "Refined YouTube")],
     )
     dialog = AnalysisDialog(
@@ -1321,7 +1305,6 @@ def test_refinement_runs_without_whisper_and_replaces_only_its_draft(
 
     monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
     review = AnalysisReview(
-        youtube_rows=[AnalysisDraftRow("1", "3", "Edited original", "YouTube")],
         local_rows=[AnalysisDraftRow("0.5", "3.5", "Edited Whisper", "Whisper")],
         selected_source="local",
         refined_rows=[AnalysisDraftRow("1", "3", "Previous refined edit", "Refined YouTube")],
@@ -1362,7 +1345,6 @@ def test_refinement_runs_without_whisper_and_replaces_only_its_draft(
     assert calls[0]["source_captions"] == captions
     assert calls[0]["pause_threshold"] == 0.55
     saved = dialog.review_state()
-    assert saved.youtube_rows == review.youtube_rows
     assert saved.local_rows == review.local_rows
     assert dialog.source_captions == captions
     assert [row.caption for row in saved.refined_rows] == ["First", "Second"]
@@ -1397,7 +1379,6 @@ def test_refinement_interruption_keeps_all_drafts(qtbot, tmp_path, monkeypatch, 
         QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.Yes
     )
     review = AnalysisReview(
-        youtube_rows=[AnalysisDraftRow("1", "3", "YouTube edit", "YouTube")],
         local_rows=[AnalysisDraftRow("0.5", "3.5", "Whisper edit", "Whisper")],
         selected_source="local",
         refined_rows=[AnalysisDraftRow("1.1", "2.9", "Refined edit", "Refined YouTube")],
@@ -1541,7 +1522,6 @@ def test_late_cancellation_discards_completion_queued_after_final_worker_check(
         QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.Yes
     )
     review = AnalysisReview(
-        youtube_rows=[AnalysisDraftRow("1", "3", "YouTube edit", "YouTube")],
         local_rows=[AnalysisDraftRow("1.1", "2.9", "Whisper edit", "Whisper")],
         refined_rows=[
             AnalysisDraftRow("1.2", "2.8", "Refined edit", "Refined YouTube"),
@@ -1591,7 +1571,6 @@ def test_model_switch_recovery_can_use_current_whisper_without_rerunning(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
         youtube_import=True,
         review=AnalysisReview(
-            youtube_rows=[AnalysisDraftRow("1", "3", "YouTube edit", "YouTube")],
             refined_rows=[AnalysisDraftRow("1.1", "2.9", "Refined edit", "Refined YouTube")],
             selected_source="refined",
         ),
@@ -1706,7 +1685,6 @@ def test_successful_model_switch_updates_only_local_draft_provenance(
     qtbot, tmp_path, monkeypatch, installed_whisper,
 ):
     review = AnalysisReview(
-        youtube_rows=[AnalysisDraftRow("1", "2", "YouTube edit", "YouTube")],
         local_rows=[AnalysisDraftRow("1", "2", "Tiny edit", "Whisper", checked=False)],
         refined_rows=[AnalysisDraftRow("1.1", "1.9", "Refined edit", "Refined YouTube")],
         selected_source="refined", local_model_name="tiny", local_detected_language="en",
@@ -1729,7 +1707,6 @@ def test_successful_model_switch_updates_only_local_draft_provenance(
     qtbot.waitUntil(lambda: dialog.worker is None)
     saved = dialog.review_state()
     assert saved.selected_source == review.selected_source
-    assert saved.youtube_rows == review.youtube_rows
     assert saved.refined_rows == review.refined_rows
     assert saved.local_rows == [AnalysisDraftRow("3.000", "5.000", "New base draft", "Whisper")]
     assert saved.local_model_name == "base"
@@ -1748,7 +1725,7 @@ def test_successful_model_switch_updates_only_local_draft_provenance(
     assert restored.add_button.isEnabled()
 
 
-def test_legacy_whisper_draft_does_not_claim_next_scan_model(qtbot, tmp_path):
+def test_whisper_draft_without_provenance_does_not_claim_next_scan_model(qtbot, tmp_path):
     dialog = AnalysisDialog(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
         youtube_import=True,
@@ -1809,7 +1786,6 @@ def test_empty_refinement_keeps_drafts_and_does_not_chain_whisper(
     qtbot, tmp_path, monkeypatch, has_previous,
 ):
     review = AnalysisReview(
-        youtube_rows=[AnalysisDraftRow("1", "2", "Original", "YouTube")],
         refined_rows=(
             [AnalysisDraftRow("1.1", "1.9", "Refined edit", "Refined YouTube")]
             if has_previous else []
@@ -1844,7 +1820,6 @@ def test_clicking_draft_selects_its_source_and_checked_rows_control_import(qtbot
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
         youtube_import=True,
         review=AnalysisReview(
-            youtube_rows=[AnalysisDraftRow("1", "2", "YouTube", "YouTube")],
             refined_rows=[AnalysisDraftRow("2", "3", "Refined", "Refined YouTube")],
             local_rows=[AnalysisDraftRow("3", "4", "Whisper", "Whisper")],
             selected_source="local" if source != "local" else "refined",
@@ -1892,14 +1867,13 @@ def test_invalid_checked_draft_stays_editable_until_fixed(
     assert accepted == [AnalysisSuggestion(1, 2, "Edit", "Whisper")]
 
 
-@pytest.mark.parametrize("unavailable", ["youtube", "refined", "local"])
+@pytest.mark.parametrize("unavailable", ["refined", "local"])
 def test_restored_unavailable_source_selects_an_existing_draft(qtbot, tmp_path, unavailable):
     rows = [AnalysisDraftRow("1", "2", "Available", "Whisper")]
     dialog = AnalysisDialog(
         UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
         youtube_import=True,
         review=AnalysisReview(
-            youtube_rows=[] if unavailable == "youtube" else rows,
             refined_rows=[] if unavailable == "refined" else rows,
             local_rows=[] if unavailable == "local" else rows,
             selected_source=unavailable,
@@ -1909,12 +1883,8 @@ def test_restored_unavailable_source_selects_an_existing_draft(qtbot, tmp_path, 
     assert dialog.selected_source != unavailable
     assert dialog.table.rowCount() == 1
     assert dialog.add_button.isEnabled()
-    if unavailable == "youtube":
-        assert dialog.selected_source == "refined"
-        assert not dialog.findChildren(QTabWidget)
-    else:
-        radio = {"refined": dialog.refined_radio, "local": dialog.local_radio}[unavailable]
-        assert not radio.isEnabled()
+    radio = {"refined": dialog.refined_radio, "local": dialog.local_radio}[unavailable]
+    assert not radio.isEnabled()
 
 
 def test_switching_to_activity_scan_keeps_whisper_draft_until_success(

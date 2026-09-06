@@ -1407,37 +1407,36 @@ def test_discarded_tab_reopens_saved_contents_not_hidden_edits(
     assert workspace.active_editor.session.id != old_id
 
 
-def test_legacy_recovery_is_preserved_on_dismissal_and_migrates_after_acceptance(qtbot, tmp_path):
+@pytest.mark.parametrize("invalid", [False, True])
+def test_workspace_ignores_single_project_recovery_and_restores_current_snapshots(
+    qtbot, tmp_path, invalid,
+):
     recovery = RecoveryStore(tmp_path / "recovery-v2.json")
-    recovery.save(PackProject(title="Legacy edits"), None)
-    windows = []
-    for accept in (False, True):
-        window = MainWindow(
-            QuietMedia(),
-            settings=QSettings(str(tmp_path / "legacy.ini"), QSettings.Format.IniFormat),
-            recovery_store=recovery, analysis_data_root=tmp_path / "analysis",
-        )
-        windows.append(window)
-        qtbot.addWidget(window)
-        window.show()
-        qtbot.waitUntil(lambda window=window: bool(window._decisions))
-        box = next(box for box in window._decisions if box.windowTitle() == "Recover previous workspace?")
-        qtbot.mouseClick(
-            box.button(QMessageBox.StandardButton.Yes if accept else QMessageBox.StandardButton.No),
-            Qt.MouseButton.LeftButton,
-        )
-        qtbot.waitUntil(lambda window=window: not window.job_manager.active_jobs())
-        if accept:
-            assert not recovery.path.exists()
-            assert window.project.title == "Legacy edits"
-            assert window.active_editor.recovery_store.load().project.title == "Legacy edits"
-        else:
-            assert recovery.load().project.title == "Legacy edits"
-        window.workspace_store = None
-        for editor in window.editors.values():
-            editor._recovery_timer.stop()
-            editor.dirty = False
-        window.close()
+    recovery.save(PackProject(title="Obsolete snapshot"), None)
+    recovery.save(PackProject(title="Obsolete edits"), None)
+    if invalid:
+        recovery.path.write_text("not JSON", encoding="utf-8")
+    originals = {path: path.read_bytes() for path in (recovery.path, recovery.previous_path)}
+    identity = "abcd1234"
+    recovery.for_session(identity).save(PackProject(title="Current edits"), None)
+    window = MainWindow(
+        QuietMedia(),
+        settings=QSettings(str(tmp_path / "recovery.ini"), QSettings.Format.IniFormat),
+        recovery_store=recovery, analysis_data_root=tmp_path / "analysis",
+    )
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitUntil(lambda: identity in window.editors and not window.job_manager.active_jobs())
+    assert window.editors[identity].project.title == "Current edits"
+    assert not window._decisions
+    assert all(editor.project.title not in {"Obsolete snapshot", "Obsolete edits"}
+               for editor in window.editors.values())
+    assert all(path.read_bytes() == payload for path, payload in originals.items())
+    window.workspace_store = None
+    for editor in window.editors.values():
+        editor._recovery_timer.stop()
+        editor.dirty = False
+    window.close()
 
 
 @pytest.mark.integration

@@ -55,10 +55,10 @@ def test_youtube_caption_provenance_survives_save_and_recovery(tmp_path: Path) -
             CaptionFragment("Original ", 1), CaptionFragment("caption"),
         ))],
         analysis_review=AnalysisReview(
-            [AnalysisDraftRow("1", "2", "YouTube edit", "YouTube")],
-            [AnalysisDraftRow("1", "2", "Whisper edit", "Whisper")],
-            "refined", "Whisper",
-            [AnalysisDraftRow("1.1", "1.9", "Refined edit", "Refined YouTube")], 0.6,
+            local_rows=[AnalysisDraftRow("1", "2", "Whisper edit", "Whisper")],
+            selected_source="refined",
+            refined_rows=[AnalysisDraftRow("1.1", "1.9", "Refined edit", "Refined YouTube")],
+            pause_threshold=0.6,
             local_model_name="tiny", local_detected_language="en",
         ),
     )
@@ -73,6 +73,19 @@ def test_youtube_caption_provenance_survives_save_and_recovery(tmp_path: Path) -
     recovery.save(project, path)
     assert recovery.load().project.source_captions == project.source_captions
     assert recovery.load().project.analysis_review == project.analysis_review
+
+
+@pytest.mark.parametrize("name", ["pack-manifest.json", "renamed.cvpack.json"])
+def test_project_store_rejects_unversioned_manifests(tmp_path: Path, name: str) -> None:
+    path = tmp_path / name
+    payload = json.dumps({
+        "source": {"video": "source.mp4"},
+        "lines": [{"start": 1, "end": 2, "caption": "Not a project", "characters": ["Speaker"]}],
+    })
+    path.write_text(payload, encoding="utf-8")
+    with pytest.raises(ValueError, match="schema_version 1"):
+        ProjectStore.load(path)
+    assert path.read_text(encoding="utf-8") == payload
 
 
 def test_save_retains_previous_version_and_save_as_preserves_original(tmp_path: Path) -> None:

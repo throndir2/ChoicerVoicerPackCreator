@@ -503,7 +503,7 @@ defaults to **0.40 seconds** and can be adjusted from 0.20 to 1.00 seconds befor
 Changing the setting alone does not rewrite a draft.
 
 Refinement never invents equally spaced word timings or splits an untimed phrase. Rows without
-usable timing metadata, including captions in older saved projects, stay as whole phrases with
+usable timing metadata stay as whole phrases with
 the same conservative source-audio handles and a note in the **Source** column. Hover over that
 column to read the full note. Review every
 suggested boundary: this pass measures audio energy, not speaker identity, so music/effects can
@@ -526,7 +526,7 @@ Declining Whisper setup or a failed/canceled/empty Whisper scan leaves downloade
 existing drafts intact. **Whisper model (next scan)** and **Spoken language (next scan)** affect
 only a new run; they do not select or change an existing transcript. The current local draft
 shows the model and detected language from its last successful nonempty scan, also after
-saving and reopening the project. Older drafts without model information say **model not recorded**.
+saving and reopening the project. Drafts without model information say **model not recorded**.
 If a larger model fails due to memory limits, click **Use Whisper Transcript** below the
 retained draft to use it without rerunning.
 If all rows are unchecked, check at least one before using the transcript.
@@ -539,8 +539,7 @@ retains all available drafts, including edits, checked rows, source selection, a
 segments. Draft changes are included in recovery snapshots and **Save Project**, just like other
 project edits. **Project → Analyze Video & Suggest Segments** restores completed drafts without
 rerunning analysis. If refinement has never completed, reopening resumes that pass without
-starting Whisper. Legacy original-draft edits are preserved in the project file but not displayed
-or imported as refined results. A successful Whisper rescan replaces only the local draft after confirmation;
+starting Whisper. A successful Whisper rescan replaces only the local draft after confirmation;
 refining again replaces only the Refined YouTube draft after confirmation. A failed or canceled
 scan keeps its previous result. Original YouTube caption evidence, fragment timings, and the source URL
 are also retained. Replacing or clearing the source video clears its caption evidence and drafts.
@@ -608,9 +607,8 @@ While editing, the app also writes debounced recovery snapshots to the current W
 application-data directory, in a separate namespace for each document, including unsaved projects.
 The workspace list and recoveries restore separate tabs without overwriting project files. If the
 saved file changed after recovery was recorded, the recovery opens as a separate unsaved copy.
-Save or explicit Discard clears only that document's snapshot. Legacy `recovery-v2.json` snapshots
-remain intact unless successfully migrated after acceptance; dismissing the offer does not delete
-them. If a saved project becomes unreadable, opening it offers its adjacent previous version.
+Save or explicit Discard clears only that document's snapshot.
+If a saved project becomes unreadable, opening it offers its adjacent previous version.
 Export independently stages every generated file and retains rollback copies until the new folder
 and ZIP pass final validation.
 
@@ -667,12 +665,12 @@ explicitly **Export without music**; the latter creates the required duration-ma
 Exports also report a warning when an existing or generated backing is silent or below -60 dBFS.
 The source video's original mixed dialogue is never used as automatic backing.
 
-### Recover an older pack with missing music
+### Add missing music to a pack
 
 1. Open the saved `.cvpack.json` project. If only the export remains, use **File → Import Pack ZIP**
    or **Import Existing Pack**. ZIP media is extracted into a unique durable application-data folder;
    the original archive is not changed.
-2. Click **Generate backing** (or **Regenerate backing** for the old silent MP3) and approve model
+2. Click **Generate backing** (or **Regenerate backing** for a silent MP3) and approve model
    download/replacement if prompted. The included `dub_video.ogv` retains the original audio in
    app-generated packs, so there is no need to redownload or transcribe the video.
 3. **Save Project As**, then **Export Pack + ZIP** into a new output directory.

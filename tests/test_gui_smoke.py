@@ -1008,7 +1008,7 @@ def test_range_edit_can_regenerate_or_undo_preserved_audio(
 
 
 def test_recovery_restores_unsaved_edits_without_overwriting_project(
-    qtbot, tmp_path: Path, monkeypatch
+    qtbot, tmp_path: Path,
 ) -> None:
     project_path = tmp_path / "saved.cvpack.json"
     saved = PackProject(
@@ -1020,22 +1020,22 @@ def test_recovery_restores_unsaved_edits_without_overwriting_project(
     recovery = RecoveryStore(tmp_path / "recovery.json")
     recovered = PackProject.from_dict(saved.to_dict())
     recovered.segments[0].caption = "Unsaved recovered line"
-    recovery.save(recovered, project_path)
+    identity = "abc123"
+    recovery.for_session(identity).save(recovered, project_path)
 
-    monkeypatch.setattr(
-        QMessageBox,
-        "question",
-        staticmethod(lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes),
+    window = MainWindow(
+        UnusedMedia(), recovery_store=recovery,
+        analysis_data_root=tmp_path / "analysis",
     )
-    window = MainWindow(UnusedMedia())  # type: ignore[arg-type]
     qtbot.addWidget(window)
-    window.active_editor.recovery_store = recovery
-    window._offer_recovery()
+    qtbot.waitUntil(lambda: identity in window.editors and not window.job_manager.active_jobs())
+    window.focus_project(identity)
 
     assert window.project_path == project_path.resolve()
     assert window.project.segments[0].caption == "Unsaved recovered line"
     assert window.dirty
     assert ProjectStore.load(project_path).segments[0].caption == "Saved line"
+    window.workspace_store = None
     window.dirty = False
     window.close()
 

@@ -21,6 +21,9 @@ completion. Never modify another active session's checkout or work directly on `
 - Preserve imported media unless a user explicitly replaces or regenerates it.
 - Stage exports completely before replacing an existing destination.
 - Keep the project JSON as the editable source of truth; generated pack files are outputs.
+- Target the current project format and workflows. Do not add legacy-format migration,
+	deprecated API aliases, or compatibility-only storage. Keep optional current-format fields
+	usable without treating unrelated JSON as a project.
 - Validate metadata references, timestamps, codecs, images, ZIP inventory, and decodeability.
 - Never silently discard an unsupported field from an imported pack; report it as a warning and
 	refuse in-place conversion of the source pack.

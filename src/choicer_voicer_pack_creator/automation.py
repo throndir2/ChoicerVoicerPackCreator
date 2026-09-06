@@ -321,7 +321,7 @@ class PackAutomation:
         return self.describe(self.access.snapshot())
 
     def new_project(
-        self, video_path: str, title: str, authors: list[str], discard_dirty: bool = False
+        self, video_path: str, title: str, authors: list[str]
     ) -> dict[str, Any]:
         source = local_path(video_path)
         info = self.media.probe(source)
@@ -334,7 +334,7 @@ class PackAutomation:
         )
         return self.describe(self.access.create(ProjectSnapshot(project, dirty=True)))
 
-    def open_project(self, path: str, discard_dirty: bool = False) -> dict[str, Any]:
+    def open_project(self, path: str) -> dict[str, Any]:
         existing = self.access.open_existing(local_path(path, exists=False))
         if existing is not None:
             return self.describe(existing)
@@ -346,7 +346,7 @@ class PackAutomation:
         json.dumps(project.to_dict(), allow_nan=False)
         return self.describe(self.access.create(ProjectSnapshot(project, source, False, before)))
 
-    def import_pack(self, path: str, discard_dirty: bool = False) -> dict[str, Any]:
+    def import_pack(self, path: str) -> dict[str, Any]:
         result = PackImporter(self.media).import_folder(local_path(path, directory=True))
         json.dumps(result.project.to_dict(), allow_nan=False)
         return self.describe(self.access.create(ProjectSnapshot(result.project, dirty=True)))

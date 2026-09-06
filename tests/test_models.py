@@ -174,16 +174,28 @@ def test_imported_recording_requires_reviewed_source_range(tmp_path: Path) -> No
     assert any("original source cut is unknown" in error for error in project.validate())
 
 
-def test_old_project_without_review_still_loads() -> None:
+def test_current_project_without_optional_review_loads() -> None:
     project = PackProject.from_dict({"schema_version": 1, "segments": []})
     assert project.analysis_review is None
 
 
+@pytest.mark.parametrize("version", [None, 0, 2, True, 1.0, "1", "invalid", []])
+def test_project_requires_explicit_supported_schema(version) -> None:
+    with pytest.raises(ValueError, match="Unsupported project schema"):
+        PackProject.from_dict({"schema_version": version})
+
+
+def test_unversioned_json_is_not_a_project() -> None:
+    with pytest.raises(ValueError, match="schema_version 1"):
+        PackProject.from_dict({})
+
+
 def test_analysis_review_round_trip_preserves_unfinished_edits() -> None:
     review = AnalysisReview(
-        [AnalysisDraftRow("in progress", "2", "Edited YouTube", "YouTube", checked=False)],
-        [AnalysisDraftRow("0.5", "3", "Edited Whisper", "Whisper", 0.876)],
-        "local",
+        local_rows=[AnalysisDraftRow("0.5", "3", "Edited Whisper", "Whisper", 0.876)],
+        refined_rows=[
+            AnalysisDraftRow("in progress", "2", "Edited refinement", "Refined YouTube", checked=False),
+        ],
         local_model_name="tiny", local_detected_language="en",
     )
     project = PackProject(analysis_review=review)
@@ -191,27 +203,28 @@ def test_analysis_review_round_trip_preserves_unfinished_edits() -> None:
 
 
 @pytest.mark.parametrize("review", [
-    [], {"youtube_rows": [None]}, {"local_rows": {}},
-    {"selected_source": "unknown"}, {"local_source": "unknown"},
+    [], {"refined_rows": [None]}, {"local_rows": {}},
+    {"selected_source": "unknown"}, {"selected_source": "youtube"}, {"local_source": "unknown"},
     {"local_model_name": None}, {"local_detected_language": []},
     {"local_rows": [{"start": "1", "end": "2", "caption": "", "source": "Whisper",
                      "confidence": float("nan")}]},
 ])
 def test_invalid_review_state_is_reported(review) -> None:
     with pytest.raises(ValueError):
-        PackProject.from_dict({"analysis_review": review})
+        PackProject.from_dict({"schema_version": 1, "analysis_review": review})
 
 
-def test_caption_fragment_and_three_independent_drafts_round_trip() -> None:
+def test_caption_fragment_and_two_independent_drafts_round_trip() -> None:
     cue = SourceCaption(1, 3, "Raw & text", "YouTube", (
         CaptionFragment(" Raw & ", 1.1), CaptionFragment("text", None),
     ))
     review = AnalysisReview(
-        [AnalysisDraftRow("1", "3", "YouTube edit", "YouTube")],
-        [AnalysisDraftRow("1.5", "3", "Whisper edit", "Whisper", 0.8)],
-        "refined", "Whisper",
-        [AnalysisDraftRow("unfinished", "3.4", "Refined edit", "Refined YouTube", checked=False)],
-        0.8,
+        local_rows=[AnalysisDraftRow("1.5", "3", "Whisper edit", "Whisper", 0.8)],
+        selected_source="refined",
+        refined_rows=[
+            AnalysisDraftRow("unfinished", "3.4", "Refined edit", "Refined YouTube", checked=False),
+        ],
+        pause_threshold=0.8,
     )
     project = PackProject(source_captions=[cue], analysis_review=review)
     restored = PackProject.from_dict(project.to_dict())
@@ -220,17 +233,37 @@ def test_caption_fragment_and_three_independent_drafts_round_trip() -> None:
     assert restored.source_captions[0].fragments[1].start is None
 
 
-def test_previous_caption_and_review_format_load_with_refinement_defaults() -> None:
+def test_optional_caption_and_review_fields_load_with_defaults() -> None:
     project = PackProject.from_dict({
+        "schema_version": 1,
         "source_captions": [{"start": 1, "end": 2, "text": "Original", "source": "YouTube"}],
-        "analysis_review": {"selected_source": "youtube", "local_source": "Audio activity"},
+        "analysis_review": {"local_source": "Audio activity"},
     })
     assert project.source_captions == [SourceCaption(1, 2, "Original", "YouTube")]
-    assert project.analysis_review == AnalysisReview([], [], "youtube", "Audio activity")
+    assert project.analysis_review == AnalysisReview(local_source="Audio activity")
     assert project.analysis_review.refined_rows == []
     assert project.analysis_review.pause_threshold == 0.4
     assert project.analysis_review.local_model_name == ""
     assert project.analysis_review.local_detected_language == ""
+
+
+def test_current_project_loads_without_retaining_obsolete_review_storage() -> None:
+    project = PackProject(
+        segments=[Segment(1, 2, "Keep this segment", ["Speaker"])],
+        source_captions=[SourceCaption(1, 2, "Original evidence", "YouTube")],
+        analysis_review=AnalysisReview(
+            local_rows=[AnalysisDraftRow("1", "2", "Whisper draft", "Whisper")],
+            refined_rows=[AnalysisDraftRow("1", "2", "Refined draft", "Refined YouTube")],
+            selected_source="refined",
+        ),
+    )
+    value = project.to_dict()
+    value["analysis_review"]["youtube_rows"] = [
+        AnalysisDraftRow("1", "2", "Unused original draft", "YouTube").to_dict(),
+    ]
+    restored = PackProject.from_dict(value)
+    assert restored.to_dict() == project.to_dict()
+    assert "youtube_rows" not in restored.analysis_review.to_dict()
 
 
 @pytest.mark.parametrize("fragments", [
