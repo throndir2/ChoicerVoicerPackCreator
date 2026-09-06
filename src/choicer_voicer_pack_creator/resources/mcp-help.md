@@ -97,6 +97,12 @@ Small receipts are kept in the application's `export-cache` data directory, outs
 game packs. Up to two prompts are prepared concurrently and ZIPs avoid recompressing
 media. Full validation, overwrite consent, and rollback protection remain enabled.
 
+The editor's Export action first opens options for Fast (480p30), Higher quality (720p30),
+Custom, compatible-OGV copying, and advanced prompt padding. Acceptance updates the project
+and marks changed settings dirty; cancelling leaves it unchanged. `start_export` and
+`export_pack` do not open this dialog and still require a clean saved project. Save again
+after GUI option edits before exporting through MCP.
+
 Live processing uses the same bounded scheduler as the optional Tools > Tasks window.
 Jobs never open that window automatically; closing it does not cancel processing.
 `start_export(output_parent, expected_revision, project_id?, overwrite=false)`
@@ -146,6 +152,12 @@ projectTabs; taskRestoreProject only restores tabs closed with Keep processing.
 Details expose exportDetailsClose. Close decisions expose projectCloseKeepProcessing,
 projectCloseCancelTasks, projectCloseKeepOpen, projectCloseSave, projectCloseDiscard,
 and projectCloseCancel.
+exportProject first opens exportOptions. Project-scoped option selectors are exportQualityPreset
+(select 0=Fast, 1=Higher quality, 2=Custom), exportHeight, exportFps, exportPreserveVideo,
+exportAdvanced, exportHeadPadding, exportTailPadding, exportOptionsContinue, exportOptionsCancel.
+Numeric controls report values/ranges and support Up/Down keys; expand exportAdvanced for padding.
+Escape on exportOptions or exportOptionsCancel dismisses without applying edits. Continue may
+open native backing/destination decisions; use noninteractive tools for unattended exports.
 Speaker controls are segmentSpeakers, autoSpeakerMatching, keepSpeakerUnassigned,
 matchSpeakers, undoSpeakerMatching, cancelSpeakerMatching. Checkboxes report checked;
 speaker/exclusion inputs retain the selected segment identity across queued actions.

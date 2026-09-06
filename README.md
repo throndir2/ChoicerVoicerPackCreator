@@ -278,7 +278,7 @@ project while a pack exports, a source opens, or analysis runs.
 
 **Retry** is enabled for failed/canceled analysis, refinement, YouTube imports, exports, and failed
 backing generation when the originating document/source and review are still current. Analysis
-retries retain draft-replacement confirmation; export retries reopen destination and overwrite
+retries retain draft-replacement confirmation; export retries reopen options, destination and overwrite
 confirmation rather than blindly replaying publication. Successful tasks, retired documents,
 superseded sources/backing choices, and workflows without a safe retry are not replayed.
 
@@ -291,9 +291,25 @@ Closing a tab with active work offers **Keep processing**, **Cancel tasks and cl
 in **Tools > Tasks** restores that same tab. Open projects are selected through their tabs, not
 the Tasks window. Processing does not survive application exit.
 
-New projects default to **480p at 30 FPS** for faster exports. In the project details,
-increase **Export > Height** or **FPS** to opt into higher quality and longer encoding times.
-Saved project settings and compatible imported OGV profiles are retained rather than downgraded.
+Click **Export** to review options before any export processing starts. Choose **Fast (480p at
+30 FPS)** for quicker encoding and smaller output, **Higher quality (720p at 30 FPS)** for more
+picture detail with longer encoding times, or **Custom** to edit Height (144-2160 pixels) and
+FPS (1-120). The current quality is shown first: new projects select Fast, while saved settings
+and compatible imported OGV profiles stay selected as a matching preset or Custom.
+
+**Copy compatible imported OGV without re-encoding** avoids conversion when the imported video
+passes compatibility checks and its height/FPS match. Changing Height or FPS turns copying off;
+restoring the original profile makes the original copy preference available again. Merely opening
+the dialog or accepting unchanged settings does not downscale or re-encode compatible imports.
+Expand **Advanced: prompt audio padding** to review head/tail silence (0-2 seconds each) for newly
+generated prompts. Imported prompt recordings are not repadded.
+
+**Continue to export location...** applies the choices to the project's existing controls, then
+continues through backing music, destination and overwrite decisions. Changed settings mark the
+project unsaved; use **Save** to retain them for next time. Exporting does not save the editable
+project. **Cancel**, Escape, or closing the options dialog leaves the project unchanged and starts
+no export. Cancelling a later destination/overwrite decision keeps accepted edits unsaved.
+The same numeric controls remain available in project details.
 
 Repeat exports to the same destination reuse the previous video conversion when source content,
 height, FPS, and encoding recipe still match and the exported video's checksum is intact.
@@ -305,7 +321,7 @@ and resizing in one FFmpeg operation. ZIPs store already-compressed media withou
 and lightly compress metadata; they may be larger, but their contents and game compatibility are
 unchanged. Full staged/published validation and rollback protection remain enabled.
 
-Export opens a progress dialog with the current operation, total and current-step elapsed
+After options and destination confirmation, export opens a progress dialog with the current operation, total and current-step elapsed
 time, and a scrollable activity history without repetitive timestamp prefixes. Video conversion
 processes the **full video before extracting prompts**. Its live status shows encoded video
 position, frame count, percentage, and encoding speed when FFmpeg supplies those measurements.
