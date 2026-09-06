@@ -57,18 +57,22 @@ def test_shared_layout_follows_existing_and_new_tabs_before_debounce(make_window
     window.tabs.setCurrentWidget(first)
     qtbot.waitUntil(lambda: first._layout_restored)
     first.editor_splitter.moveSplitter(320, 1)
+    first.playback_splitter.moveSplitter(210, 1)
     first.project_section.set_collapsed(True)
     qtbot.waitUntil(lambda: first.inspector_splitter.sizes()[0] < 60)
     expected = first.editor_splitter.sizes()
+    expected_playback = first.playback_splitter.sizes()
     window.tabs.setCurrentWidget(second)
     qtbot.waitUntil(lambda: second._layout_restored)
     assert_sizes(second.editor_splitter.sizes(), expected)
+    assert_sizes(second.playback_splitter.sizes(), expected_playback)
     assert second.project_section.is_collapsed
     second.editor_splitter.moveSplitter(180, 1)
     expected = second.editor_splitter.sizes()
     third = window.add_project(PackProject(title="Third"), dirty=False)
     qtbot.waitUntil(lambda: third._layout_restored)
     assert_sizes(third.editor_splitter.sizes(), expected)
+    assert_sizes(third.playback_splitter.sizes(), expected_playback)
     assert third.project_section.is_collapsed
     window.tabs.setCurrentWidget(first)
     qtbot.waitUntil(lambda: first._layout_restored)
@@ -90,9 +94,11 @@ def test_restart_keeps_active_layout_not_last_created_tab(make_window, qtbot, le
     first._layout_save_timer.setInterval(10_000)
     window._window_layout_timer.setInterval(10_000)
     first.editor_splitter.moveSplitter(left_width, 1)
+    first.playback_splitter.moveSplitter(150, 1)
     first.selected_section.set_collapsed(True)
     qtbot.waitUntil(lambda: first.inspector_splitter.sizes()[2] < 60)
     expected_heights = first.inspector_splitter.sizes()
+    expected_playback = first.playback_splitter.sizes()
     expanded_height = first.selected_section.last_expanded_height
     assert first._layout_save_timer.isActive()
     window.close()
@@ -100,6 +106,7 @@ def test_restart_keeps_active_layout_not_last_created_tab(make_window, qtbot, le
     restored = make_window()
     assert abs(restored.editor_splitter.sizes()[0] - left_width) <= 2
     assert_sizes(restored.inspector_splitter.sizes(), expected_heights)
+    assert_sizes(restored.playback_splitter.sizes(), expected_playback)
     assert restored.selected_section.is_collapsed
     assert restored.selected_section.last_expanded_height == expanded_height
 
@@ -159,6 +166,7 @@ def test_reset_is_shared_persistent_and_does_not_change_projects_or_preferences(
     }
     window.showMaximized()
     second.editor_splitter.moveSplitter(0, 1)
+    second.playback_splitter.moveSplitter(96, 1)
     for section in second.inspector_sections:
         section.set_collapsed(True)
     window.action_reset_layout.trigger()
@@ -185,6 +193,7 @@ def test_reset_is_shared_persistent_and_does_not_change_projects_or_preferences(
     qtbot.wait(20)
     assert_sizes(restored.editor_splitter.sizes(), reference.editor_splitter.sizes())
     assert_sizes(restored.inspector_splitter.sizes(), reference.inspector_splitter.sizes())
+    assert_sizes(restored.playback_splitter.sizes(), reference.playback_splitter.sizes())
     assert not any(section.is_collapsed for section in restored.inspector_sections)
     assert restored.settings.value("recentProjects") == ["saved.cvpack.json"]
     assert restored.settings.value("lastProjectDir") == "keep-directory"
@@ -198,23 +207,28 @@ def test_workspace_view_cannot_override_shared_panes(make_window, qtbot):
     editor.editor_splitter.moveSplitter(210, 1)
     editor.project_section.set_collapsed(True)
     qtbot.waitUntil(lambda: editor.inspector_splitter.sizes()[0] < 60)
-    before = (editor.editor_splitter.sizes(), editor.inspector_splitter.sizes())
+    splitters = (editor.editor_splitter, editor.inspector_splitter, editor.playback_splitter)
+    before = [splitter.sizes() for splitter in splitters]
     window._restore_view(editor, {
         "editor_sizes": [900, 300], "inspector_sizes": [100, 100, 700],
+        "playback_sizes": [100, 500],
         "zoom": 25, "mark_in": 1, "mark_out": 4,
     })
-    assert (editor.editor_splitter.sizes(), editor.inspector_splitter.sizes()) == before
+    assert [splitter.sizes() for splitter in splitters] == before
     assert editor.project_section.is_collapsed
     assert editor.zoom_slider.value() == 25
     view = window._view_state(editor)
     assert "editor_sizes" not in view and "inspector_sizes" not in view
+    assert "playback_sizes" not in view
     assert view["mark_in"] == 1 and view["mark_out"] == 4
 
 
 @pytest.mark.parametrize("invalid", [42, "not a Qt state", QByteArray(b"bad state")])
 def test_invalid_saved_layout_uses_usable_defaults(make_window, tmp_path, invalid):
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
-    for key in ("editorSplitterV1", "inspectorSplitterV1", "windowGeometryV1"):
+    for key in (
+        "editorSplitterV1", "inspectorSplitterV1", "playbackSplitterV1", "windowGeometryV1",
+    ):
         settings.setValue(f"layout/{key}", invalid)
     settings.setValue("layout/packDetailsExpandedHeightV1", "not a height")
     settings.sync()

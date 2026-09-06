@@ -28,6 +28,7 @@ def read_layout_bytes(settings: QSettings, key: str) -> QByteArray | None:
 class EditorLayout:
     editor_state: QByteArray | None = None
     inspector_state: QByteArray | None = None
+    playback_state: QByteArray | None = None
     collapsed: tuple[bool, ...] = (False, False, False)
     expanded_heights: tuple[int, ...] = DEFAULT_INSPECTOR_SIZES
 
@@ -46,9 +47,10 @@ class EditorLayout:
                 height = default
             heights.append(max(120, min(10_000, height)))
         return cls(
-            read_layout_bytes(settings, "layout/editorSplitterV1"),
-            read_layout_bytes(settings, "layout/inspectorSplitterV1"),
-            tuple(collapsed), tuple(heights),
+            editor_state=read_layout_bytes(settings, "layout/editorSplitterV1"),
+            inspector_state=read_layout_bytes(settings, "layout/inspectorSplitterV1"),
+            playback_state=read_layout_bytes(settings, "layout/playbackSplitterV1"),
+            collapsed=tuple(collapsed), expanded_heights=tuple(heights),
         )
 
     @classmethod
@@ -59,10 +61,13 @@ class EditorLayout:
             if not section.is_collapsed:
                 section.set_last_expanded_height(height)
         return cls(
-            editor.editor_splitter.saveState(),
-            editor.inspector_splitter.saveState(),
-            tuple(section.is_collapsed for section in editor.inspector_sections),
-            tuple(section.last_expanded_height for section in editor.inspector_sections),
+            editor_state=editor.editor_splitter.saveState(),
+            inspector_state=editor.inspector_splitter.saveState(),
+            playback_state=editor.playback_splitter.saveState(),
+            collapsed=tuple(section.is_collapsed for section in editor.inspector_sections),
+            expanded_heights=tuple(
+                section.last_expanded_height for section in editor.inspector_sections
+            ),
         )
 
     def apply(self, editor: ProjectEditor) -> None:
@@ -77,10 +82,17 @@ class EditorLayout:
                 "layout/editorSplitterV1", 1,
             ),
             (
+                editor.playback_splitter, self.playback_state, None,
+                "layout/playbackSplitterV1", 1,
+            ),
+            (
                 editor.inspector_splitter, self.inspector_state, DEFAULT_INSPECTOR_SIZES,
                 "layout/inspectorSplitterV1", 9,
             ),
         ):
+            if defaults is None:
+                controls_height = splitter.widget(1).minimumSizeHint().height()
+                defaults = (max(96, splitter.height() - controls_height - 1), controls_height)
             if state is None:
                 splitter.setSizes(defaults)
             elif not splitter.restoreState(state):
@@ -95,6 +107,7 @@ class EditorLayout:
         for key, state in (
             ("layout/editorSplitterV1", self.editor_state),
             ("layout/inspectorSplitterV1", self.inspector_state),
+            ("layout/playbackSplitterV1", self.playback_state),
         ):
             if state is None:
                 settings.remove(key)

@@ -1088,6 +1088,27 @@ def test_per_document_recovery_and_workspace_restore(qtbot, tmp_path):
         current.close()
 
 
+def test_workspace_view_keeps_shared_video_timeline_sizes(workspace, qtbot):
+    first = workspace.add_project(PackProject(title="First"), dirty=False)
+    qtbot.waitUntil(lambda: first._layout_restored)
+    first.playback_splitter.moveSplitter(200, 1)
+    first_sizes = first.playback_splitter.sizes()
+    second = workspace.add_project(PackProject(title="Second"), dirty=False)
+    qtbot.waitUntil(lambda: second._layout_restored)
+    assert second.playback_splitter.sizes() == first_sizes
+    second.playback_splitter.moveSplitter(300, 1)
+    shared_sizes = second.playback_splitter.sizes()
+    assert first_sizes != shared_sizes
+
+    for editor in (first, second):
+        workspace.tabs.setCurrentWidget(editor)
+        qtbot.waitUntil(lambda editor=editor: editor._layout_restored)
+        workspace._restore_view(editor, {"playback_sizes": first_sizes})
+        assert editor.playback_splitter.sizes() == shared_sizes
+        assert "playback_sizes" not in workspace._view_state(editor)
+        assert not editor.dirty
+
+
 def test_managed_worker_cancellation_is_terminal_on_gui_thread(workspace, qtbot):
     threads = []
 

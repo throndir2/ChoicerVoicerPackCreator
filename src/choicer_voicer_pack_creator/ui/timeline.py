@@ -138,8 +138,11 @@ class TimelineWidget(QWidget):
         value = self.offset + x / max(1, self.width()) * self.visible_duration
         return max(0.0, min(self.duration, value))
 
+    def _waveform_bottom(self) -> float:
+        return 108.0 + max(0, self.height() - self.minimumHeight())
+
     def _segment_rect(self, segment: Segment) -> QRectF:
-        top = 114.0
+        top = self._waveform_bottom() + 6
         lane = min(4, self._segment_lanes.get(segment.id, 0))
         return QRectF(
             self._time_to_x(segment.start),
@@ -179,7 +182,7 @@ class TimelineWidget(QWidget):
             timestamp += step
 
     def _paint_waveform(self, painter: QPainter) -> None:
-        top, bottom = 29.0, 108.0
+        top, bottom = 29.0, self._waveform_bottom()
         center = (top + bottom) / 2.0
         painter.setPen(QColor("#1f3144"))
         painter.drawLine(QPointF(0, center), QPointF(self.width(), center))
@@ -204,11 +207,12 @@ class TimelineWidget(QWidget):
 
     def _paint_marks(self, painter: QPainter) -> None:
         x1, x2 = self._time_to_x(self.mark_in), self._time_to_x(self.mark_out)
-        painter.fillRect(QRectF(x1, 25, x2 - x1, 84), QColor(40, 190, 210, 25))
+        bottom = self._waveform_bottom() + 1
+        painter.fillRect(QRectF(x1, 25, x2 - x1, bottom - 25), QColor(40, 190, 210, 25))
         painter.setPen(QPen(QColor("#48dbe7"), 2))
-        painter.drawLine(QPointF(x1, 25), QPointF(x1, 109))
+        painter.drawLine(QPointF(x1, 25), QPointF(x1, bottom))
         painter.setPen(QPen(QColor("#ffb454"), 2))
-        painter.drawLine(QPointF(x2, 25), QPointF(x2, 109))
+        painter.drawLine(QPointF(x2, 25), QPointF(x2, bottom))
         painter.setFont(QFont("Segoe UI", 7, QFont.Weight.DemiBold))
         painter.fillRect(QRectF(x1 - 3, 25, 7, 12), QColor("#48dbe7"))
         painter.fillRect(QRectF(x2 - 3, 25, 7, 12), QColor("#ffb454"))
@@ -284,7 +288,7 @@ class TimelineWidget(QWidget):
                 self.segment_selected.emit(segment.id)
                 return
 
-        if 25 <= event.position().y() <= 109:
+        if 25 <= event.position().y() <= self._waveform_bottom() + 1:
             x1 = self._time_to_x(self.mark_in)
             x2 = self._time_to_x(self.mark_out)
             segment_id = self.mark_segment_id if self._segment(self.mark_segment_id) else ""
@@ -318,7 +322,7 @@ class TimelineWidget(QWidget):
             self.setCursor(Qt.CursorShape.OpenHandCursor)
             QToolTip.hideText()
             return
-        if 25 <= event.position().y() <= 109:
+        if 25 <= event.position().y() <= self._waveform_bottom() + 1:
             x1 = self._time_to_x(self.mark_in)
             x2 = self._time_to_x(self.mark_out)
             if abs(x - x1) <= 8 or abs(x - x2) <= 8:

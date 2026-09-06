@@ -113,6 +113,7 @@ from choicer_voicer_pack_creator.ui.speaker_matching import (
 from choicer_voicer_pack_creator.ui.subtitles import SubtitleVideoWidget
 from choicer_voicer_pack_creator.ui.tasks_window import TasksWindow
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
+from choicer_voicer_pack_creator.ui.timeline_controls import TimelineControlBar
 from choicer_voicer_pack_creator.ui.update_controller import UpdateController
 from choicer_voicer_pack_creator.ui.youtube_dialog import YouTubeDialog
 
@@ -411,7 +412,7 @@ class ProjectEditor(QWidget):
             (self.action_combine, "combine", "Combine", "Select multiple rows with Ctrl or Shift, then combine their ranges and lines."),
             (self.action_duplicate, "duplicate", "Duplicate", "Duplicate the selected segment at the same timestamp."),
             (self.action_delete, "delete", "Delete", "Delete the selected segment after confirmation."),
-            (self.action_apply_range, "apply", "Update Timing", "Update Segment Timing: replace the selected segment's start and end with the In/Out times above. Does not create a new segment. Preserved audio is only regenerated with your approval."),
+            (self.action_apply_range, "apply", "Update Timing", "Update Segment Timing: replace the selected segment's start and end with the In/Out times. Does not create a new segment. Preserved audio is only regenerated with your approval."),
             (self.action_preview, "play", "Preview", "Play Selected Segment: play its saved range, then pause. For preserved audio, listen to the prompt recording instead of the video. Does not use pending changes in the In/Out fields."),
         ):
             describe_action(action, icon, description, label=label)
@@ -462,13 +463,25 @@ class ProjectEditor(QWidget):
         left_layout.setContentsMargins(7, 7, 7, 7)
         left_layout.setSpacing(7)
 
-        self.video_widget = SubtitleVideoWidget(left)
+        self.playback_splitter = QSplitter(Qt.Orientation.Vertical, left)
+        self.playback_splitter.setObjectName("playbackSplitter")
+        self.playback_splitter.setChildrenCollapsible(False)
+        self.playback_splitter.setHandleWidth(1)
+        left_layout.addWidget(self.playback_splitter, 1)
+
+        self.video_widget = SubtitleVideoWidget(self.playback_splitter)
         self.video_widget.setObjectName("videoPreview")
         self.video_widget.setMinimumHeight(96)
         self.video_widget.setStyleSheet(
             "QGraphicsView#videoPreview { background: #000; border: 1px solid #26384d; }"
         )
-        left_layout.addWidget(self.video_widget, 1)
+        self.playback_splitter.addWidget(self.video_widget)
+
+        playback_controls = QWidget(self.playback_splitter)
+        playback_controls.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        playback_layout = QVBoxLayout(playback_controls)
+        playback_layout.setContentsMargins(0, 0, 0, 0)
+        playback_layout.setSpacing(7)
 
         transport = QHBoxLayout()
         self.play_button = QPushButton("Play")
@@ -506,9 +519,9 @@ class ProjectEditor(QWidget):
         self.volume_slider.setValue(80)
         self.volume_slider.setFixedWidth(90)
         transport.addWidget(self.volume_slider)
-        left_layout.addLayout(transport)
+        playback_layout.addLayout(transport)
 
-        self.timeline = TimelineWidget(left)
+        self.timeline = TimelineWidget(playback_controls)
         self.timeline.setToolTip(
             "Drag the white playback line or its top arrow to scrub.\n"
             "Drag a segment block or its highlighted waveform range to move it; "
@@ -523,8 +536,9 @@ class ProjectEditor(QWidget):
         self.timeline.range_changed.connect(self._timeline_range_changed)
         self.timeline.range_edit_finished.connect(self._timeline_range_edit_finished)
         self.timeline.zoom_changed.connect(self._timeline_zoom_changed)
-        left_layout.addWidget(self.timeline)
-        cutter = QHBoxLayout()
+        playback_layout.addWidget(self.timeline, 1)
+        control_bar = TimelineControlBar(playback_controls)
+        cutter = control_bar.range_layout
         self.mark_in_spin = self._time_spin()
         self.mark_in_spin.setAccessibleName("In time")
         self.mark_in_spin.setToolTip(
@@ -566,7 +580,20 @@ class ProjectEditor(QWidget):
         self.set_out_button = action_button(action_set_out, self, compact=True)
         cutter.addWidget(self.set_out_button)
         cutter.addStretch()
-        cutter.addWidget(QLabel("Zoom"))
+
+        segment_actions = control_bar.actions_layout
+        self.add_segment_button = action_button(self.action_add, self)
+        self.add_segment_button.setObjectName("primary")
+        segment_actions.addWidget(self.add_segment_button)
+        self.apply_range_button = action_button(self.action_apply_range, self, compact=True)
+        segment_actions.addWidget(self.apply_range_button)
+        self.split_button = action_button(self.action_split, self, compact=True)
+        segment_actions.addWidget(self.split_button)
+        self.preview_segment_button = action_button(self.action_preview, self, compact=True)
+        segment_actions.addWidget(self.preview_segment_button)
+        segment_actions.addStretch()
+        zoom = control_bar.zoom_layout
+        zoom.addWidget(QLabel("Zoom"))
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.zoom_slider.setAccessibleName("Timeline zoom")
         self.zoom_slider.setToolTip(
@@ -577,22 +604,15 @@ class ProjectEditor(QWidget):
         self.zoom_slider.setValue(10)
         self.zoom_slider.setFixedWidth(120)
         self.zoom_slider.valueChanged.connect(lambda value: self.timeline.set_zoom(value / 10.0))
-        cutter.addWidget(self.zoom_slider)
-        left_layout.addLayout(cutter)
-
-        segment_actions = QHBoxLayout()
-        self.add_segment_button = action_button(self.action_add, self)
-        self.add_segment_button.setObjectName("primary")
-        segment_actions.addWidget(self.add_segment_button)
-        segment_actions.addSpacing(12)
-        self.apply_range_button = action_button(self.action_apply_range, self, compact=True)
-        segment_actions.addWidget(self.apply_range_button)
-        self.split_button = action_button(self.action_split, self, compact=True)
-        segment_actions.addWidget(self.split_button)
-        self.preview_segment_button = action_button(self.action_preview, self, compact=True)
-        segment_actions.addWidget(self.preview_segment_button)
-        segment_actions.addStretch()
-        left_layout.addLayout(segment_actions)
+        zoom.addWidget(self.zoom_slider)
+        playback_layout.addWidget(control_bar)
+        self.playback_splitter.addWidget(playback_controls)
+        self.playback_splitter.setStretchFactor(0, 1)
+        self.playback_splitter.setStretchFactor(1, 0)
+        self.playback_splitter.splitterMoved.connect(self._schedule_layout_save)
+        playback_handle = self.playback_splitter.handle(1)
+        playback_handle.setAccessibleName("Resize video and timeline")
+        playback_handle.setToolTip("Drag up or down to resize the video preview and timeline.")
 
         right = QWidget(splitter)
         right.setMinimumWidth(420)

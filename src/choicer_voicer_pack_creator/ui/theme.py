@@ -132,12 +132,14 @@ QSplitter::handle:horizontal {
 }
 QSplitter::handle:vertical:hover { border-top-color: #55cfe0; }
 QSplitter::handle:horizontal:hover { border-left-color: #55cfe0; }
-QSplitter#editorSplitter::handle, QSplitter#transcriptSplitter::handle {
+QSplitter#editorSplitter::handle, QSplitter#transcriptSplitter::handle,
+QSplitter#playbackSplitter::handle {
     margin: 0;
     border: 0;
     background: #2b3d52;
 }
-QSplitter#editorSplitter::handle:hover, QSplitter#transcriptSplitter::handle:hover {
+QSplitter#editorSplitter::handle:hover, QSplitter#transcriptSplitter::handle:hover,
+QSplitter#playbackSplitter::handle:hover {
     background: #55cfe0;
 }
 QLabel#muted { color: #7f91a8; }
