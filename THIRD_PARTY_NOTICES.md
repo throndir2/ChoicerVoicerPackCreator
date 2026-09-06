@@ -114,6 +114,50 @@ and downloaded model cache both retain these files.
 Separation is probabilistic and can leave voice remnants or remove desired music/effects.
 It is not an authoritative recovery of an original instrumental mix.
 
+## Optional local character voice matching
+
+Voice matching uses the **WeSpeaker VoxCeleb ResNet34-LM** speaker embedding model
+by the [WeSpeaker contributors](https://github.com/wenet-e2e/wespeaker), under
+**Creative Commons Attribution 4.0 International (CC BY 4.0)**.
+The [original model](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM)
+was converted to ONNX and distributed by
+[k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models).
+The application uses this conversion without modifying its weights. The creators do not
+endorse the application.
+
+- Asset: `wespeaker_en_voxceleb_resnet34_LM.onnx`
+- Size: 26,530,550 bytes; downloaded only with permission, including cache repairs
+- SHA-256: `e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012`
+- License: <https://creativecommons.org/licenses/by/4.0/>
+
+The model is not included in the repository or base portable ZIP. Its verified cache works
+offline. Full provenance, attribution, and CC BY 4.0 terms are bundled in
+`resources/speaker-matching.json`, `resources/WeSpeaker-Attribution.txt`, and
+`resources/WeSpeaker-CC-BY-4.0.txt`, copied into portable `licenses/` and beside downloaded
+models. Voice signatures remain in local application data, not project exports; audio is
+never uploaded by this feature.
+
+The application also includes **kaldi-native-fbank 1.22.3** (Apache-2.0), sourced from
+<https://github.com/csukuangfj/kaldi-native-fbank/tree/v1.22.3>.
+Its unmodified native extension and companion shared library are bundled separately.
+The installed wheel's license is preserved in `licenses/kaldi-native-fbank`.
+That directory also preserves KISS FFT's BSD-3-Clause copyright/license and pybind11's
+BSD-3-Clause license, which are incorporated into the native binary. Their pinned
+upstream source references and exact notices are in `resources/KaldiNativeFbank-ThirdParty.txt`.
+ONNX Runtime, NumPy and SoundFile are shared with backing-track separation above.
+
+Training-matched preprocessing uses 16 kHz mono audio scaled by 32768, an 80-bin Hamming
+filterbank (25 ms frames, 10 ms shift, zero dither, snipped edges, 20 Hz low cutoff),
+and per-bin time mean normalization. Only the central 12 seconds of longer clips are
+sampled, with at least 1.5 seconds above the 0.005 RMS activity threshold required.
+Matching uses normalized human reference centroids, minimum cosine 0.72, minimum
+runner-up margin 0.12, and a stronger 0.78 minimum when only one character has references.
+A matching individual human reference must also exceed the absolute threshold.
+These conservative, configurable constants are not calibrated percentage confidence.
+Silence, short/nonfinite clips, ambiguous and unknown voices are left unassigned.
+This is similarity assistance, not diarization: an unmarked multi-voice clip can still
+produce a misleading match and assignments must be reviewed.
+
 ## Qt for Python / PySide6
 
 The Windows application uses Qt for Python (PySide6 6.11.2) under the LGPL v3 option. The generic

@@ -195,6 +195,9 @@ def test_main_checks_editor_youtube_mcp_both_separation_entrypoints_and_optional
     monkeypatch.setattr(SMOKE.subprocess, "run", smoke_editor)
     monkeypatch.setattr(SMOKE, "smoke_mcp", smoke_mcp)
     monkeypatch.setattr(SMOKE, "smoke_separation", lambda path: calls.append(("separation", path)))
+    monkeypatch.setattr(
+        SMOKE, "smoke_speaker_matching", lambda path: calls.append(("speaker", path)),
+    )
     monkeypatch.setattr(SMOKE, "smoke_update", lambda path: calls.append(("update", path)))
 
     assert SMOKE.main() == 0
@@ -204,5 +207,52 @@ def test_main_checks_editor_youtube_mcp_both_separation_entrypoints_and_optional
         ("mcp", mcp_executable),
         ("separation", executable),
         ("separation", mcp_executable),
+        ("speaker", executable),
+        ("speaker", mcp_executable),
         *([("update", executable)] if update_smoke else []),
     ]
+
+
+@pytest.mark.parametrize("failure", ["", "runtime", "provenance", "license"])
+def test_speaker_smoke_checks_native_worker_provenance_and_notices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    executable = tmp_path / "app" / SMOKE.EXECUTABLE
+    resources = executable.parent / "_internal" / "choicer_voicer_pack_creator" / "resources"
+    notices = executable.parent / "licenses"
+    resources.mkdir(parents=True)
+    (notices / "kaldi-native-fbank").mkdir(parents=True)
+    for name in ("WeSpeaker-Attribution.txt", "WeSpeaker-CC-BY-4.0.txt", "speaker-matching.json"):
+        (resources / name).write_text("notice")
+        (notices / name).write_text("notice")
+    (notices / "kaldi-native-fbank" / "LICENSE").write_text("Apache-2.0")
+    (notices / "kaldi-native-fbank" / "KaldiNativeFbank-ThirdParty.txt").write_text("BSD notices")
+    (resources / "speaker-matching.json").write_text(json.dumps({
+        "model": {
+            "bytes": 26530550,
+            "sha256": "wrong" if failure == "provenance" else
+            "e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012",
+        },
+    }))
+    if failure == "license":
+        (notices / "WeSpeaker-CC-BY-4.0.txt").unlink()
+
+    def invoke(command, *, env, check, timeout):
+        assert command[:2] == [str(executable), "--speaker-matching-smoke"]
+        assert check is False and timeout == 60
+        assert "PYTHONPATH" not in env and "VIRTUAL_ENV" not in env
+        Path(command[2]).write_text(json.dumps({
+            "features": [1, 198, 80], "kaldi_native_fbank": "1.22.3",
+            "numpy": "2.4.6", "onnxruntime": "1.26.0", "soundfile": "0.13.1",
+            "qt_imported": failure == "runtime",
+        }))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(SMOKE, "ROOT", tmp_path)
+    monkeypatch.setattr(SMOKE.subprocess, "run", invoke)
+    if failure:
+        with pytest.raises(RuntimeError):
+            SMOKE.smoke_speaker_matching(executable)
+    else:
+        SMOKE.smoke_speaker_matching(executable)
+    assert not list((tmp_path / "build" / "speaker-smoke").iterdir())

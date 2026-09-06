@@ -1,0 +1,25 @@
+WeSpeaker VoxCeleb ResNet34-LM speaker embedding model
+
+Attribution: WeSpeaker contributors (wenet-e2e/WeSpeaker).
+Original model: https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM
+Original project and authors: https://github.com/wenet-e2e/wespeaker
+License: Creative Commons Attribution 4.0 International (CC BY 4.0).
+License text: WeSpeaker-CC-BY-4.0.txt
+License URL: https://creativecommons.org/licenses/by/4.0/
+
+The ONNX conversion is distributed by the k2-fsa/sherpa-onnx project:
+https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models
+Asset: wespeaker_en_voxceleb_resnet34_LM.onnx
+Size: 26,530,550 bytes
+SHA-256: e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012
+
+Choicer Voicer Pack Creator downloads this ONNX conversion without modifying
+the weights. Conversion from the original training format is the upstream
+distributor's change. The original creators do not endorse this application.
+The weights are not committed to this repository or bundled with the app.
+
+Preprocessing uses kaldi-native-fbank 1.22.3 (Apache License 2.0),
+https://github.com/csukuangfj/kaldi-native-fbank/tree/v1.22.3
+with the model's training-matched 80-bin Hamming-window filterbank, scaled
+16 kHz mono waveform, and per-bin time mean normalization. The application's
+bounded input selection and conservative cosine matching are not diarization.

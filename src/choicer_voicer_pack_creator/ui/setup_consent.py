@@ -73,8 +73,14 @@ class SetupConsent:
             request.callback(accepted and request.current())
 
     def cancel_project(self, project_id: str) -> None:
-        cancelled = [request for request in self._requests if request.project_id == project_id]
-        self._requests = [request for request in self._requests if request.project_id != project_id]
+        self._cancel_requests(lambda request: request.project_id == project_id)
+
+    def cancel_request(self, callback: Callable[[bool], None]) -> None:
+        self._cancel_requests(lambda request: request.callback is callback)
+
+    def _cancel_requests(self, matches: Callable[[_Request], bool]) -> None:
+        cancelled = [request for request in self._requests if matches(request)]
+        self._requests = [request for request in self._requests if not matches(request)]
         for request in cancelled:
             request.callback(False)
         if self.box is not None:

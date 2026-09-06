@@ -387,7 +387,8 @@ Whisper Line** (or **Play Selected Range** for an activity-only scan) to auditio
 lines, correct text, then use the highlighted **Use Whisper Transcript** action. **Rerun Whisper**
 is a separate, secondary action. Existing drafts stay editable during a rerun; if they change
 before it finishes, the new candidate requires an explicit replacement decision. Existing segments
-are never replaced. Suggested segments intentionally have no speaker; assign speakers manually.
+are never replaced. Suggested segments initially have no speaker. Name a reviewed dialogue segment
+to start optional background matching, or assign every speaker manually.
 Whisper is probabilistic and can mishear names, stylized vocalizations, non-English speech, music,
 or overlapping speakers, so every result remains review evidence rather than authoritative data.
 One language selection applies to an entire scan; use Auto-detect for primarily single-language
@@ -653,6 +654,44 @@ title. This protects custom extensions that the editor cannot round-trip.
 
 If a project is moved without its media, use the **Choose** control beside Video, Backing, Audio
 file, or Still image to relink the missing asset.
+
+## Background speaker matching
+
+With **Auto-fill matching speakers in the background** enabled in the Segments panel, finish
+typing a speaker name (Enter or move focus out of the field) to compare that voice with eligible
+unassigned segments. You can keep editing captions, timings, and other projects while it runs.
+The first use requests permission for a checksum-verified WeSpeaker voice model (about 25 MiB).
+Inference is local, needs no account or token, and does not upload audio or transcripts.
+**Match now** starts or retries a pass; **Cancel** pauses matching until explicitly resumed.
+Progress and cancellation are also available in **Tools > Tasks**.
+
+Only strong matches fill blank names. Existing names are never replaced. Results for segments
+edited, removed, or retimed during processing are discarded; changing a reference name causes a
+new comparison using the latest inputs. Completion does not move the playhead, select a different
+segment, or replace the caption being edited. Automatic names are shown in italics with a review tooltip and saved in the editable project
+but are never reused as trusted voice references. Edit a name yourself to provide a reference.
+New manually added segments start unassigned when matching is enabled.
+
+Clearing a name deliberately checks **Keep unassigned (skip auto-fill)**. Uncheck it on that
+segment to include it again. **Undo auto-fill** clears unchanged names from the last automatic
+batch in this session, keeps those segments unassigned, and preserves subsequent manual edits.
+The project-wide enabled setting and each segment's assignment/exclusion state survive saving.
+Automatic changes mark the project unsaved; use **Save Project** to persist them.
+
+Voice signatures are cached locally by model/preprocessing version, source-file identity, and
+audio range; a name change reuses the signatures instead of retranscribing or separating audio.
+Matching uses at most two inference threads and does not run full-video speaker diarization.
+Each clip uses at most its central 12 seconds, with at least 1.5 seconds of audible activity
+required; this bounds the work but does not prove the sampled clip contains only one speaker.
+Source media and preserved prompt recordings are never modified. Closing a tab with
+**Keep processing** retains its pending work; quitting the application stops it.
+
+This identifies similar voices, not fictional character identities. Short or silent clips,
+explicit nonverbal-only captions such as `[grunting]`, multiple-speaker assignments, and ambiguous
+matches are skipped. Music, overlapping dialogue, shouting, impersonations, or one actor playing
+several characters can still fool the model. Similarity scores are not accuracy percentages:
+review automatic names before exporting. Reopening a saved project does not start matching by
+itself; finish a name edit or use **Match now**.
 
 ## Simultaneous speakers
 

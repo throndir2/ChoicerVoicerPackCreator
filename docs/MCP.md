@@ -240,6 +240,9 @@ Export details expose `exportDetailsClose`; project-close decisions expose
 `projectCloseKeepProcessing`, `projectCloseCancelTasks`, `projectCloseKeepOpen`,
 `projectCloseSave`, `projectCloseDiscard`, and `projectCloseCancel`. Scrolling selectors are
 `projectEditorScroll`, `projectEditorScrollbar`, `projectDetailsScrollbar`, and `selectedSegmentScrollbar`.
+Speaker controls expose `segmentSpeakers`, `autoSpeakerMatching`, `keepSpeakerUnassigned`,
+`matchSpeakers`, `undoSpeakerMatching`, and `cancelSpeakerMatching`. Checkbox state is reported
+as `checked`. Speaker-field and exclusion inputs retain the selected segment's identity.
 Editor selectors are scoped to the visible `project_id`; select that tab before typing.
 Closed/discarded document IDs are rejected immediately, even while their task cleanup finishes.
 Documents explicitly kept processing in the background retain their identity.
@@ -315,6 +318,15 @@ real author credits, and timings you have reviewed.
    Empty captions/speaker lists are allowed while drafting, but they fail export validation.
    A segment's `characters` field is its speaker list. Use a new ID-free entry for a second
    independently recorded simultaneous speaker.
+   Setting `characters` records a manual assignment; explicitly clearing it excludes the segment
+   from automatic matching. Set `speaker_assignment: "manual"` to make a cleared segment eligible
+   again, or `"excluded"` to keep an empty segment unassigned. The returned `"automatic"` state is
+   generated only by the editor and is not accepted as an assignment override.
+   `update_project` accepts `auto_speaker_matching` to persist the per-project preference.
+   In live mode, committed names can trigger background matching of blank segments, subject to
+   the editor's nonmodal model-download consent. Manual edits win over stale background results.
+   These completions change the document revision; read it again before the next edit/save.
+   Headless metadata edits do not launch automatic matching or download speaker models.
 5. Review frames and prompt audio with the user, and correct boundaries, captions, and speakers.
    Use `show_in_editor` for review in live mode. Only request previews after considering the
    disclosure below.
