@@ -8,13 +8,14 @@ import wave
 from array import array
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import (
     QCoreApplication,
-    QLockFile,
     QObject,
+    QSettings,
     QStandardPaths,
     Qt,
     QTimer,
@@ -31,6 +32,7 @@ from choicer_voicer_pack_creator.diagnostics import (
     diagnostic_event,
     diagnostic_exception,
 )
+from choicer_voicer_pack_creator.single_instance import SingleInstance, SingleInstanceError
 
 if TYPE_CHECKING:
     from choicer_voicer_pack_creator.ui.main_window import MainWindow
@@ -72,47 +74,73 @@ def main(argv: Sequence[str] | None = None) -> int:
     return run_editor(arguments)
 
 
+@dataclass(frozen=True)
+class EditorArguments:
+    arguments: list[str]
+    paths: tuple[Path, ...]
+    data_root: Path | None
+    smoke_test: bool
+
+
+def parse_editor_arguments(argv: Sequence[str]) -> EditorArguments:
+    arguments = list(argv)
+    if not arguments:
+        arguments = ["choicer-voicer-pack-creator"]
+    qt_arguments = [arguments[0]]
+    paths = []
+    data_root = None
+    smoke_test = False
+    positional_only = False
+    index = 1
+    while index < len(arguments):
+        item = arguments[index]
+        option, separator, value = item.partition("=")
+        if not positional_only and option in {"--data-root", "--test-data-root"}:
+            if data_root is not None:
+                raise ValueError("Specify only one isolated application data root.")
+            if not separator:
+                index += 1
+                value = arguments[index] if index < len(arguments) else ""
+            if not value or "\0" in value or not Path(value).is_absolute():
+                raise ValueError(f"{option} requires an absolute local directory path.")
+            data_root = Path(value).resolve()
+        elif item == "--" and not positional_only:
+            positional_only = True
+        else:
+            qt_arguments.append(item)
+            if positional_only or not item.startswith("-"):
+                if not item or "\0" in item:
+                    raise ValueError("File paths must not be empty or contain NUL characters.")
+                paths.append(Path(item).resolve())
+            elif item == "--smoke-test":
+                smoke_test = True
+        index += 1
+    if smoke_test and data_root is not None:
+        raise ValueError("--smoke-test cannot be combined with an isolated data-root option.")
+    return EditorArguments(qt_arguments, tuple(paths), data_root, smoke_test)
+
+
 def run_editor(
     argv: Sequence[str],
     *,
     start_automation: Callable[[MainWindow], object] | None = None,
 ) -> int:
-    arguments = list(argv)
-    smoke_test = "--smoke-test" in arguments
+    try:
+        options = parse_editor_arguments(argv)
+    except (ValueError, OSError) as error:
+        print(f"Invalid editor arguments: {error}", file=sys.stderr)
+        return 2
+    arguments, smoke_test = options.arguments, options.smoke_test
     QCoreApplication.setOrganizationName("ChoicerVoicerCommunity")
     QCoreApplication.setApplicationName("Choicer Voicer Pack Creator")
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeMenuBar, False)
-    app_data = Path(
+    regular_data = Path(
         QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
-    )
-    instance_lock: QLockFile | None = None
-    if not smoke_test:
-        try:
-            app_data.mkdir(parents=True, exist_ok=True)
-        except OSError as error:
-            if start_automation is not None:
-                print(f"Application data is unavailable: {error}", file=sys.stderr)
-                return 2
-            app = QApplication(arguments)
-            QMessageBox.critical(None, "Application data is unavailable", str(error))
-            return 2
-        instance_lock = QLockFile(str(app_data / "application-instance.lock"))
-        if not instance_lock.tryLock(100):
-            if start_automation is not None:
-                print(
-                    "The editor is already running. Close it before starting live MCP, "
-                    "or use --headless with a separate project.",
-                    file=sys.stderr,
-                )
-                return 3
-            app = QApplication(arguments)
-            QMessageBox.warning(
-                None,
-                "Choicer Voicer Pack Creator is already running",
-                "Close the existing editor window before opening another project. This protects "
-                "automatic recovery data from concurrent changes.",
-            )
-            return 3
+    ).resolve()
+    if options.data_root == regular_data:
+        print("An isolated data root must differ from the regular application data.", file=sys.stderr)
+        return 2
+    app_data = options.data_root or regular_data
 
     startup_notices: list[str] = []
     with ExitStack() as stack:
@@ -120,6 +148,39 @@ def run_editor(
             Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="cvpc-smoke-")))
             if smoke_test else app_data
         )
+        instance = None
+        if not smoke_test:
+            try:
+                data_root.mkdir(parents=True, exist_ok=True)
+                instance = SingleInstance(data_root)
+                stack.callback(instance.close)
+                primary = instance.try_acquire()
+            except (OSError, SingleInstanceError) as error:
+                if start_automation is not None:
+                    print(f"Application data is unavailable: {error}", file=sys.stderr)
+                    return 2
+                app = QApplication(arguments)
+                QMessageBox.critical(None, "Application data is unavailable", str(error))
+                return 2
+            if not primary:
+                if start_automation is not None:
+                    print(
+                        "The editor is already running. Live MCP cannot attach to an unrelated "
+                        "editor. Close it, or use --data-root with a separate absolute directory "
+                        "for an isolated visible editor.",
+                        file=sys.stderr,
+                    )
+                    return 3
+                app = QApplication(arguments)
+                try:
+                    instance.forward_paths(options.paths)
+                except SingleInstanceError as error:
+                    QMessageBox.warning(
+                        None, "Could not contact the running editor",
+                        f"{error}\n\nThe existing workspace and recovery data were left unchanged.",
+                    )
+                    return 3
+                return 0
         diagnostics = ApplicationDiagnostics(
             data_root / "analysis",
             on_error=None if smoke_test else startup_notices.append,
@@ -141,8 +202,28 @@ def run_editor(
         diagnostic_event(
             "application_initializing", qt_version=qVersion(), smoke_test=smoke_test,
             data_root=data_root, log_directory=diagnostics.path.parent,
+            isolated_data_root=options.data_root is not None,
         )
         app = QApplication(arguments)
+        if options.data_root is not None:
+            app.setProperty("isolatedDataRoot", str(data_root))
+        if instance is not None:
+            try:
+                instance.listen()
+            except SingleInstanceError as error:
+                diagnostic_exception("single_instance_unavailable", error)
+                if start_automation is not None:
+                    print(str(error), file=sys.stderr)
+                else:
+                    QMessageBox.critical(None, "Local open requests are unavailable", str(error))
+                return 2
+        settings = (
+            QSettings(str(data_root / "settings.ini"), QSettings.Format.IniFormat)
+            if options.data_root is not None or smoke_test else None
+        )
+        if settings is not None:
+            settings.setFallbacksEnabled(False)
+            stack.callback(settings.sync)
         notifications = _DiagnosticNotifications()
         if not smoke_test:
             diagnostics.on_error = notifications.failed.emit
@@ -155,7 +236,8 @@ def run_editor(
         stack.callback(heartbeat.stop)
         diagnostics.exit_code = _run_application(
             arguments, app, data_root, smoke_test=smoke_test,
-            start_automation=start_automation,
+            start_automation=start_automation, initial_paths=options.paths,
+            settings=settings, single_instance=instance,
         )
         return diagnostics.exit_code
 
@@ -163,6 +245,9 @@ def run_editor(
 def _run_application(
     arguments: list[str], app: QApplication, app_data: Path, *, smoke_test: bool,
     start_automation: Callable[[MainWindow], object] | None = None,
+    initial_paths: Sequence[Path] | None = None,
+    settings: QSettings | None = None,
+    single_instance: SingleInstance | None = None,
 ) -> int:
     # Import optional/native workflows after the diagnostic sink and exception hooks exist.
     from choicer_voicer_pack_creator.analysis import (
@@ -279,21 +364,50 @@ def _run_application(
             + "\n",
             encoding="utf-8",
         )
-    paths = [item for item in arguments[1:] if not item.startswith("--")]
-    initial_path = Path(paths[0]).resolve() if paths else None
+    paths = tuple(initial_paths) if initial_paths is not None else parse_editor_arguments(
+        arguments
+    ).paths
     recovery_store = None
     if not smoke_test:
         recovery_store = RecoveryStore(app_data / "recovery-v2.json")
     window = MainWindow(
         media,
-        initial_path,
+        settings=settings,
         recovery_store=recovery_store,
         analysis_data_root=app_data / "analysis",
     )
     window.show()
+    if app.property("isolatedDataRoot"):
+        isolated_suffix = f" — Isolated data: {app_data}"
+
+        def mark_isolated(title: str) -> None:
+            if not title.endswith(isolated_suffix):
+                window.setWindowTitle(title + isolated_suffix)
+
+        window.windowTitleChanged.connect(mark_isolated)
+        mark_isolated(window.windowTitle())
+    if not smoke_test:
+        window.restore_workspace()
+
+    def open_paths(received: Sequence[Path]) -> None:
+        for path in received:
+            try:
+                window.open_path(path)
+            except (OSError, ValueError, RuntimeError) as error:
+                diagnostic_exception("open_request_failed", error)
+                window.notice("Could not open project", f"{path}\n\n{error}")
+        if window.isMinimized():
+            window.showNormal()
+        window.raise_()
+        window.activateWindow()
+
+    if single_instance is not None:
+        single_instance.set_open_handler(open_paths)
+    if paths:
+        QTimer.singleShot(0, lambda: open_paths(paths))
     if start_automation is not None:
         window.automation_runtime = start_automation(window)
-    diagnostic_event("main_window_ready", initial_path=initial_path)
+    diagnostic_event("main_window_ready", initial_path=paths[0] if paths else None, paths=len(paths))
     if smoke_test:
         window.dirty = False
         QTimer.singleShot(350, app.quit)
