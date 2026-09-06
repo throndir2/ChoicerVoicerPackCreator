@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -67,3 +68,20 @@ def test_nested_scope_combines_cancellation():
         operation_scope(lambda: True),
     ):
         check_cancelled()
+
+
+def test_source_inventory_is_cancellable_while_enumerating(tmp_path, monkeypatch):
+    enumerated = []
+
+    def entries(path, pattern):
+        for index in range(100):
+            enumerated.append(index)
+            yield path / str(index)
+
+    monkeypatch.setattr(Path, "rglob", entries)
+    with (
+        operation_scope(cancelled=lambda: len(enumerated) > 1),
+        pytest.raises(OperationCancelled),
+    ):
+        SourceSnapshot.capture([tmp_path])
+    assert len(enumerated) == 2
