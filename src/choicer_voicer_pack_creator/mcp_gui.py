@@ -87,6 +87,10 @@ class EditorBridge(QObject):
             if modal.isVisible():
                 QTimer.singleShot(100, self._disconnect)
                 return
+        # Workspace close questions are deliberately nonmodal. Reject pending choices
+        # before requesting EOF shutdown so their in-progress close state cannot trap it.
+        for decision in tuple(self.window._decisions):
+            decision.reject()
         self.window.close()
 
 

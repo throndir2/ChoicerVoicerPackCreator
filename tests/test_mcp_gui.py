@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import threading
 from concurrent.futures import Future
 from pathlib import Path
@@ -196,6 +197,17 @@ def test_disconnect_preserves_each_documents_recovery(qtbot, live_editor):
     qtbot.waitUntil(lambda: not window.isVisible())
     assert first.recovery_store.load().project.title == "Live"
     assert second.recovery_store.load().project.title == "Recover second"
+
+
+def test_disconnect_dismisses_nonmodal_close_question_without_losing_draft(qtbot, live_editor):
+    window, bridge, _automation = live_editor
+    editor = window.active_editor
+    editor._set_dirty(True)
+    assert not window.close()
+    assert window._decisions and window._closing
+    bridge.disconnected.emit()
+    qtbot.waitUntil(lambda: not window.isVisible())
+    assert editor.recovery_store.load().project.title == "Live"
 
 
 def test_bound_live_edit_targets_original_document_after_tab_switch(qtbot, live_editor):
@@ -475,3 +487,51 @@ def test_closed_pending_document_is_not_reactivated_by_mcp(qtbot, live_editor, t
     finally:
         release.set()
     qtbot.waitUntil(lambda: not job.record.active)
+
+
+@pytest.mark.integration
+def test_real_live_mcp_export_cancellation_cleans_staging(qtbot, live_editor, tmp_path):
+    from choicer_voicer_pack_creator.mcp_jobs import LiveJobs
+    from choicer_voicer_pack_creator.media import MediaTools
+
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg/FFprobe required")
+    window, bridge, automation = live_editor
+    media = MediaTools()
+    source = tmp_path / "cancellation-source.mp4"
+    media.run([
+        media.ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
+        "testsrc2=size=640x360:rate=24:duration=12", "-f", "lavfi", "-i",
+        "sine=frequency=440:sample_rate=48000:duration=12", "-shortest",
+        "-c:v", "mpeg4", "-c:a", "aac", str(source),
+    ], "Preparing generated cancellation fixture")
+    project = PackProject(
+        title="Cancel fixture", authors=["Tester"], video_path=str(source), video_duration=12,
+        video_height=360, video_fps=24,
+        segments=[Segment(index * 0.3, index * 0.3 + 0.2, "Tone", ["Test"]) for index in range(32)],
+    )
+    path = tmp_path / "cancel.cvpack.json"
+    ProjectStore.save(project, path)
+    window.media = media
+    opened = in_worker(qtbot, lambda: automation.open_project(str(path)))
+    bound = in_worker(qtbot, lambda: automation.for_project(opened["project_id"]))
+    jobs = LiveJobs(bridge)
+    output = tmp_path / "output"
+    record = in_worker(qtbot, lambda: jobs.start(
+        bound, "export", opened["revision"], output_parent=str(output),
+    ))
+    handle = window.job_manager.handle(record["job_id"])
+    qtbot.waitUntil(
+        lambda: handle.record.state == "running" and handle.record.message != "Starting",
+        timeout=20000,
+    )
+    second = window.add_project(PackProject(title="Keep editing"), dirty=False)
+    cancelled = in_worker(qtbot, lambda: jobs.cancel(handle.id))
+    assert cancelled["cancel_requested"]
+    qtbot.waitUntil(lambda: not handle.record.active, timeout=20000)
+    assert handle.record.state == "cancelled", handle.record
+    assert window.active_editor is second
+    assert not (output / "Cancel fixture").exists()
+    assert not (output / "Cancel fixture.zip").exists()
+    assert not list(output.glob(".cvpc-*"))
+    assert in_worker(qtbot, bound.get_project)["revision"] == opened["revision"]
