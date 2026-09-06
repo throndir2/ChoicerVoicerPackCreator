@@ -11,7 +11,7 @@ def _point(widget: TimelineWidget, timestamp: float, y: int) -> QPoint:
     return QPoint(round(widget._time_to_x(timestamp)), y)
 
 
-@pytest.mark.parametrize("y", [4, 65, 180])
+@pytest.mark.parametrize("y", [4, 65, 210])
 def test_playhead_drag_seeks_continuously_without_editing_ranges(qtbot, y: int) -> None:
     timeline = TimelineWidget()
     qtbot.addWidget(timeline)
@@ -189,6 +189,43 @@ def test_waveform_handles_resize_selected_segment(qtbot) -> None:
     assert segment.end == pytest.approx(4.0)
     assert timeline.mark_in == pytest.approx(1.25)
     assert finished == [(segment.id, 2.0, 4.0, 1.25, 4.0)]
+
+
+@pytest.mark.parametrize("lane_count", [1, 5])
+def test_taller_timeline_expands_waveform_and_keeps_segment_lanes_visible(qtbot, lane_count):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.set_duration(10)
+    segments = [Segment(2, 4, f"Line {index}", ["Speaker"]) for index in range(lane_count)]
+    timeline.set_segments(segments)
+    timeline.set_marks(2, 4, segments[0].id)
+    timeline.set_selected(segments[0].id)
+    timeline.set_waveform([1.0] * 100)
+    timeline.resize(1000, timeline.minimumHeight())
+    timeline.show()
+    original_bottom = timeline._waveform_bottom()
+    original_rects = [timeline._segment_rect(segment) for segment in segments]
+
+    timeline.resize(1000, timeline.minimumHeight() + 200)
+    assert timeline._waveform_bottom() == original_bottom + 200
+    for segment, original_rect in zip(segments, original_rects, strict=True):
+        rect = timeline._segment_rect(segment)
+        assert rect.top() == original_rect.top() + 200
+        assert rect.height() == original_rect.height()
+        assert rect.bottom() < timeline.height()
+
+    image = timeline.grab().toImage()
+    waveform_y = round(timeline._waveform_bottom() - 30)
+    assert image.pixelColor(800, waveform_y).name() == "#32c6d5"
+    assert image.pixelColor(200, waveform_y).name() == "#48dbe7"
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 2, waveform_y))
+    qtbot.mouseMove(timeline, _point(timeline, 1.25, waveform_y))
+    qtbot.mouseRelease(
+        timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 1.25, waveform_y),
+    )
+    assert segments[0].start == pytest.approx(1.25)
+    assert timeline.mark_in == pytest.approx(1.25)
+    assert all(segment.start == 2 for segment in segments[1:])
 
 
 def test_segment_body_drag_moves_range_without_changing_duration(qtbot) -> None:

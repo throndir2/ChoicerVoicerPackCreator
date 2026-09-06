@@ -267,6 +267,12 @@ button. The Windows close button or **Alt+F4** exits the application, prompting 
 unsaved projects and to stop active tasks before exiting.
 Backing generation remains in Pack Details and the Project menu.
 
+The In/Out fields, segment actions, and timeline zoom share one row below the waveform;
+actions wrap to a second row only when the video pane is too narrow.
+Drag the divider between the video preview and playback controls up or down to give the video
+or timeline more room. The waveform grows with its pane, and the divider position is remembered
+between launches and when restoring each project's workspace view.
+
 Drag local video files (MP4, MKV, MOV, WebM, OGV, or AVI) or saved `.cvpack.json` projects
 anywhere in the main editor window to open each in its own tab, without replacing existing
 work or discarding unsaved edits. Dropping an already-open project focuses its tab instead

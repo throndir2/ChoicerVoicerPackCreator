@@ -3,7 +3,7 @@ from __future__ import annotations
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtCore import QItemSelectionModel, QSettings, Qt, QUrl
+from PySide6.QtCore import QItemSelectionModel, QPoint, QSettings, Qt, QUrl
 from PySide6.QtWidgets import QApplication, QLabel
 
 from choicer_voicer_pack_creator.models import PackProject, Segment
@@ -35,7 +35,7 @@ def window(qtbot, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
-def test_controls_use_two_rows_with_help_only_in_tooltips(window, qtbot, stylesheet):
+def test_controls_share_one_row_with_help_only_in_tooltips(window, qtbot, stylesheet):
     window.setStyleSheet(stylesheet)
     window.show()
     qtbot.waitUntil(lambda: window._layout_restored)
@@ -53,8 +53,15 @@ def test_controls_use_two_rows_with_help_only_in_tooltips(window, qtbot, stylesh
     for button in (window.apply_range_button, window.split_button, window.preview_segment_button):
         assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
         assert not button.icon().isNull()
-    assert window.mark_in_spin.geometry().bottom() < window.add_segment_button.y()
-    assert window.zoom_slider.y() < window.add_segment_button.y()
+    row_y = window.mark_in_spin.geometry().center().y()
+    for control in (
+        window.mark_out_spin, window.set_in_button, window.set_out_button,
+        window.add_segment_button, window.apply_range_button, window.split_button,
+        window.preview_segment_button, window.zoom_slider,
+    ):
+        assert abs(control.geometry().center().y() - row_y) <= 1
+    assert window.set_out_button.geometry().right() < window.add_segment_button.x()
+    assert window.preview_segment_button.geometry().right() < window.zoom_slider.x()
     buttons = (
         window.add_segment_button, window.apply_range_button,
         window.split_button, window.preview_segment_button,
@@ -84,6 +91,110 @@ def test_native_timeline_controls_fit_without_clipping(window, qtbot, stylesheet
     ):
         assert control.width() >= control.sizeHint().width()
         assert control.parentWidget().rect().contains(control.geometry())
+
+
+@pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
+def test_segment_controls_wrap_only_when_the_video_pane_is_narrow(window, qtbot, stylesheet):
+    window.setStyleSheet(stylesheet)
+    window.show()
+    qtbot.waitUntil(lambda: window._layout_restored)
+    for width in (960, 620, 960):
+        window.editor_splitter.moveSplitter(width, 1)
+        if width == 620:
+            qtbot.waitUntil(
+                lambda: window.add_segment_button.y() > window.mark_in_spin.geometry().bottom()
+            )
+        else:
+            qtbot.waitUntil(lambda: abs(
+                window.add_segment_button.geometry().center().y()
+                - window.mark_in_spin.geometry().center().y()
+            ) <= 1)
+        for control in (
+            window.mark_in_spin, window.mark_out_spin, window.set_in_button,
+            window.set_out_button, window.add_segment_button, window.apply_range_button,
+            window.split_button, window.preview_segment_button, window.zoom_slider,
+        ):
+            assert control.isVisible()
+            assert control.parentWidget().rect().contains(control.geometry())
+
+
+@pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
+def test_video_timeline_divider_resizes_both_panes_without_hiding_controls(
+    window, qtbot, stylesheet,
+):
+    window.setStyleSheet(stylesheet)
+    window.show()
+    qtbot.waitUntil(lambda: window._layout_restored)
+    splitter = window.playback_splitter
+    control_bar = window.add_segment_button.parentWidget()
+    qtbot.waitUntil(lambda: (
+        abs(
+            window.add_segment_button.geometry().center().y()
+            - window.mark_in_spin.geometry().center().y()
+        ) <= 1
+        and control_bar.height() == control_bar.minimumSizeHint().height()
+    ))
+    assert splitter.orientation() == Qt.Orientation.Vertical
+    assert not splitter.childrenCollapsible()
+    assert splitter.handleWidth() == 1
+    handle = splitter.handle(1)
+    assert handle.height() >= 5
+    assert handle.accessibleName() == "Resize video and timeline"
+    assert handle.toolTip()
+    assert window.timeline.height() >= window.timeline.minimumHeight()
+    initial_size = window.size()
+    initial_video, initial_controls = splitter.sizes()
+    initial_waveform_height = window.timeline.height()
+    assert splitter.widget(1).y() - window.video_widget.height() == 1
+
+    for delta in (-120, 80):
+        before = splitter.sizes()
+        before_timeline = window.timeline.height()
+        grab_point = handle.rect().center()
+        target = handle.mapToGlobal(grab_point) + QPoint(0, delta)
+        qtbot.mousePress(handle, Qt.MouseButton.LeftButton, pos=grab_point)
+        qtbot.mouseMove(handle, handle.mapFromGlobal(target))
+        qtbot.mouseRelease(handle, Qt.MouseButton.LeftButton, pos=handle.mapFromGlobal(target))
+        qtbot.waitUntil(
+            lambda before=before, delta=delta: abs(splitter.sizes()[0] - before[0] - delta) <= 2
+        )
+        assert abs(splitter.sizes()[1] - before[1] + delta) <= 2
+        assert abs(window.timeline.height() - before_timeline + delta) <= 2
+        assert window.size() == initial_size
+        for control in (window.play_button, window.mark_in_spin, window.add_segment_button):
+            assert control.isVisible()
+            assert control.parentWidget().rect().contains(control.geometry())
+
+    assert splitter.sizes()[0] < initial_video
+    assert splitter.sizes()[1] > initial_controls
+    assert window.timeline.height() > initial_waveform_height
+    for position in (0, splitter.height()):
+        splitter.moveSplitter(position, 1)
+        assert window.video_widget.height() >= 96
+        assert window.timeline.height() >= window.timeline.minimumHeight()
+        assert all(size > 0 for size in splitter.sizes())
+        assert window.size() == initial_size
+    assert not window.dirty
+
+
+def test_video_timeline_divider_restores_saved_layout(window, qtbot, tmp_path):
+    window.show()
+    qtbot.waitUntil(lambda: window._layout_restored)
+    window.playback_splitter.moveSplitter(220, 1)
+    saved_sizes = window.playback_splitter.sizes()
+    qtbot.waitUntil(lambda: window.settings.contains("layout/playbackSplitterV1"))
+    window.close()
+
+    restored = MainWindow(
+        UnusedMedia(),
+        settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat),
+    )  # type: ignore[arg-type]
+    qtbot.addWidget(restored)
+    restored._set_project(window.project, None, mark_dirty=False)
+    restored.show()
+    qtbot.waitUntil(lambda: restored._layout_restored)
+    assert restored.playback_splitter.sizes() == saved_sizes
+    restored.close()
 
 
 def test_segment_buttons_require_one_selection_and_reset_with_project(window):
