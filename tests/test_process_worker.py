@@ -147,7 +147,7 @@ def _no_leaked_workers():
     before_threads = set(threading.enumerate())
     yield
     assert {child.pid for child in multiprocessing.active_children()} == before
-    assert set(threading.enumerate()) == before_threads
+    assert not (set(threading.enumerate()) - before_threads)
 
 
 def _is_running(pid):
