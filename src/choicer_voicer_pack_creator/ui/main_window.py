@@ -230,6 +230,8 @@ class MainWindow(QMainWindow):
         self.action_open = QAction("Open Project…", self)
         self.action_open.setShortcut(QKeySequence.StandardKey.Open)
         self.action_open.triggered.connect(self.open_project)
+        self.action_clear_recent = QAction("Clear Recent Projects", self)
+        self.action_clear_recent.triggered.connect(lambda: self._set_recent_project_paths([]))
         self.action_import = QAction("Import Existing Pack…", self)
         self.action_import.setShortcut(QKeySequence("Ctrl+I"))
         self.action_import.triggered.connect(self.import_pack)
@@ -277,12 +279,12 @@ class MainWindow(QMainWindow):
         self.action_duplicate.triggered.connect(self.duplicate_segment)
 
         file_menu = self.menuBar().addMenu("&File")
-        file_menu.addActions(
-            [
-                self.action_new, self.action_youtube, self.action_open,
-                self.action_import, self.action_import_zip,
-            ]
-        )
+        file_menu.addActions([self.action_new, self.action_youtube, self.action_open])
+        self.recent_projects_menu = file_menu.addMenu("Open &Recent")
+        self.recent_projects_menu.setToolTipsVisible(True)
+        self.recent_projects_menu.aboutToShow.connect(self._refresh_recent_projects_menu)
+        self._refresh_recent_projects_menu()
+        file_menu.addActions([self.action_import, self.action_import_zip])
         file_menu.addSeparator()
         file_menu.addActions([self.action_save, self.action_save_as, self.action_restore_previous])
         file_menu.addSeparator()
@@ -846,6 +848,52 @@ class MainWindow(QMainWindow):
 
     # ---------- Project lifecycle ----------
 
+    def _recent_project_paths(self) -> list[Path]:
+        return [
+            Path(value) for value in self.settings.value("recentProjects", [], type=list)
+        ][:10]
+
+    def _set_recent_project_paths(self, paths: list[Path]) -> None:
+        self.settings.setValue("recentProjects", [str(path) for path in paths[:10]])
+        self.settings.sync()
+        self._refresh_recent_projects_menu()
+        if self.settings.status() != QSettings.Status.NoError:
+            QMessageBox.warning(
+                self,
+                "Could not save recent projects",
+                "The recent-project list could not be saved to your application settings. "
+                "Project files are not affected.\n\n"
+                f"Settings location: {self.settings.fileName()}",
+            )
+
+    def _remember_recent_project(self, path: Path) -> None:
+        path = path.resolve()
+        self._set_recent_project_paths(
+            [path] + [recent for recent in self._recent_project_paths() if recent != path]
+        )
+
+    def _refresh_recent_projects_menu(self) -> None:
+        self.recent_projects_menu.clear()
+        paths = self._recent_project_paths()
+        for index, path in enumerate(paths, start=1):
+            label = f"{index}. {path.name} ({path.parent})".replace("&", "&&")
+            action = self.recent_projects_menu.addAction(label)
+            action.setData(str(path))
+            action.setToolTip(str(path))
+            action.setStatusTip(str(path))
+            action.triggered.connect(
+                lambda _checked=False, path=path: self._open_recent_project(path)
+            )
+        if not paths:
+            self.recent_projects_menu.addAction("No Recent Projects").setEnabled(False)
+        self.recent_projects_menu.addSeparator()
+        self.action_clear_recent.setEnabled(bool(paths))
+        self.recent_projects_menu.addAction(self.action_clear_recent)
+
+    def _open_recent_project(self, path: Path) -> None:
+        if self._maybe_save():
+            self.open_path(path)
+
     def _write_recovery_snapshot(self) -> None:
         if not self.recovery_store or not self.dirty:
             return
@@ -1172,6 +1220,7 @@ class MainWindow(QMainWindow):
                 project = ProjectStore.load(path)
                 self._set_project(project, path.resolve(), mark_dirty=False)
                 self.settings.setValue("lastProjectDir", str(path.resolve().parent))
+                self._remember_recent_project(path)
         except Exception as error:
             previous = (
                 ProjectStore.previous_path(path)
@@ -1293,6 +1342,7 @@ class MainWindow(QMainWindow):
             )
         else:
             self.statusBar().showMessage(f"Saved project to {self.project_path}")
+        self._remember_recent_project(self.project_path)
         return True
 
     def _set_project(
@@ -2605,6 +2655,7 @@ class MainWindow(QMainWindow):
             self.action_new,
             self.action_youtube,
             self.action_open,
+            self.recent_projects_menu.menuAction(),
             self.action_import,
             self.action_import_zip,
             self.action_save,
