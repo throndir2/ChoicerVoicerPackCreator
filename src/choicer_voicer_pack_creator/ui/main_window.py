@@ -354,9 +354,17 @@ class ProjectEditor(QWidget):
 
         self.action_add = QAction("Add Segment", self)
         self.action_add.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        self.action_add.setToolTip(
+            "Create a new segment using the current In/Out times. "
+            "Existing segments are not changed. (Ctrl+Shift+A)"
+        )
         self.action_add.triggered.connect(self.add_segment)
         self.action_split = QAction("Split at Playhead", self)
         self.action_split.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self.action_split.setToolTip(
+            "Cut the selected segment into two at the white playback line (playhead). "
+            "Move the playhead inside the segment first. (Ctrl+Shift+S)"
+        )
         self.action_split.triggered.connect(self.split_segment)
         self.action_combine = QAction("Combine Selected Segments", self)
         self.action_combine.setShortcut(QKeySequence("Ctrl+Shift+M"))
@@ -481,6 +489,7 @@ class ProjectEditor(QWidget):
         self.position_label.setMinimumWidth(165)
         transport.addWidget(self.position_label)
         self.seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self.seek_slider.setToolTip("Seek to a different position in the source video.")
         self.seek_slider.setRange(0, 100_000)
         self.seek_slider.sliderPressed.connect(lambda: setattr(self, "_slider_dragging", True))
         self.seek_slider.sliderReleased.connect(self._seek_slider_released)
@@ -488,6 +497,7 @@ class ProjectEditor(QWidget):
         transport.addWidget(self.seek_slider, 1)
         transport.addWidget(QLabel("Volume"))
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setToolTip("Adjust preview playback volume; exported audio is unchanged.")
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(80)
         self.volume_slider.setFixedWidth(90)
@@ -496,10 +506,12 @@ class ProjectEditor(QWidget):
 
         self.timeline = TimelineWidget(left)
         self.timeline.setToolTip(
-            "Drag the white playback line or its top arrow to scrub. "
-            "Drag IN/OUT handles to trim, drag inside the highlighted waveform range to move it, "
-            "or drag across empty waveform space to define a range. Segment blocks can also be "
-            "moved by their center or trimmed by their edges."
+            "Drag the white playback line or its top arrow to scrub.\n"
+            "Drag a segment block or its highlighted waveform range to move it; "
+            "drag its edges or IN/OUT handles to trim. These edits update the segment directly.\n"
+            "Drag across empty waveform space to mark a new In/Out range, then use "
+            "Add Segment or Update Segment Timing.\n"
+            "Scroll over the timeline to zoom."
         )
         self.timeline.seek_requested.connect(self.seek)
         self.timeline.segment_selected.connect(self.select_segment)
@@ -508,52 +520,85 @@ class ProjectEditor(QWidget):
         self.timeline.range_edit_finished.connect(self._timeline_range_edit_finished)
         self.timeline.zoom_changed.connect(self._timeline_zoom_changed)
         left_layout.addWidget(self.timeline)
-        timeline_hint = QLabel(
-            "Drag the white playback line or its top arrow to scrub. "
-            "Drag the waveform highlight or its IN/OUT handles to edit a range. "
-            "Drag a segment block to move it, or drag its edges to trim."
-        )
-        timeline_hint.setObjectName("muted")
-        timeline_hint.setWordWrap(True)
-        left_layout.addWidget(timeline_hint)
-
         cutter = QHBoxLayout()
         self.mark_in_spin = self._time_spin()
+        self.mark_in_spin.setAccessibleName("In time")
+        self.mark_in_spin.setToolTip(
+            "Start of the marked range, in seconds. Editing this field does not change a segment "
+            "until you click Update Segment Timing; Add Segment creates a new one instead."
+        )
         self.mark_out_spin = self._time_spin()
+        self.mark_out_spin.setAccessibleName("Out time")
+        self.mark_out_spin.setToolTip(
+            "End of the marked range, in seconds. Editing this field does not change a segment "
+            "until you click Update Segment Timing; Add Segment creates a new one instead."
+        )
         self.mark_in_spin.valueChanged.connect(self._marks_changed)
         self.mark_out_spin.valueChanged.connect(self._marks_changed)
         cutter.addWidget(QLabel("In"))
         cutter.addWidget(self.mark_in_spin)
-        set_in = QPushButton("Set In")
-        set_in.clicked.connect(lambda: self.mark_in_spin.setValue(self.current_position()))
-        cutter.addWidget(set_in)
+        self.set_in_button = QPushButton("Set In")
+        self.set_in_button.setToolTip(
+            "Copy the current playback position into In (the range start). "
+            "This marks a range; it does not change an existing segment."
+        )
+        self.set_in_button.clicked.connect(
+            lambda: self.mark_in_spin.setValue(self.current_position())
+        )
+        cutter.addWidget(self.set_in_button)
         cutter.addWidget(QLabel("Out"))
         cutter.addWidget(self.mark_out_spin)
-        set_out = QPushButton("Set Out")
-        set_out.clicked.connect(lambda: self.mark_out_spin.setValue(self.current_position()))
-        cutter.addWidget(set_out)
-        add_button = QPushButton("+ Add Segment")
-        add_button.setObjectName("primary")
-        add_button.clicked.connect(self.add_segment)
-        cutter.addWidget(add_button)
-        apply_button = QPushButton("Apply Range")
-        apply_button.clicked.connect(self.apply_selected_range)
-        cutter.addWidget(apply_button)
-        split_button = QPushButton("Split")
-        split_button.clicked.connect(self.split_segment)
-        cutter.addWidget(split_button)
-        preview_button = QPushButton("Preview Segment")
-        preview_button.clicked.connect(self.preview_segment)
-        cutter.addWidget(preview_button)
+        self.set_out_button = QPushButton("Set Out")
+        self.set_out_button.setToolTip(
+            "Copy the current playback position into Out (the range end). "
+            "This marks a range; it does not change an existing segment."
+        )
+        self.set_out_button.clicked.connect(
+            lambda: self.mark_out_spin.setValue(self.current_position())
+        )
+        cutter.addWidget(self.set_out_button)
         cutter.addStretch()
         cutter.addWidget(QLabel("Zoom"))
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.zoom_slider.setToolTip(
+            "Zoom the timeline in or out without changing segment timing. "
+            "You can also scroll over the timeline."
+        )
         self.zoom_slider.setRange(10, 800)
         self.zoom_slider.setValue(10)
         self.zoom_slider.setFixedWidth(120)
         self.zoom_slider.valueChanged.connect(lambda value: self.timeline.set_zoom(value / 10.0))
         cutter.addWidget(self.zoom_slider)
         left_layout.addLayout(cutter)
+
+        segment_actions = QHBoxLayout()
+        self.add_segment_button = QPushButton("+ Add Segment")
+        self.add_segment_button.setObjectName("primary")
+        self.add_segment_button.setToolTip(self.action_add.toolTip())
+        self.add_segment_button.clicked.connect(self.add_segment)
+        segment_actions.addWidget(self.add_segment_button)
+        segment_actions.addSpacing(12)
+        self.apply_range_button = QPushButton("Update Segment Timing")
+        self.apply_range_button.setToolTip(
+            "Replace the selected segment's start and end with the In/Out times above. "
+            "Does not create a new segment. Preserved audio is only regenerated with your approval."
+        )
+        self.apply_range_button.clicked.connect(self.apply_selected_range)
+        segment_actions.addWidget(self.apply_range_button)
+        self.split_button = QPushButton(self.action_split.text())
+        self.split_button.setToolTip(self.action_split.toolTip())
+        self.split_button.clicked.connect(self.split_segment)
+        segment_actions.addWidget(self.split_button)
+        self.preview_segment_button = QPushButton("Play Selected Segment")
+        self.preview_segment_button.setToolTip(
+            "Play the selected segment from its start to its end, then pause.\n"
+            "For preserved audio, listen to the prompt recording instead of the video.\n"
+            "Does not use pending changes in the In/Out fields."
+        )
+        self.preview_segment_button.clicked.connect(self.preview_segment)
+        segment_actions.addWidget(self.preview_segment_button)
+        segment_actions.addStretch()
+        left_layout.addLayout(segment_actions)
 
         right = QWidget(splitter)
         right.setMinimumWidth(420)
@@ -1709,8 +1754,9 @@ class ProjectEditor(QWidget):
                 self,
                 "Set source range first",
                 "A preserved recording cannot be split safely because existing packs do not store "
-                "its original source-video cut. Mark the exact spoken In/Out range, click Apply "
-                "Range, and choose Yes when asked whether to regenerate prompt audio. Then split it.",
+                "its original source-video cut. Mark the exact spoken In/Out range, click Update "
+                "Segment Timing, and choose Yes when asked whether to regenerate prompt audio. "
+                "Then split it.",
             )
             return
         split_at = self.current_position()
@@ -2132,6 +2178,9 @@ class ProjectEditor(QWidget):
                 self.speakers_edit,
                 self.caption_edit,
                 self.audio_mode_combo,
+                self.apply_range_button,
+                self.split_button,
+                self.preview_segment_button,
             ):
                 widget.setEnabled(enabled)
             if not segment:
@@ -2540,7 +2589,7 @@ class ProjectEditor(QWidget):
                 self,
                 "Source range is unknown",
                 "Existing packs store the playback timestamp and padded recording, not the original "
-                "spoken cut. Mark the exact source-video In/Out range, click Apply Range, and "
+                "spoken cut. Mark the exact source-video In/Out range, click Update Segment Timing, and "
                 "choose Yes when asked whether to regenerate prompt audio.",
             )
             self._sync_selected_editor()
