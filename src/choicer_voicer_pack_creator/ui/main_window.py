@@ -3334,7 +3334,7 @@ class MainWindow(QMainWindow):
             filename, _ = QFileDialog.getSaveFileName(
                 self, "Save Pack Creator project",
                 str(Path(self.settings.value("lastProjectDir", str(Path.home())))
-                    / f"{editor.project.title}.cvpack.json"),
+                    / f"{safe_name(editor.project.title)}.cvpack.json"),
                 "Pack Creator projects (*.cvpack.json)",
             )
             if not filename:
