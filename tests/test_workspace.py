@@ -4,13 +4,13 @@ import threading
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import QSettings, Qt, QThread, Signal
+from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox, QScrollArea
 from shiboken6 import isValid
 
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.operations import OperationCancelled
-from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
+from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore, WorkspaceStore
 from choicer_voicer_pack_creator.project_session import canonical_project_path
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.ui.main_window import MainWindow, WaveformWorker
@@ -29,18 +29,23 @@ def workspace(qtbot, tmp_path):
         settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat),
         analysis_data_root=tmp_path / "analysis",
     )
-    qtbot.addWidget(window)
+    def close(current):
+        current.setup_consent.cancel_all()
+        for record in current.job_manager.active_jobs():
+            current.job_manager.cancel(record.id)
+        qtbot.waitUntil(lambda: not current.job_manager.active_jobs(), timeout=10000)
+        for box in list(current._decisions):
+            box.reject()
+        for editor in current.editors.values():
+            editor._commit_editors()
+            editor.dirty = False
+            editor._recovery_timer.stop()
+        current.close()
+        qtbot.waitUntil(lambda: current._close_approved and not current.isVisible(), timeout=10000)
+
+    qtbot.addWidget(window, before_close_func=close)
     window.show()
-    yield window
-    for record in window.job_manager.active_jobs():
-        window.job_manager.cancel(record.id)
-    qtbot.waitUntil(lambda: not window.job_manager.active_jobs(), timeout=10000)
-    for box in list(window._decisions):
-        box.reject()
-    for editor in window.editors.values():
-        editor.dirty = False
-    window.close()
-    qtbot.waitUntil(lambda: not window.isVisible())
+    return window
 
 
 def test_running_project_does_not_block_edit_save_or_open(workspace, qtbot, tmp_path):
@@ -101,7 +106,157 @@ def test_tabs_keep_selection_range_and_zoom(workspace):
     assert second.project.segments == []
 
 
+def test_two_projects_share_exact_whisper_component_consent(workspace, qtbot, tmp_path, monkeypatch):
+    from choicer_voicer_pack_creator.ui import analysis_dialog
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("Synthetic analysis failure; no model download")
+
+    monkeypatch.setattr(analysis_dialog, "analyze_video", unavailable)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"synthetic")
+    editors = [
+        workspace.add_project(
+            PackProject(title=title, video_path=str(source), video_duration=5), dirty=False,
+        )
+        for title in ("A", "B")
+    ]
+    for editor in editors:
+        editor.open_analysis_dialog()
+        editor._analysis_dialog.whisper_check.setChecked(True)
+        editor._analysis_dialog.model_combo.setCurrentIndex(
+            editor._analysis_dialog.model_combo.findData("tiny")
+        )
+        editor._analysis_dialog.start_scan()
+    box = workspace.setup_consent.box
+    assert box is not None and not box.isModal()
+    assert len(workspace.findChildren(QMessageBox, "sharedSetupConsent")) == 1
+    assert box.text().count("Whisper CPU runtime") == 1
+    assert box.text().count("Whisper tiny model") == 1
+    assert all(editor._analysis_dialog.worker is None for editor in editors)
+    editors[0].session.source_revision += 1
+    box.button(QMessageBox.StandardButton.Yes).click()
+    qtbot.waitUntil(lambda: editors[1]._analysis_dialog.worker is None)
+    assert not any(
+        job.kind == "analysis" for job in workspace.job_manager.tasks(editors[0].session.id)
+    )
+    jobs = [
+        job for job in workspace.job_manager.tasks(editors[1].session.id) if job.kind == "analysis"
+    ]
+    assert len(jobs) == 1 and jobs[0].state == "failed"
+    assert all(not editor._analysis_dialog._pending_scan for editor in editors)
+
+
+def test_backing_consent_keeps_other_project_request_when_one_closes(
+    workspace, qtbot, tmp_path, monkeypatch,
+):
+    from choicer_voicer_pack_creator.separation import SeparationDownloadRequired
+    from choicer_voicer_pack_creator.ui.backing_dialog import SeparationManager
+
+    output = tmp_path / "backing.wav"
+    output.write_bytes(b"synthetic backing")
+    calls = []
+
+    def generate(_manager, _media, source, *, allow_download, **_kwargs):
+        calls.append((source.name, allow_download))
+        if not allow_download:
+            raise SeparationDownloadRequired("Model consent required")
+        return output
+
+    monkeypatch.setattr(SeparationManager, "generate", generate)
+    editors = []
+    for name in ("A", "B"):
+        source = tmp_path / f"{name}.mp4"
+        source.write_bytes(b"synthetic")
+        editor = workspace.add_project(
+            PackProject(title=name, video_path=str(source), video_duration=5), dirty=False,
+        )
+        editors.append(editor)
+        editor.generate_backing_track()
+    qtbot.waitUntil(lambda: all(editor._backing_dialog._pending_consent for editor in editors))
+    box = workspace.setup_consent.box
+    assert box is not None and box.text().count("Music-separation model") == 1
+    first_id = editors[0].session.id
+    workspace._hide_editor(editors[0], retain=False)
+    assert workspace.setup_consent.box is box and box.isVisible()
+    box.button(QMessageBox.StandardButton.Yes).click()
+    qtbot.waitUntil(lambda: editors[1].project.backing_track_path == str(output))
+    assert sorted(calls) == [("A.mp4", False), ("B.mp4", False), ("B.mp4", True)]
+    assert all(job.state == "failed" for job in workspace.job_manager.tasks(first_id)
+               if job.kind == "backing")
+
+
+@pytest.mark.parametrize("kind", ["analysis", "refinement", "backing", "youtube", "export"])
+def test_tasks_retry_uses_origin_and_rejects_superseded_source(
+    workspace, qtbot, tmp_path, monkeypatch, kind,
+):
+    from choicer_voicer_pack_creator.models import SourceCaption
+    from choicer_voicer_pack_creator.ui import analysis_dialog, backing_dialog, youtube_dialog
+
+    def failed(*_args, **_kwargs):
+        raise RuntimeError("Synthetic retry failure")
+
+    monkeypatch.setattr(analysis_dialog, "analyze_video", failed)
+    monkeypatch.setattr(backing_dialog.SeparationManager, "generate", failed)
+    monkeypatch.setattr(youtube_dialog, "download_youtube", failed)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *_args: str(tmp_path))
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"synthetic")
+    editor = workspace.add_project(PackProject(
+        title="Origin", authors=["A"], video_path=str(source), video_duration=5,
+        segments=[Segment(1, 2, "Line", ["A"])],
+        backing_track_path=str(source) if kind == "export" else "",
+        source_captions=[SourceCaption(1, 2, "Caption", "YouTube")] if kind == "refinement" else [],
+    ), dirty=False)
+    def jobs():
+        return [job for job in workspace.job_manager.tasks(editor.session.id) if job.kind == kind]
+
+    if kind in {"analysis", "refinement"}:
+        editor.open_analysis_dialog()
+        dialog = editor._analysis_dialog
+        if kind == "refinement":
+            dialog.start_refinement()
+        else:
+            dialog.whisper_check.setChecked(False)
+            dialog.start_scan()
+    elif kind == "backing":
+        editor.generate_backing_track()
+    elif kind == "youtube":
+        editor._start_youtube_import()
+        editor._youtube_dialog.url_edit.setText("https://www.youtube.com/watch?v=abcdefghijk")
+        editor._youtube_dialog.folder_edit.setText(str(tmp_path))
+        editor._youtube_dialog.start_download()
+    else:
+        editor.exporter = SimpleNamespace(export=failed)
+        editor.export_pack()
+    qtbot.waitUntil(lambda: len(jobs()) == 1)
+    qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs(editor.session.id))
+    record = jobs()[0]
+    assert record.kind == kind and record.state == "failed"
+    other = workspace.add_project(PackProject(title="Other"), dirty=False)
+    panel = workspace.tasks_panel
+    row = next(
+        row for row in range(panel.table.rowCount())
+        if panel.table.item(row, 0).data(Qt.ItemDataRole.UserRole) == record.id
+    )
+    panel.table.selectRow(row)
+    qtbot.waitUntil(lambda: panel.retry_button.isEnabled())
+    panel.retry_button.click()
+    qtbot.waitUntil(lambda: len(jobs()) == 2)
+    qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs(editor.session.id))
+    assert workspace.active_editor is other
+    assert not workspace.job_manager.tasks(other.session.id)
+    assert all(job.state == "failed" for job in jobs())
+    editor.session.source_revision += 1
+    panel.refresh()
+    assert not panel.retry_button.isEnabled()
+    panel._retry_selected()
+    assert len(jobs()) == 2
+
+
 def test_fresh_native_layout_keeps_task_and_segment_rows_clickable(workspace, qtbot, tmp_path):
+    if QApplication.platformName() == "offscreen":
+        pytest.skip("Requires a native Qt screen; run with QT_QPA_PLATFORM=windows.")
     workspace.setStyleSheet(APP_STYLESHEET)
     first = workspace.active_editor
     first._set_project(PackProject(title="A"), None, True)
@@ -225,6 +380,139 @@ def test_save_path_cannot_be_shared_by_two_documents(workspace, qtbot, tmp_path)
     assert second.dirty
 
 
+def test_open_during_pending_save_as_focuses_owner(workspace, qtbot, tmp_path, monkeypatch):
+    first = workspace.active_editor
+    first._set_project(PackProject(title="A"), None, True)
+    path = tmp_path / "shared.cvpack.json"
+    started, release = threading.Event(), threading.Event()
+    original = ProjectStore.save
+
+    def save(project, destination):
+        started.set()
+        assert release.wait(5)
+        original(project, destination)
+
+    monkeypatch.setattr(ProjectStore, "save", save)
+    try:
+        assert workspace.save_editor(first, destination=path)
+        qtbot.waitUntil(started.is_set)
+        workspace.add_project(PackProject(title="B"), dirty=False)
+        count = workspace.tabs.count()
+        workspace.open_path(path)
+        assert workspace.active_editor is first
+        assert workspace.project_for_path(path) is first
+        assert workspace.tabs.count() == count
+    finally:
+        release.set()
+        qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
+    assert first.project_path == path and not first.dirty
+
+
+def test_save_reservation_rejects_another_pending_open(workspace, qtbot, tmp_path, monkeypatch):
+    path = tmp_path / "shared.cvpack.json"
+    ProjectStore.save(PackProject(title="Opening"), path)
+    other = workspace.active_editor
+    other._set_project(PackProject(title="Other"), None, True)
+    started, release = threading.Event(), threading.Event()
+    original = ProjectStore.load
+
+    def load(source):
+        started.set()
+        assert release.wait(5)
+        return original(source)
+
+    monkeypatch.setattr(ProjectStore, "load", load)
+    try:
+        workspace.open_path(path)
+        qtbot.waitUntil(started.is_set)
+        opening = workspace.active_editor
+        assert workspace.project_for_path(path) is opening
+        with pytest.raises(ValueError, match="existing project's tab"):
+            workspace.reserve_project_save(other.session.id, path)
+    finally:
+        release.set()
+        qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
+    assert opening.project_path == path
+
+
+@pytest.mark.parametrize("unsaved", [False, True])
+def test_restart_reveals_retained_documents_without_restored_task_history(
+    workspace, qtbot, tmp_path, unsaved,
+):
+    identity = "a" * 32
+    project = PackProject(title="Retained")
+    path = tmp_path / "retained.cvpack.json"
+    workspace.recovery_store = RecoveryStore(tmp_path / "recovery-v2.json")
+    workspace.workspace_store = WorkspaceStore(tmp_path / "workspace-v1.json")
+    if unsaved:
+        workspace.recovery_store.for_session(identity).save(project, None)
+    else:
+        ProjectStore.save(project, path)
+    workspace.workspace_store.save([{
+        "id": identity, "path": "" if unsaved else str(path), "hidden": True, "view": {},
+    }], None)
+    workspace.restore_workspace()
+    qtbot.waitUntil(lambda: identity in workspace.editors)
+    retained = workspace.editor_for_project(identity)
+    assert workspace.tabs.count() >= 1
+    assert workspace.tabs.indexOf(retained) >= 0
+    assert not retained.session.hidden
+    assert workspace.active_editor is retained
+    assert not workspace.job_manager.tasks(identity)
+
+
+def test_source_probe_delivered_after_discard_cannot_resurrect_document(
+    workspace, qtbot, tmp_path, monkeypatch,
+):
+    class PendingProbe(QObject):
+        completed = Signal(object)
+        failed = Signal(str)
+
+    probe = PendingProbe(workspace)
+    original = workspace.job_manager.submit
+
+    def submit(project_id, kind, *args, **kwargs):
+        return probe if kind == "probe" else original(project_id, kind, *args, **kwargs)
+
+    workspace.recovery_store = RecoveryStore(tmp_path / "recovery-v2.json")
+    editor = workspace.add_project(PackProject(title="Discard me"), dirty=True)
+    recovery = editor.recovery_store
+    editor._write_recovery_snapshot()
+    qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
+    source = tmp_path / "replacement.mp4"
+    source.write_bytes(b"synthetic")
+    monkeypatch.setattr(workspace.job_manager, "submit", submit)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(source), ""))
+    editor.choose_source_video()
+    revision = editor.session.revision
+    identity = editor.session.id
+    workspace.close_project_tab(workspace.tabs.indexOf(editor))
+    workspace._decisions[-1].button(QMessageBox.StandardButton.Discard).click()
+    probe.completed.emit(SimpleNamespace(duration=2))
+    assert editor.project.video_path == ""
+    assert editor.session.revision == revision
+    assert not editor._recovery_timer.isActive()
+    qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
+    assert recovery.load() is None
+    assert not any(job.kind == "waveform" for job in workspace.job_manager.tasks(identity))
+
+
+def test_export_action_reopens_hidden_finished_details(workspace, tmp_path):
+    from choicer_voicer_pack_creator.ui.export_dialog import ExportProgressDialog
+
+    editor = workspace.active_editor
+    dialog = ExportProgressDialog(tmp_path, editor, background=True)
+    editor._export_dialog = dialog
+    dialog.show()
+    dialog.close()
+    assert not dialog.isVisible()
+    dialog.show_error("Synthetic failure")
+    dialog.worker_finished()
+    editor.action_export.trigger()
+    assert dialog.isVisible()
+    assert editor._export_dialog is dialog
+
+
 def test_keep_processing_hides_tab_not_document_or_job(workspace, qtbot):
     editor = workspace.active_editor
     editor._set_project(PackProject(title="Working", authors=["Author"]), None, True)
@@ -319,6 +607,7 @@ def test_managed_worker_cancellation_is_terminal_on_gui_thread(workspace, qtbot)
     assert threads == [workspace.thread()]
     assert not worker.isRunning()
     assert worker.wait(0)
+    assert worker._job_exception is None
 
 
 @pytest.mark.parametrize("unhandled", [False, True])
@@ -350,6 +639,7 @@ def test_waveform_task_failure_preserves_request_identity_and_error(
         "RuntimeError: Synthetic waveform failure" if unhandled else "Synthetic waveform failure"
     )
     assert failures == [(7, source, expected)]
+    assert worker._job_exception is None
 
 
 @pytest.mark.parametrize("close_workspace", [False, True])
@@ -552,6 +842,16 @@ def test_source_probe_applies_latest_request_only_to_its_own_document(
     assert first.project.video_path == str(newer)
     assert second.project.video_path == ""
     assert workspace.active_editor is second
+
+
+def test_retained_review_tracks_segments_added_while_it_is_open(workspace):
+    editor = workspace.active_editor
+    dialog = QDialog(editor)
+    dialog.existing_segments = 0
+    editor._analysis_dialog = dialog
+    editor.project.add_segment(Segment(1, 2, "Manual line", ["Actor"]))
+    editor._refresh_table()
+    assert dialog.existing_segments == 1
 
 
 def test_backing_completion_keeps_newer_choice_and_never_targets_active_tab(

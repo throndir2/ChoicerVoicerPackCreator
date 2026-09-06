@@ -24,11 +24,20 @@ def window(qtbot, tmp_path, monkeypatch):
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     editor = MainWindow(UnusedMedia(), settings=settings)  # type: ignore[arg-type]
     monkeypatch.setattr(editor, "_maybe_save", lambda: True)
-    qtbot.addWidget(editor)
+    def close(current):
+        qtbot.waitUntil(lambda: not current.job_manager.active_jobs())
+        for decision in tuple(current._decisions):
+            decision.reject()
+        for document in current.editors.values():
+            document._commit_editors()
+            document.dirty = False
+            document._recovery_timer.stop()
+        current.close()
+        qtbot.waitUntil(lambda: current._close_approved and not current.isVisible())
+
+    qtbot.addWidget(editor, before_close_func=close)
     editor.show()
-    yield editor
-    editor.dirty = False
-    editor.close()
+    return editor
 
 
 def subtitle_text(video: SubtitleVideoWidget, name: str = "subtitleCaption") -> list[str]:
@@ -99,7 +108,7 @@ def test_new_line_and_speakers_update_without_leaving_the_editor(window, qtbot) 
 
 @pytest.mark.parametrize("preserved_prompt", [False, True], ids=["source", "imported-prompt"])
 def test_opened_project_shows_saved_lines_without_selecting_or_editing(
-    window, tmp_path: Path, preserved_prompt: bool
+    window, qtbot, tmp_path: Path, preserved_prompt: bool
 ) -> None:
     path = tmp_path / "saved.cvpack.json"
     project = PackProject(
@@ -115,6 +124,7 @@ def test_opened_project_shows_saved_lines_without_selecting_or_editing(
     )
     ProjectStore.save(project, path)
     window.open_path(path)
+    qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
     assert not window.selected_segment_id
     assert subtitle_text(window.video_widget) == ["Saved line"]
     assert subtitle_text(window.video_widget, "subtitleSpeaker") == ["Saved speaker"]

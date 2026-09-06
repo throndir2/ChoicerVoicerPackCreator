@@ -82,6 +82,7 @@ from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
 from choicer_voicer_pack_creator.ui.export_dialog import ExportProgressDialog
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.ui.readable_table import ReadableTableWidget
+from choicer_voicer_pack_creator.ui.setup_consent import SetupConsent
 from choicer_voicer_pack_creator.ui.subtitles import SubtitleVideoWidget
 from choicer_voicer_pack_creator.ui.tasks_panel import TasksPanel
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
@@ -1998,6 +1999,8 @@ class ProjectEditor(QWidget):
             self._clear_recovery_snapshot()
 
     def _refresh_table(self, selected_id: str | None = None) -> None:
+        if self._analysis_dialog is not None:
+            self._analysis_dialog.existing_segments = len(self.project.segments)
         selected = self._selected_table_ids()
         if selected_id is not None or len(selected) < 2:
             selected = [selected_id if selected_id is not None else self.selected_segment_id]
@@ -2300,9 +2303,16 @@ class ProjectEditor(QWidget):
         )
         job.completed.connect(
             lambda info: self._apply_source_video(source, info)
-            if request == self._source_request else None
+            if request == self._source_request
+            and self.session.id not in self.workspace._closed_ids
+            and self.workspace.editors.get(self.session.id) is self else None
         )
-        job.failed.connect(lambda message: self.workspace.notice("Could not open video", message))
+        job.failed.connect(
+            lambda message: self.workspace.notice("Could not open video", message)
+            if request == self._source_request
+            and self.session.id not in self.workspace._closed_ids
+            and self.workspace.editors.get(self.session.id) is self else None
+        )
 
     def _apply_source_video(self, source: Path, info) -> None:
         self.session.source_revision += 1
@@ -2559,6 +2569,7 @@ class ProjectEditor(QWidget):
 
     def export_pack(self) -> None:
         if self._export_dialog is not None:
+            self._export_dialog.show()
             self._export_dialog.raise_()
             self._export_dialog.activateWindow()
             return
@@ -2637,6 +2648,18 @@ class ProjectEditor(QWidget):
         dialog.show()
         worker.start()
         self.workspace.tasks_panel.register_detail(worker.job_handle.id, dialog)
+        token = self.session.source_token()
+
+        def retry_export() -> None:
+            if self._export_dialog is not None:
+                self._export_dialog.close()
+                self._export_dialog = None
+            self.export_pack()
+
+        self.workspace.tasks_panel.register_retry(
+            worker.job_handle.id, retry_export,
+            available=lambda: self._export_worker is None and self.session.source_token() == token,
+        )
 
     @Slot(object)
     def _export_progress(self, update: ExportProgress) -> None:
@@ -2880,6 +2903,7 @@ class MainWindow(QMainWindow):
         self._closed_ids: set[str] = set()
         self._exit_discarded: set[str] = set()
         self.tasks_panel = TasksPanel(self.job_manager, self)
+        self.setup_consent = SetupConsent(self)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.tasks_panel)
         self.tasks_panel.hide()
         self.job_manager.changed.connect(
@@ -3016,23 +3040,34 @@ class MainWindow(QMainWindow):
         if self._active_editor is not None:
             self.setWindowTitle(self._active_editor.windowTitle())
 
-    def open_path(self, path: Path) -> None:
-        path = path.resolve()
+    def project_for_path(self, path: Path) -> ProjectEditor | None:
         key = canonical_project_path(path)
-        if key in self._opening_paths:
-            opening_id = self._opening_paths[key]
-            if opening_id not in self._closed_ids:
-                self.focus_project(opening_id)
-                return
+        for owner in (self._save_targets.get(key), self._opening_paths.get(key)):
+            if owner is not None and owner not in self._closed_ids:
+                editor = self.editors.get(owner)
+                if editor is not None:
+                    return editor
         for editor in self.editors.values():
             if editor.session.id in self._closed_ids:
                 continue
             if editor.project_path is not None and (
-                canonical_project_path(editor.project_path) == canonical_project_path(path)
+                canonical_project_path(editor.project_path) == key
             ):
-                self.focus_project(editor.session.id)
-                editor._remember_recent_project(editor.project_path)
-                return
+                return editor
+        return None
+
+    def open_path(self, path: Path) -> None:
+        path = path.resolve()
+        key = canonical_project_path(path)
+        existing = self.project_for_path(path)
+        if existing is not None:
+            self.focus_project(existing.session.id)
+            if existing.project_path is not None and canonical_project_path(existing.project_path) == key:
+                existing._remember_recent_project(existing.project_path)
+            return
+        if key in self._save_targets:
+            self.notice("Project save in progress", "Wait for this project's save before opening it.")
+            return
         editor = self.add_project(PackProject(title=path.stem), dirty=False)
         self._opening_paths[key] = editor.session.id
         editor._set_loading(True)
@@ -3206,6 +3241,10 @@ class MainWindow(QMainWindow):
             raise ValueError("Wait for this project to finish opening before saving it.")
         key = canonical_project_path(destination)
         owner = self._save_targets.get(key)
+        if owner is None:
+            opening_id = self._opening_paths.get(key)
+            if opening_id not in self._closed_ids:
+                owner = opening_id
         if owner is None:
             owner = next((
                 other.session.id for other in self.editors.values()
@@ -3408,9 +3447,7 @@ class MainWindow(QMainWindow):
                 editor = self.add_project(
                     project, path, dirty=dirty, session_id=identity, focus=False,
                 )
-                if item.get("hidden"):
-                    editor.session.hidden = True
-                    self.tabs.removeTab(self.tabs.indexOf(editor))
+                # Task history does not survive restart, so retained documents need visible tabs.
                 QTimer.singleShot(0, lambda editor=editor, item=item: self._restore_view(
                     editor, item.get("view", {})
                 ))
@@ -3463,7 +3500,9 @@ class MainWindow(QMainWindow):
         if retain:
             editor._write_recovery_snapshot()
         else:
+            editor._source_request += 1
             self._closed_ids.add(editor.session.id)
+            self.setup_consent.cancel_project(editor.session.id)
         self.tabs.removeTab(self.tabs.indexOf(editor))
         editor.session.hidden = True
         if not self.tabs.count():
@@ -3567,6 +3606,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self._close_approved:
+            self.setup_consent.cancel_all()
             for editor in self.editors.values():
                 editor._save_layout_state()
                 editor._reset_transport_state()
