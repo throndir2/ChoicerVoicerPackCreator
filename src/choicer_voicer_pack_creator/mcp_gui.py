@@ -177,6 +177,8 @@ class EditorProjectAccess:
                 window._write_recovery_snapshot()
             else:
                 window._clear_recovery_snapshot()
+                if snapshot.path is not None:
+                    window._remember_recent_project(snapshot.path)
 
         self.bridge.call(apply)
 
