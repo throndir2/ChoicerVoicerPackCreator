@@ -188,14 +188,20 @@ class TasksPanel(QDockWidget):
     def _selection_changed(self) -> None:
         job_id = self._selected_id()
         record = self._records.get(job_id)
+        available = bool(record and self._project_available(record))
         self.cancel_button.setEnabled(bool(record and record.active and not record.cancel_requested))
-        self.project_button.setEnabled(bool(record and record.project_id in self.workspace.editors))
+        self.project_button.setEnabled(available and record.project_id is not None)
         self.output_button.setEnabled(bool(record and self._output(record)))
-        self.detail_button.setEnabled(job_id in self._details)
+        self.detail_button.setEnabled(available and job_id in self._details)
         self.retry_button.setEnabled(bool(
-            record and record.state in {"failed", "cancelled", "blocked"} and job_id in self._retry
+            available and record.state in {"failed", "cancelled", "blocked"} and job_id in self._retry
         ))
         self.details.setPlainText("\n".join(self._logs.get(job_id, [])))
+
+    def _project_available(self, record: JobRecord) -> bool:
+        return record.project_id is None or any(
+            session.id == record.project_id for session in self.workspace.project_sessions
+        )
 
     def _cancel(self) -> None:
         job_id = self._selected_id()
@@ -204,7 +210,7 @@ class TasksPanel(QDockWidget):
 
     def _show_project(self) -> None:
         record = self._records.get(self._selected_id())
-        if record and record.project_id in self.workspace.editors:
+        if record and record.project_id is not None and self._project_available(record):
             self.workspace.focus_project(record.project_id)
 
     def _open_output(self) -> None:
@@ -214,12 +220,19 @@ class TasksPanel(QDockWidget):
             self.details.appendPlainText(f"Could not open output. Open it manually: {path}")
 
     def _show_details(self) -> None:
-        widget = self._details.get(self._selected_id())
-        if widget is not None:
+        job_id = self._selected_id()
+        record = self._records.get(job_id)
+        widget = self._details.get(job_id)
+        if widget is not None and record and self._project_available(record):
             widget.show()
             widget.raise_()
 
     def _retry_selected(self) -> None:
-        callback = self._retry.get(self._selected_id())
-        if callback is not None:
+        job_id = self._selected_id()
+        record = self._records.get(job_id)
+        callback = self._retry.get(job_id)
+        if (
+            callback is not None and record and self._project_available(record)
+            and record.state in {"failed", "cancelled", "blocked"}
+        ):
             callback()

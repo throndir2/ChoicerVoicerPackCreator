@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QSettings, Qt, QThread, Signal
@@ -10,6 +11,7 @@ from shiboken6 import isValid
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.operations import OperationCancelled
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
+from choicer_voicer_pack_creator.project_session import canonical_project_path
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.ui.main_window import MainWindow, WaveformWorker
 
@@ -301,6 +303,15 @@ def test_close_keeps_qobjects_alive_until_operation_cleanup_finishes(
     assert isValid(editor) and isValid(worker) and isValid(workspace.job_manager)
     assert worker.job_handle.record.active
     assert not completed_on
+    if not close_workspace:
+        workspace.tasks_panel.refresh()
+        for row in range(workspace.tasks_panel.table.rowCount()):
+            if workspace.tasks_panel.table.item(row, 0).data(Qt.ItemDataRole.UserRole) == worker.job_handle.id:
+                workspace.tasks_panel.table.selectRow(row)
+                break
+        assert not workspace.tasks_panel.project_button.isEnabled()
+        workspace.tasks_panel._show_project()
+        assert workspace.tabs.indexOf(editor) == -1
     cleanup_release.set()
     qtbot.waitUntil(lambda: bool(completed_on))
     assert completed_on == [workspace.thread()]
@@ -312,6 +323,141 @@ def test_close_keeps_qobjects_alive_until_operation_cleanup_finishes(
         assert editor.session.id not in workspace.editors
         assert not isValid(worker)
         assert workspace.isVisible()
+
+
+def test_reopening_cancelled_pending_load_keeps_new_request_identity(
+    workspace, qtbot, tmp_path, monkeypatch,
+):
+    path = tmp_path / "pending.cvpack.json"
+    ProjectStore.save(PackProject(title="Saved document"), path)
+    started = [threading.Event(), threading.Event()]
+    release = [threading.Event(), threading.Event()]
+    calls = []
+    original = ProjectStore.load
+
+    def load(source):
+        index = len(calls)
+        calls.append(source)
+        started[index].set()
+        assert release[index].wait(5)
+        return original(source)
+
+    monkeypatch.setattr(ProjectStore, "load", load)
+    workspace.open_path(path)
+    old = workspace.active_editor
+    qtbot.waitUntil(started[0].is_set)
+    workspace.close_project_tab(workspace.tabs.indexOf(old))
+    box = workspace._decisions[-1]
+    button = next(b for b in box.buttons() if b.objectName() == "projectCloseCancelTasks")
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    workspace.open_path(path)
+    new = workspace.active_editor
+    assert new is not old
+    qtbot.waitUntil(started[1].is_set)
+    release[0].set()
+    qtbot.waitUntil(lambda: old.session.id not in workspace.editors)
+    assert workspace._opening_paths[canonical_project_path(path)] == new.session.id
+    count = workspace.tabs.count()
+    workspace.open_path(path)
+    assert workspace.active_editor is new
+    assert workspace.tabs.count() == count
+    release[1].set()
+    qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
+    assert new.project.title == "Saved document"
+    assert not new.dirty
+
+
+def test_new_edits_in_discarded_document_require_a_fresh_exit_decision(workspace, qtbot):
+    first = workspace.active_editor
+    first._set_project(PackProject(title="First dirty"), None, True)
+    second = workspace.add_project(PackProject(title="Second dirty"), dirty=True)
+    assert not workspace.close()
+    box = workspace._decisions[-1]
+    assert box.property("projectId") == first.session.id
+    qtbot.mouseClick(box.button(QMessageBox.StandardButton.Discard), Qt.MouseButton.LeftButton)
+    box = workspace._decisions[-1]
+    assert box.property("projectId") == second.session.id
+    first.title_edit.setText("New edits after discard decision")
+    first._commit_editors()
+    qtbot.mouseClick(box.button(QMessageBox.StandardButton.Discard), Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: any(
+        decision.property("projectId") == first.session.id for decision in workspace._decisions
+    ))
+    assert workspace.isVisible()
+    box = workspace._decisions[-1]
+    qtbot.mouseClick(box.button(QMessageBox.StandardButton.Cancel), Qt.MouseButton.LeftButton)
+    assert first.dirty
+    assert first.project.title == "New edits after discard decision"
+    assert not workspace._closing
+
+
+def test_cancelling_queued_close_save_keeps_workspace_open_and_retryable(
+    workspace, qtbot, tmp_path, monkeypatch,
+):
+    editor = workspace.active_editor
+    editor._set_project(PackProject(title="Unsaved"), None, True)
+    release = threading.Event()
+    blocker = workspace.job_manager.submit(
+        editor.session.id, "recovery", "Held recovery", lambda _ctx: release.wait(5),
+        resource_class="io", resource_keys=(f"document-save:{editor.session.id}",),
+    )
+    qtbot.waitUntil(lambda: blocker.record.state == "running")
+    destination = tmp_path / "saved.cvpack.json"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(destination), ""))
+    workspace.close()
+    box = workspace._decisions[-1]
+    qtbot.mouseClick(box.button(QMessageBox.StandardButton.Save), Qt.MouseButton.LeftButton)
+    save = next(record for record in workspace.job_manager.tasks(editor.session.id) if record.kind == "save")
+    assert save.active and save.state != "running"
+    workspace.tasks_panel.show()
+    workspace.tasks_panel.refresh()
+    workspace.tasks_panel.table.selectRow(0)
+    qtbot.waitUntil(workspace.tasks_panel.cancel_button.isVisible)
+    qtbot.mouseClick(workspace.tasks_panel.cancel_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: workspace.job_manager.handle(save.id).record.state == "cancelled")
+    qtbot.waitUntil(lambda: not workspace._closing)
+    assert editor.dirty and workspace.isVisible()
+    assert not destination.exists()
+    release.set()
+    qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
+    workspace.close()
+    box = workspace._decisions[-1]
+    assert box.property("projectId") == editor.session.id
+    qtbot.mouseClick(box.button(QMessageBox.StandardButton.Cancel), Qt.MouseButton.LeftButton)
+
+
+def test_source_probe_applies_latest_request_only_to_its_own_document(
+    workspace, qtbot, tmp_path, monkeypatch,
+):
+    first = workspace.active_editor
+    first._set_project(PackProject(title="A"), None, True)
+    older, newer = tmp_path / "older.mp4", tmp_path / "newer.mp4"
+    old_started, old_release = threading.Event(), threading.Event()
+
+    class ProbeMedia(QuietMedia):
+        def probe(self, path):
+            if path == older:
+                old_started.set()
+                assert old_release.wait(5)
+            return SimpleNamespace(
+                duration=2, video_codec="h264", audio_codec="aac", pixel_format="yuv420p",
+                audio_sample_rate=48000, audio_channels=2, fps=24, height=240,
+            )
+
+    first.media = ProbeMedia()
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(older), ""))
+    first.choose_source_video()
+    qtbot.waitUntil(old_started.is_set)
+    assert first.project.video_path == ""
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(newer), ""))
+    first.choose_source_video()
+    second = workspace.add_project(PackProject(title="B"), dirty=False)
+    qtbot.waitUntil(lambda: first.project.video_path == str(newer))
+    old_release.set()
+    qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
+    assert first.project.video_path == str(newer)
+    assert second.project.video_path == ""
+    assert workspace.active_editor is second
 
 
 def test_backing_completion_keeps_newer_choice_and_never_targets_active_tab(

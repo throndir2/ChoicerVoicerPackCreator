@@ -291,9 +291,11 @@ Select a single row again to edit or preview an individual segment and resume pl
 
 ### Analyze and transcribe a video
 
-The initial analysis window opens after **New from Video** and can be reopened with **Tools →
+The nonmodal analysis window opens after **New from Video** and can be reopened with **Tools →
 Analyze Video & Suggest Segments** (`Ctrl+Shift+R`). New local-video and YouTube imports both start
-Whisper automatically, while reopening existing drafts does not rerun it. The window also offers a dependency-free activity
+Whisper automatically, subject to download consent, while reopening existing drafts does not rerun it.
+Backing generation, waveform extraction, caption refinement, and transcription are independent tasks;
+waiting for one does not block editing another project. The window also offers a dependency-free activity
 scan with Balanced, Sensitive, and Conservative modes. This scan measures deterministic audio
 energy and suggests possible regions; music, effects, and silence changes can still be false
 positives.
@@ -313,7 +315,8 @@ analysis audio and transcript JSON are deleted after each scan.
 Results list editable In/Out values and draft captions. Double-click a line or use **Play Selected
 Whisper Line** (or **Play Selected Range** for an activity-only scan) to audition it. Uncheck unwanted
 lines, correct text, then use the highlighted **Use Whisper Transcript** action. **Rerun Whisper**
-is a separate, secondary action. Existing segments
+is a separate, secondary action. Existing drafts stay editable during a rerun; if they change
+before it finishes, the new candidate requires an explicit replacement decision. Existing segments
 are never replaced. Suggested segments intentionally have no speaker; assign speakers manually.
 Whisper is probabilistic and can mishear names, stylized vocalizations, non-English speech, music,
 or overlapping speakers, so every result remains review evidence rather than authoritative data.
@@ -418,11 +421,11 @@ creator-uploaded tracks can themselves be translations. Some videos have no acce
 and caption delivery can fail independently of the video download.
 
 The **Refined YouTube** panel stays empty until a local audio-only refinement pass finishes on a
-background thread, then selects the processed draft for review and use. Unprocessed YouTube
+background task, then selects the processed draft for review and use. Unprocessed YouTube
 captions are never displayed or offered for import. Refinement requires no model download;
 original caption evidence stays in the project for regeneration, not as another transcript choice.
-After refinement completes, Whisper starts automatically, asking permission first if its
-runtime/model must be downloaded. Its result appears alongside YouTube in the **Whisper Transcript**
+Whisper starts independently, asking permission first if its runtime/model must be downloaded.
+Its result appears alongside YouTube in the **Whisper Transcript**
 panel without changing the selected draft. Each transcript keeps its own row count, text, and
 In/Out boundaries: a longer Whisper passage is not
 forced onto shorter YouTube captions or flagged as a conflict. You can edit, preview, and uncheck
@@ -431,7 +434,7 @@ The playback button names the chosen source: **Play Selected Refined YouTube Lin
 **Play Selected Whisper Line**.
 
 To adjust pause-aware segmentation, use the **Refined YouTube** panel and click
-**Refine YouTube Again...**. Wait for or cancel a running Whisper scan first. Refinement
+**Refine YouTube Again...**. Refinement and Whisper have separate task entries and cancellation. Refinement
 uses the original imported YouTube words, not edits made to either draft.
 New imports retain YouTube's available word/text-fragment offsets. Refinement uses these
 boundaries together with measured audio pauses to split lines and conservatively join display
@@ -454,7 +457,7 @@ Click a row in a draft or its **Select** control to choose it for playback and t
 Use action; merely finishing a background Whisper run does not select it.
 The checked rows from that source become editable project segments with that source's timings
 and no assigned speakers. Other sources are not mixed in. Playback also uses the chosen draft's
-own edited In/Out range. Choosing an available draft while another scan runs stops that scan.
+own edited In/Out range. Choosing an available draft does not cancel another running task.
 Existing project segments are never
 silently replaced; adding another set requires confirmation.
 
@@ -468,9 +471,10 @@ If a larger model fails due to memory limits, click **Use Whisper Transcript** b
 retained draft to use it without rerunning.
 If all rows are unchecked, check at least one before using the transcript.
 If automatic refinement fails, is canceled, or returns no rows, no original rows are shown as a
-fallback and Whisper does not start automatically; either pass can be retried manually.
+fallback. The independent Whisper task is unaffected; either pass can be retried manually.
 Any previously completed refined draft is retained.
-**Cancel Scan** keeps the analysis window open. **Keep Drafts & Close** stops a running scan and
+**Cancel Scan** keeps the analysis window open. **Keep Drafts & Close** hides the review while
+manager-owned work continues in **Tasks**, and
 retains all available drafts, including edits, checked rows, source selection, and the pause setting, without adding
 segments. Draft changes are included in recovery snapshots and **Save Project**, just like other
 project edits. **Tools → Analyze Video & Suggest Segments** restores completed drafts without
