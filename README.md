@@ -242,6 +242,18 @@ dirty state. Switching tabs pauses the previous audible preview without cancelli
 The tab's `*`, `[working]`, and `[!]` indicators show unsaved edits, work in progress, and errors.
 Completion does not select a different tab.
 
+The permanent menu bar sits directly below the Windows title bar, above the project tabs.
+**File** contains new/open/import, recent projects, and the active project's save/export/close
+commands. **Project** contains video analysis and backing-track generation; **Segments** contains
+segment editing and preview commands. **Tools > Tasks** and **Help** (updates, diagnostics, MCP
+help, and About) apply to the whole application.
+
+Each tab has a compact **Save / Export / Analyze / Backing** toolbar. Its commands and the
+project-related menus always target the active tab. Primary actions pair icons with short labels;
+secondary segment, file-picker, and tab-close controls use icons with descriptive tooltips.
+Hover over a command for its purpose and available shortcut. **Ctrl+W** closes the active project,
+with the same unsaved-change and running-task prompts as its tab's close button.
+
 Drag local video files (MP4, MKV, MOV, WebM, OGV, or AVI) or saved `.cvpack.json` projects
 anywhere in the main editor window to open each in its own tab, without replacing existing
 work or discarding unsaved edits. Dropping an already-open project focuses its tab instead
@@ -312,7 +324,7 @@ Select a single row again to edit or preview an individual segment and resume pl
 
 ### Analyze and transcribe a video
 
-The nonmodal analysis window opens after **New from Video** and can be reopened with **Tools →
+The nonmodal analysis window opens after **New from Video** and can be reopened with **Project →
 Analyze Video & Suggest Segments** (`Ctrl+Shift+R`). New local-video and YouTube imports both start
 Whisper automatically, subject to download consent, while reopening existing drafts does not rerun it.
 Backing generation, waveform extraction, caption refinement, and transcription are independent tasks;
@@ -498,7 +510,7 @@ Any previously completed refined draft is retained.
 manager-owned work continues in the background (inspect it through **Tools > Tasks**), and
 retains all available drafts, including edits, checked rows, source selection, and the pause setting, without adding
 segments. Draft changes are included in recovery snapshots and **Save Project**, just like other
-project edits. **Tools → Analyze Video & Suggest Segments** restores completed drafts without
+project edits. **Project → Analyze Video & Suggest Segments** restores completed drafts without
 rerunning analysis. If refinement has never completed, reopening resumes that pass without
 starting Whisper. Legacy original-draft edits are preserved in the project file but not displayed
 or imported as refined results. A successful Whisper rescan replaces only the local draft after confirmation;
@@ -615,7 +627,7 @@ bass and other stems, excluding vocals, into a full-length backing aligned with 
 is approximate: some dialogue can bleed through and some effects or singing may be removed. Listen
 to the result before sharing. Prompt extraction still uses the source video's original audio.
 
-Use **Generate backing** in the Project section or **Tools → Generate Backing Track** at any time.
+Use **Generate backing** in Pack Details or **Project → Generate Backing Track** at any time.
 If backing is already selected, regeneration asks before replacing the project's selection. It writes
 a new durable audio file under per-user application data, never over the original backing or video.
 Captions, speakers, segment boundaries, analysis drafts, prompt MP3s and still images are not changed.
