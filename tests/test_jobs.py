@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import subprocess
 import sys
 import threading
@@ -373,3 +374,36 @@ def test_rejected_executor_admission_never_runs_or_leaks_reservations(
     following = manager.submit("two", "export", "Next", lambda ctx: 42, write_paths=[tmp_path])
     finish(qtbot, manager)
     assert following.record.result == 42
+
+
+def test_real_executor_start_failure_does_not_retain_qt_owner(qtbot, monkeypatch, tmp_path):
+    manager = JobManager()
+    executed = []
+
+    def fail_start():
+        raise RuntimeError("can't start new thread")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(manager._executor, "_adjust_thread_count", fail_start)
+        handle = manager.submit(
+            "one", "export", "Rejected", lambda context: executed.append(True),
+            write_paths=[tmp_path],
+        )
+        manager._schedule()
+    assert handle.record.state == "failed"
+    assert not manager.active_jobs()
+    assert not any(manager._running.values())
+    manager.shutdown(wait=True)
+    destroyed_on = []
+    manager.destroyed.connect(
+        lambda: destroyed_on.append(threading.get_ident()), Qt.ConnectionType.DirectConnection,
+    )
+    reference = weakref.ref(manager)
+    owner_thread = threading.get_ident()
+    del manager
+    assert reference() is None
+    collector = threading.Thread(target=gc.collect)
+    collector.start()
+    collector.join()
+    assert destroyed_on == [owner_thread]
+    assert not executed

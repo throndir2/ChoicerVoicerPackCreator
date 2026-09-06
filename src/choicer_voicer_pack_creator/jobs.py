@@ -288,7 +288,9 @@ class JobManager(QObject):
                 continue
             context = copy_context()
             try:
-                self._executor.submit(context.run, self._execute, task)
+                self._executor.submit(
+                    context.run, JobManager._run_queued, weakref.ref(self), handle.id,
+                )
             except Exception as error:
                 self._reject_start(task, "failed", f"{type(error).__name__}: {error}")
             else:
@@ -308,6 +310,14 @@ class JobManager(QObject):
             task.lease = None
         self._running[task.handle.record.resource_class] -= 1
         self._finish(task.handle, state, None, error)
+
+    @staticmethod
+    def _run_queued(manager_ref: weakref.ReferenceType[JobManager], job_id: str) -> None:
+        # A failed thread start can leave this item in an executor with no workers
+        # to drain it. The queue must not own a bound method/Qt manager reference.
+        manager = manager_ref()
+        if manager is not None:
+            manager._execute(manager._tasks[job_id])
 
     def _execute(self, task: _Task) -> None:
         # submit() can fail after putting work on the executor's internal queue.
