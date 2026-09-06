@@ -8,6 +8,11 @@ import pytest
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QDialog, QFileDialog
 
+from choicer_voicer_pack_creator.export_progress import (
+    VIDEO_CONVERSION_STEP,
+    ExportProgress,
+    ExportStep,
+)
 from choicer_voicer_pack_creator.exporter import ExportResult
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.ui import main_window
@@ -27,17 +32,18 @@ def test_dialog_shows_live_operation_history_and_elapsed_time(qtbot, tmp_path, m
     qtbot.addWidget(dialog)
     elapsed = [3605000]
     monkeypatch.setattr(dialog, "_elapsed", SimpleNamespace(elapsed=lambda: elapsed[0]))
-    dialog.report_progress("Prompt 2/8: preparing still image...")
+    dialog.report_progress(ExportProgress("Prompt 2/8: preparing still image..."))
     elapsed[0] += 3000
     dialog._timer.timeout.emit()
     assert dialog.progress_label.text() == "Prompt 2/8: preparing still image..."
-    assert "[01:00:05] Prompt 2/8" in dialog.details.toPlainText()
+    assert "Prompt 2/8" in dialog.details.toPlainText()
+    assert "[01:00:05]" not in dialog.details.toPlainText()
     assert dialog.elapsed_label.text() == "Elapsed: 01:00:08 | Current step: 00:00:03"
     assert dialog.details.isReadOnly()
     assert dialog.progress_bar.maximum() == 0
     assert dialog.isModal()
     assert dialog.progress_label.textFormat() == Qt.TextFormat.PlainText
-    dialog.report_progress("Testing ZIP integrity...")
+    dialog.report_progress(ExportProgress("Testing ZIP integrity..."))
     assert "Current step: 00:00:00" in dialog.elapsed_label.text()
     assert "Prompt 2/8" in dialog.details.toPlainText()
     dialog.show_error("Fixture stopped")
@@ -82,7 +88,7 @@ def test_failure_keeps_last_operation_and_full_error_without_claiming_success(qt
     dialog = ExportProgressDialog(tmp_path)
     qtbot.addWidget(dialog)
     dialog.show()
-    dialog.report_progress("Revalidating published pack: checking audio")
+    dialog.report_progress(ExportProgress("Revalidating published pack: checking audio"))
     dialog.show_error("Publishing failed; rollback was incomplete:\nCould not restore previous ZIP")
     assert not dialog.close_button.isEnabled()
     dialog.worker_finished()
@@ -118,7 +124,7 @@ def test_main_window_opens_popup_and_retires_worker_only_after_finished(
         def export(self, project, destination, *, create_zip, progress):
             calls.append(project)
             assert create_zip
-            progress("Prompt 1/1: preparing still image...")
+            progress(ExportProgress("Prompt 1/1: preparing still image..."))
             assert allow_result.wait(5)
             if outcome == "failure":
                 raise RuntimeError("Image conversion failed")
@@ -188,7 +194,7 @@ def test_main_window_opens_popup_and_retires_worker_only_after_finished(
 def test_worker_reports_early_errors_through_its_failure_signal(qtbot, tmp_path):
     class FailingExporter:
         def export(self, *_args, progress, **_kwargs):
-            progress("Inspecting source video and audio...")
+            progress(ExportProgress("Inspecting source video and audio..."))
             raise OSError("Source is unavailable")
 
     worker = main_window.ExportWorker(FailingExporter(), PackProject(), tmp_path)
@@ -197,5 +203,87 @@ def test_worker_reports_early_errors_through_its_failure_signal(qtbot, tmp_path)
     worker.progress.connect(messages.append)
     worker.failed.connect(failures.append)
     worker.run()
-    assert messages == ["Inspecting source video and audio..."]
+    assert messages == [ExportProgress("Inspecting source video and audio...")]
     assert failures == ["Source is unavailable"]
+
+
+def test_live_progress_updates_both_estimates_without_resetting_step_or_flooding_history(
+    qtbot, tmp_path, monkeypatch,
+):
+    dialog = ExportProgressDialog(tmp_path)
+    qtbot.addWidget(dialog)
+    elapsed = [0]
+    monkeypatch.setattr(dialog, "_elapsed", SimpleNamespace(elapsed=lambda: elapsed[0]))
+    plan = (
+        ExportStep(VIDEO_CONVERSION_STEP, "Video conversion", "video", 60),
+        ExportStep("prompts", "Prompts", "prompts", 40),
+    )
+    dialog.report_progress(ExportProgress(
+        "Converting full video", VIDEO_CONVERSION_STEP, plan=plan, live=True,
+    ))
+    assert "about 1m 40s remaining" in dialog.overall_eta_label.text()
+    assert "about 1m 0s remaining" in dialog.step_eta_label.text()
+    elapsed[0] = 10000
+    dialog.report_progress(ExportProgress(
+        "Encoded 00:10 / 01:00\nPrompt 2/8 - Alice", VIDEO_CONVERSION_STEP,
+        fraction=0.25, position=10, live=True,
+    ))
+    assert dialog.progress_bar.value() == 250
+    assert dialog.overall_bar.value() == 125
+    assert "about 30s remaining" in dialog.step_eta_label.text()
+    assert "about 1m 10s remaining" in dialog.overall_eta_label.text()
+    assert "Current step: 00:00:10" in dialog.elapsed_label.text()
+    assert dialog.details.document().blockCount() == 2
+    assert dialog.details.toPlainText().startswith("Preparing export...\n")
+    assert "Prompt 2/8 - Alice" in dialog.details.toPlainText()
+
+    elapsed[0] = 26000
+    dialog._timer.timeout.emit()
+    assert "No encoding advance for 00:00:16" in dialog.activity_label.text()
+    assert "about 1m 18s remaining" in dialog.step_eta_label.text()
+    assert "about 1m 58s remaining" in dialog.overall_eta_label.text()
+    assert dialog.overall_bar.value() < 990
+    dialog.report_progress(ExportProgress(
+        "Encoded 00:30 / 01:00", VIDEO_CONVERSION_STEP, fraction=0.5, position=30, live=True,
+    ))
+    assert "No encoding advance" not in dialog.activity_label.text()
+    assert dialog.details.document().blockCount() == 2
+    dialog.report_progress(ExportProgress("Preparing prompt audio", "prompts"))
+    assert dialog.progress_bar.maximum() == 0
+    assert dialog.overall_bar.maximum() == 1000
+    assert "about 40s remaining" in dialog.step_eta_label.text()
+    assert "Current step: 00:00:00" in dialog.elapsed_label.text()
+    assert dialog.details.document().blockCount() == 3
+    dialog.show_result(export_result(tmp_path))
+    assert dialog.overall_bar.value() == dialog.overall_bar.maximum() == 1
+    assert dialog.step_eta_label.text() == ""
+    assert "remaining" not in dialog.overall_eta_label.text()
+    dialog.worker_finished()
+
+
+def test_unmeasured_suboperations_retain_history_and_overdue_estimates_are_honest(
+    qtbot, tmp_path, monkeypatch,
+):
+    dialog = ExportProgressDialog(tmp_path)
+    qtbot.addWidget(dialog)
+    elapsed = [0]
+    monkeypatch.setattr(dialog, "_elapsed", SimpleNamespace(elapsed=lambda: elapsed[0]))
+    dialog.report_progress(ExportProgress(
+        "Validating staged pack", "validation",
+        plan=(ExportStep("validation", "Validation", "validation", 5),),
+    ))
+    elapsed[0] = 2000
+    dialog.report_progress(ExportProgress("Decoding video", "validation"))
+    assert "Current step: 00:00:02" in dialog.elapsed_label.text()
+    assert "Validating staged pack" in dialog.details.toPlainText()
+    assert "Decoding video" in dialog.details.toPlainText()
+    elapsed[0] = 6000
+    dialog._timer.timeout.emit()
+    assert "re-estimating" in dialog.step_eta_label.text()
+    assert "re-estimating" in dialog.overall_eta_label.text()
+    assert dialog.overall_bar.maximum() == 0
+    dialog.show_error("Decode failed")
+    assert dialog.overall_bar.value() == 0
+    assert dialog.overall_bar.format() == "Failed"
+    assert "remaining" not in dialog.overall_eta_label.text()
+    dialog.worker_finished()
