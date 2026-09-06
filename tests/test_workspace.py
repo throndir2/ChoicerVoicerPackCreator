@@ -4,8 +4,16 @@ import threading
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal
-from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox, QScrollArea
+from PySide6.QtCore import QMimeData, QObject, QPoint, QPointF, QSettings, Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QFileDialog,
+    QLineEdit,
+    QMessageBox,
+    QScrollArea,
+)
 from shiboken6 import isValid
 
 from choicer_voicer_pack_creator.models import PackProject, Segment
@@ -13,7 +21,7 @@ from choicer_voicer_pack_creator.operations import OperationCancelled
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore, WorkspaceStore
 from choicer_voicer_pack_creator.project_session import canonical_project_path
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
-from choicer_voicer_pack_creator.ui.main_window import MainWindow, WaveformWorker
+from choicer_voicer_pack_creator.ui.main_window import MainWindow, ProjectEditor, WaveformWorker
 from choicer_voicer_pack_creator.ui.theme import APP_STYLESHEET
 
 
@@ -46,6 +54,204 @@ def workspace(qtbot, tmp_path):
     qtbot.addWidget(window, before_close_func=close)
     window.show()
     return window
+
+
+def send_drop(target, mime, actions=Qt.DropAction.CopyAction | Qt.DropAction.MoveAction):
+    events = [
+        QDragEnterEvent(QPoint(5, 5), actions, mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier),
+        QDragMoveEvent(QPoint(5, 5), actions, mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier),
+        QDropEvent(QPointF(5, 5), actions, mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier),
+    ]
+    for event in events:
+        QApplication.sendEvent(target, event)
+    return events
+
+
+@pytest.mark.parametrize("target", [
+    "window", "tabs", "video_widget", "timeline", "title_edit", "readme_edit",
+    "caption_edit", "table", "tasks",
+])
+def test_project_drop_opens_tab_without_editing_drop_target(
+    workspace, qtbot, tmp_path, target,
+):
+    original = workspace.active_editor
+    original._set_project(PackProject(title="Unsaved work", readme="Keep notes"), None, True)
+    before = original.project.to_dict()
+    path = tmp_path / "Dropped project.cvpack.json"
+    ProjectStore.save(PackProject(title="Dropped project"), path)
+    targets = {
+        "window": workspace,
+        "tabs": workspace.tabs.tabBar(),
+        "video_widget": original.video_widget,
+        "timeline": original.timeline,
+        "title_edit": original.title_edit,
+        "readme_edit": original.readme_edit.viewport(),
+        "caption_edit": original.caption_edit.viewport(),
+        "table": original.segment_table.viewport(),
+        "tasks": workspace.tasks_panel.table.viewport(),
+    }
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(path))])
+    events = send_drop(targets[target], mime)
+    assert all(event.isAccepted() for event in events)
+    assert all(event.dropAction() == Qt.DropAction.CopyAction for event in events)
+    qtbot.waitUntil(lambda: workspace.active_editor.project_path == path)
+    assert workspace.tabs.count() == 2
+    assert workspace.project.title == "Dropped project"
+    assert not workspace.dirty
+    assert original.project.to_dict() == before
+    assert original.dirty
+    assert not workspace._decisions
+    assert path.is_file()
+
+
+@pytest.mark.parametrize("extension", [".mp4", ".MKV", ".mov", ".webm", ".ogv", ".avi"])
+def test_video_drop_creates_project_and_keeps_initial_processing(
+    workspace, qtbot, tmp_path, monkeypatch, extension,
+):
+    source = tmp_path / f"Dropped video{extension}"
+    source.write_bytes(b"synthetic")
+    probed, processed = [], []
+
+    def probe(path):
+        probed.append(path)
+        return SimpleNamespace(duration=4.0)
+
+    monkeypatch.setattr(workspace.media, "probe", probe, raising=False)
+    monkeypatch.setattr(
+        ProjectEditor, "_finish_new_import",
+        lambda editor, project: processed.append((editor.session.id, project)),
+    )
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(source))])
+    assert all(event.isAccepted() for event in send_drop(workspace, mime))
+    qtbot.waitUntil(lambda: bool(processed))
+    assert workspace.tabs.count() == 1
+    assert probed == [source]
+    assert processed == [(workspace.active_editor.session.id, workspace.project)]
+    assert workspace.project.title == "Dropped video"
+    assert workspace.project.video_path == str(source)
+    assert workspace.project.video_duration == 4.0
+    assert workspace.project_path is None and workspace.dirty
+    assert source.read_bytes() == b"synthetic"
+
+
+def test_multiple_drops_keep_independent_tabs_and_focus_duplicate_projects(
+    workspace, qtbot, tmp_path, monkeypatch,
+):
+    paths = [tmp_path / f"Project {index}.CVPACK.JSON" for index in range(2)]
+    for index, path in enumerate(paths):
+        ProjectStore.save(PackProject(title=f"Project {index}"), path)
+    started, release = threading.Event(), threading.Event()
+    load = ProjectStore.load
+
+    def blocked_load(path):
+        started.set()
+        assert release.wait(5)
+        return load(path)
+
+    monkeypatch.setattr(ProjectStore, "load", blocked_load)
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
+    try:
+        send_drop(workspace, mime)
+        qtbot.waitUntil(started.is_set)
+        assert workspace.tabs.count() == 2
+        assert all(editor.session.loading for editor in workspace.editors.values())
+        mime.setUrls([QUrl.fromLocalFile(str(paths[0]))])
+        send_drop(workspace, mime)
+        qtbot.waitUntil(lambda: workspace.active_editor is workspace.project_for_path(paths[0]))
+        assert workspace.tabs.count() == 2
+    finally:
+        release.set()
+    qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
+    first = workspace.active_editor
+    first.title_edit.setText("Unsaved changes")
+    first._commit_editors()
+    send_drop(workspace, mime)
+    qtbot.wait(1)
+    assert workspace.active_editor is first
+    assert workspace.tabs.count() == 2
+    assert first.project.title == "Unsaved changes" and first.dirty
+    assert load(paths[0]).title == "Project 0"
+
+
+@pytest.mark.parametrize("kind", ["unsupported", "folder", "missing", "remote", "mixed", "move_only"])
+def test_unsupported_drop_does_not_open_tabs_or_insert_paths(
+    workspace, qtbot, tmp_path, kind,
+):
+    original = workspace.active_editor
+    before = original.title_edit.text()
+    path = tmp_path / "item.txt"
+    path.write_text("not a project", encoding="utf-8")
+    urls = [QUrl.fromLocalFile(str(path))]
+    if kind == "folder":
+        urls = [QUrl.fromLocalFile(str(tmp_path))]
+    elif kind == "missing":
+        urls = [QUrl.fromLocalFile(str(tmp_path / "missing.mp4"))]
+    elif kind == "remote":
+        urls = [QUrl("https://example.com/video.mp4")]
+    elif kind in {"mixed", "move_only"}:
+        project = tmp_path / "valid.cvpack.json"
+        ProjectStore.save(PackProject(title="Valid"), project)
+        urls = [QUrl.fromLocalFile(str(project)), *urls] if kind == "mixed" else [
+            QUrl.fromLocalFile(str(project))
+        ]
+    mime = QMimeData()
+    mime.setUrls(urls)
+    actions = Qt.DropAction.MoveAction if kind == "move_only" else Qt.DropAction.CopyAction
+    events = send_drop(original.title_edit, mime, actions)
+    assert not any(event.isAccepted() for event in events)
+    qtbot.wait(1)
+    assert workspace.tabs.count() == 1
+    assert original.title_edit.text() == before
+    assert not original.dirty
+    assert "Drop local video files" in workspace.statusBar().currentMessage()
+
+
+def test_text_drops_still_edit_text_and_dialog_file_drops_do_not_open_projects(
+    workspace, qtbot, tmp_path,
+):
+    mime = QMimeData()
+    mime.setText("Dropped text")
+    send_drop(workspace.title_edit, mime)
+    assert "Dropped text" in workspace.title_edit.text()
+    assert workspace.tabs.count() == 1
+    dialog = QDialog(workspace)
+    qtbot.addWidget(dialog)
+    field = QLineEdit(dialog)
+    dialog.show()
+    path = tmp_path / "project.cvpack.json"
+    ProjectStore.save(PackProject(), path)
+    mime.setUrls([QUrl.fromLocalFile(str(path))])
+    send_drop(field, mime)
+    qtbot.wait(1)
+    assert workspace.tabs.count() == 1
+
+
+@pytest.mark.parametrize("kind", ["video", "project"])
+def test_failed_drop_import_reports_error_and_preserves_other_edits(
+    workspace, qtbot, tmp_path, monkeypatch, kind,
+):
+    original = workspace.active_editor
+    original._set_project(PackProject(title="Keep me"), None, True)
+    path = tmp_path / ("invalid.mp4" if kind == "video" else "invalid.cvpack.json")
+    path.write_text("invalid", encoding="utf-8")
+
+    def probe(_path):
+        raise ValueError("Invalid video")
+
+    monkeypatch.setattr(workspace.media, "probe", probe, raising=False)
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(path))])
+    send_drop(workspace, mime)
+    qtbot.waitUntil(lambda: bool(workspace._decisions))
+    qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
+    assert workspace._decisions[0].windowTitle() == f"Could not open {kind}"
+    assert workspace.active_editor is not original
+    assert not workspace.active_editor.session.loading
+    assert original.project.title == "Keep me" and original.dirty
+    assert path.read_text(encoding="utf-8") == "invalid"
 
 
 def test_running_project_does_not_block_edit_save_or_open(workspace, qtbot, tmp_path):
