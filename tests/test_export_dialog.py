@@ -135,6 +135,7 @@ def test_main_window_opens_popup_and_retires_worker_only_after_finished(
     window = main_window.MainWindow(SimpleNamespace(), settings=settings)
     qtbot.addWidget(window)
     window.exporter = Exporter()
+    monkeypatch.setattr(window, "_confirm_backing_export", lambda: True)
     source = tmp_path / "source.mp4"
     source.write_bytes(b"fixture")
     window.project.video_path = str(source)

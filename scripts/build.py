@@ -27,6 +27,37 @@ APP_NAME = "Choicer Voicer Pack Creator"
 FFMPEG_STAGE = ROOT / "build" / "ffmpeg-windows-x64-562ea50b4f2d213e"
 LATEST_BUILD_MANIFEST = DIST / "latest-portable.json"
 PENDING_BUILD_MANIFEST = DIST / "pending-portable.json"
+SEPARATION_PACKAGES = ("onnxruntime", "numpy", "soundfile", "cffi", "pycparser",
+                       "flatbuffers", "protobuf", "packaging")
+
+
+def copy_separation_licenses(app_dir: Path) -> None:
+    for package in SEPARATION_PACKAGES:
+        distribution = importlib.metadata.distribution(package)
+        licenses = [
+            path for path in distribution.files or []
+            if Path(path).name.casefold().startswith(("license", "copying", "notice",
+                                                      "thirdpartynotices"))
+        ]
+        if not licenses:
+            if package == "flatbuffers" and distribution.version == "25.12.19":
+                target = app_dir / "licenses" / package
+                target.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(
+                    ROOT / "src" / "choicer_voicer_pack_creator" / "resources"
+                    / "Flatbuffers-Apache-2.0.txt", target / "LICENSE.txt",
+                )
+                continue
+            raise RuntimeError(f"Installed {package} wheel is missing its license notices")
+        for license_file in licenses:
+            relative = str(license_file).replace("\\", "/")
+            if ".dist-info/licenses/" in relative:
+                relative = relative.split(".dist-info/licenses/", 1)[1]
+            elif ".dist-info/" in relative:
+                relative = relative.split(".dist-info/", 1)[1]
+            target = app_dir / "licenses" / package / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(distribution.locate_file(license_file), target)
 
 
 def _sha256(path: Path) -> str:
@@ -109,6 +140,8 @@ def build_candidate() -> int:
         "--onedir",
         "--clean",
         "--noconfirm",
+        "--runtime-hook",
+        str(ROOT / "scripts" / "separation_runtime_hook.py"),
         "--distpath",
         str(portable_root),
         "--workpath",
@@ -125,6 +158,10 @@ def build_candidate() -> int:
         "yt_dlp_ejs.yt.solver",
         "--collect-data",
         "yt_dlp_ejs",
+        "--collect-all",
+        "onnxruntime",
+        "--collect-all",
+        "_soundfile_data",
         "--add-binary",
         f"{deno.find_deno_bin()}{os.pathsep}runtime/deno",
         "--add-data",
@@ -151,6 +188,9 @@ def build_candidate() -> int:
     resource_dir = ROOT / "src" / "choicer_voicer_pack_creator" / "resources"
     shutil.copy2(resource_dir / "WhisperCpp-MIT.txt", app_dir / "licenses")
     shutil.copy2(resource_dir / "OpenAI-Whisper-MIT.txt", app_dir / "licenses")
+    for filename in ("Demucs-MIT.txt", "StemSplit-MIT.txt", "backing-separation.json"):
+        shutil.copy2(resource_dir / filename, app_dir / "licenses")
+    copy_separation_licenses(app_dir)
     for package in ("yt-dlp", "yt-dlp-ejs", "deno"):
         distribution = importlib.metadata.distribution(package)
         license_files = [

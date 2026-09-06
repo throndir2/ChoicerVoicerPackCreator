@@ -113,6 +113,108 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def download_verified(
+    url: str,
+    destination: Path,
+    expected_hash: str,
+    expected_bytes: int,
+    label: str,
+    progress: ProgressCallback,
+    cancelled: CancelCallback,
+) -> Path:
+    """Download a pinned optional component, retaining the shared verification policy."""
+    diagnostic_event(
+        "component_requested", component=label, destination=str(destination),
+        expected_bytes=expected_bytes, expected_sha256=expected_hash,
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file():
+        progress(f"Verifying cached {label}...", None)
+        if destination.stat().st_size == expected_bytes and sha256(destination) == expected_hash:
+            diagnostic_event("component_cache_verified", component=label)
+            progress(f"Using verified cached {label}.", 1.0)
+            return destination
+        diagnostic_event(
+            "component_cache_invalid", component=label, bytes=destination.stat().st_size,
+        )
+        destination.unlink()
+    partial = destination.with_name(destination.name + ".partial")
+    partial.unlink(missing_ok=True)
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "ChoicerVoicerPackCreator-analysis/0.4"},
+    )
+    diagnostic_event("component_download_started", component=label, url=url)
+    try:
+        transfer_deadline = time.monotonic() + max(
+            60.0, min(3600.0, 60.0 + expected_bytes / (128 * 1024))
+        )
+        with urllib.request.urlopen(request, timeout=10) as response, partial.open("wb") as output:
+            final_url = response.geturl()
+            parsed = urllib.parse.urlparse(final_url)
+            approved_https_host = bool(
+                parsed.hostname
+                and (
+                    parsed.hostname in ALLOWED_DOWNLOAD_HOSTS
+                    or parsed.hostname.endswith(ALLOWED_DOWNLOAD_HOST_SUFFIXES)
+                )
+            )
+            if parsed.scheme not in {"https", "file"} or (
+                parsed.scheme == "https" and not approved_https_host
+            ):
+                raise AnalysisError(f"{label} redirected to an unapproved host: {final_url}")
+            content_length = response.headers.get("Content-Length")
+            diagnostic_event(
+                "component_download_response", component=label,
+                host=parsed.hostname, content_length=content_length,
+            )
+            if content_length is not None and int(content_length) != expected_bytes:
+                raise AnalysisError(
+                    f"{label} reported {content_length} bytes; expected {expected_bytes}."
+                )
+            downloaded = 0
+            while True:
+                _check_cancel(cancelled)
+                if time.monotonic() > transfer_deadline:
+                    raise AnalysisError(f"{label} download exceeded its time limit")
+                try:
+                    chunk = response.read(min(BUFFER_SIZE, expected_bytes - downloaded + 1))
+                except (TimeoutError, OSError) as error:
+                    if cancelled():
+                        raise AnalysisCancelled("Video analysis was canceled") from None
+                    raise AnalysisError(f"{label} download failed: {error}") from error
+                if not chunk:
+                    break
+                if downloaded + len(chunk) > expected_bytes:
+                    raise AnalysisError(
+                        f"{label} exceeded its pinned size of {expected_bytes} bytes."
+                    )
+                output.write(chunk)
+                downloaded += len(chunk)
+                progress(
+                    f"Downloading {label} ({downloaded / 1024**2:.1f} / "
+                    f"{expected_bytes / 1024**2:.1f} MiB)…",
+                    min(1.0, downloaded / max(1, expected_bytes)),
+                )
+            output.flush()
+            os.fsync(output.fileno())
+        progress(f"Verifying downloaded {label}...", None)
+        _check_cancel(cancelled)
+        actual_hash = sha256(partial)
+        if partial.stat().st_size != expected_bytes or actual_hash != expected_hash:
+            raise AnalysisError(
+                f"{label} verification failed. Expected {expected_bytes} bytes / "
+                f"{expected_hash}, received {partial.stat().st_size} bytes / {actual_hash}."
+            )
+        os.replace(partial, destination)
+        diagnostic_event(
+            "component_download_verified", component=label, bytes=downloaded, sha256=actual_hash,
+        )
+        return destination
+    finally:
+        partial.unlink(missing_ok=True)
+
+
 def detect_hardware() -> HardwareProfile:
     logical_cpus = max(1, os.cpu_count() or 1)
     threads = max(1, min(12, logical_cpus - 1 if logical_cpus > 2 else logical_cpus))
@@ -498,96 +600,9 @@ class WhisperManager:
         progress: ProgressCallback,
         cancelled: CancelCallback,
     ) -> Path:
-        diagnostic_event(
-            "component_requested", component=label, destination=str(destination),
-            expected_bytes=expected_bytes, expected_sha256=expected_hash,
+        return download_verified(
+            url, destination, expected_hash, expected_bytes, label, progress, cancelled,
         )
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.is_file():
-            progress(f"Verifying cached {label}...", None)
-            if destination.stat().st_size == expected_bytes and sha256(destination) == expected_hash:
-                diagnostic_event("component_cache_verified", component=label)
-                progress(f"Using verified cached {label}.", 1.0)
-                return destination
-            diagnostic_event(
-                "component_cache_invalid", component=label, bytes=destination.stat().st_size,
-            )
-            destination.unlink()
-        partial = destination.with_name(destination.name + ".partial")
-        partial.unlink(missing_ok=True)
-        request = urllib.request.Request(
-            url,
-            headers={"User-Agent": "ChoicerVoicerPackCreator-analysis/0.4"},
-        )
-        diagnostic_event("component_download_started", component=label, url=url)
-        try:
-            transfer_deadline = time.monotonic() + max(
-                60.0, min(3600.0, 60.0 + expected_bytes / (128 * 1024))
-            )
-            with urllib.request.urlopen(request, timeout=10) as response, partial.open("wb") as output:
-                final_url = response.geturl()
-                parsed = urllib.parse.urlparse(final_url)
-                approved_https_host = bool(
-                    parsed.hostname
-                    and (
-                        parsed.hostname in ALLOWED_DOWNLOAD_HOSTS
-                        or parsed.hostname.endswith(ALLOWED_DOWNLOAD_HOST_SUFFIXES)
-                    )
-                )
-                if parsed.scheme not in {"https", "file"} or (
-                    parsed.scheme == "https" and not approved_https_host
-                ):
-                    raise AnalysisError(f"{label} redirected to an unapproved host: {final_url}")
-                content_length = response.headers.get("Content-Length")
-                diagnostic_event(
-                    "component_download_response", component=label,
-                    host=parsed.hostname, content_length=content_length,
-                )
-                if content_length is not None and int(content_length) != expected_bytes:
-                    raise AnalysisError(
-                        f"{label} reported {content_length} bytes; expected {expected_bytes}."
-                    )
-                downloaded = 0
-                while True:
-                    _check_cancel(cancelled)
-                    if time.monotonic() > transfer_deadline:
-                        raise AnalysisError(f"{label} download exceeded its time limit")
-                    try:
-                        chunk = response.read(min(BUFFER_SIZE, expected_bytes - downloaded + 1))
-                    except (TimeoutError, OSError) as error:
-                        if cancelled():
-                            raise AnalysisCancelled("Video analysis was canceled") from None
-                        raise AnalysisError(f"{label} download failed: {error}") from error
-                    if not chunk:
-                        break
-                    if downloaded + len(chunk) > expected_bytes:
-                        raise AnalysisError(
-                            f"{label} exceeded its pinned size of {expected_bytes} bytes."
-                        )
-                    output.write(chunk)
-                    downloaded += len(chunk)
-                    progress(
-                        f"Downloading {label} ({downloaded / 1024**2:.1f} / "
-                        f"{expected_bytes / 1024**2:.1f} MiB)…",
-                        min(1.0, downloaded / max(1, expected_bytes)),
-                    )
-                output.flush()
-                os.fsync(output.fileno())
-            progress(f"Verifying downloaded {label}...", None)
-            _check_cancel(cancelled)
-            actual_hash = sha256(partial)
-            if partial.stat().st_size != expected_bytes or actual_hash != expected_hash:
-                raise AnalysisError(
-                    f"{label} verification failed. Expected {expected_bytes} bytes / "
-                    f"{expected_hash}, received {partial.stat().st_size} bytes / {actual_hash}."
-                )
-            os.replace(partial, destination)
-            diagnostic_event(
-                "component_download_verified", component=label, bytes=downloaded, sha256=actual_hash,
-            )
-            return destination
-        finally:
-            partial.unlink(missing_ok=True)
 
     def ensure_runtime(
         self, progress: ProgressCallback, cancelled: CancelCallback

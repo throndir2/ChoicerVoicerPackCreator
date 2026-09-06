@@ -25,6 +25,10 @@ dependencies = [
   "yt-dlp==2026.8.19",
   "yt-dlp-ejs==0.8.0",
   "deno==2.9.6",
+  "onnxruntime==1.26.0",
+  "numpy==2.4.6",
+  "soundfile==0.13.1",
+  "flatbuffers==25.12.19",
 ]
 
 [project.optional-dependencies]

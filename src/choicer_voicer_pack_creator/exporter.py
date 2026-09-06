@@ -194,6 +194,8 @@ class PackExporter:
                 self.media.create_silent_backing(
                     stage / "_backing_track.mp3", output_video_info.duration
                 )
+            notify("Checking backing track audibility...")
+            backing_is_silent = self.media.audio_peak_dbfs(stage / "_backing_track.mp3") < -60
 
             segments = sorted(project.segments, key=lambda item: (item.start, item.end))
             total = len(segments)
@@ -288,6 +290,12 @@ class PackExporter:
                 total,
                 progress=notify,
             )
+            if backing_is_silent:
+                publish_warnings.append(
+                    "Exported without backing music: the backing track is silent or below -60 dBFS. "
+                    "Dubbed playback will contain only the players' recordings. Generate or choose "
+                    "an audible backing track and re-export to include music/effects."
+                )
             notify("Cleaning up export staging files...")
             logged_progress.report("Pack export ready", 1.0)
             diagnostic_event(

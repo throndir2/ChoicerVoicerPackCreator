@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -276,6 +277,24 @@ class MediaTools:
             sample_rate=result.sample_rate, channels=result.channels,
         )
         return result
+
+    def audio_peak_dbfs(self, path: Path) -> float:
+        completed = self.run(
+            [
+                self.ffmpeg, "-hide_banner", "-nostats", "-v", "info", "-i", str(path),
+                "-map", "0:a:0", "-vn", "-af",
+                "astats=metadata=0:reset=0:measure_perchannel=none:measure_overall=Peak_level",
+                "-f", "null", os.devnull,
+            ],
+            "Checking backing audio level",
+        )
+        matches = re.findall(r"Peak level dB:\s*(-?inf|[-+]?\d+(?:\.\d+)?)", completed.stderr)
+        if not matches:
+            raise MediaError(f"Could not measure backing audio level: {path.name}")
+        peak = float(matches[-1])
+        if math.isnan(peak) or peak == math.inf:
+            raise MediaError(f"Backing audio has invalid sample levels: {path.name}")
+        return peak
 
     def decoded_audio_stats(
         self,

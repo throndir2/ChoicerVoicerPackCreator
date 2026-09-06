@@ -8,8 +8,10 @@ import sys
 import tempfile
 import time
 import tomllib
+import uuid
 from pathlib import Path
 
+from choicer_voicer_pack_creator.separation import write_json_atomic
 from choicer_voicer_pack_creator.updates import (
     EXECUTABLE,
     MANIFEST,
@@ -37,6 +39,48 @@ def default_executable() -> Path:
     except ValueError as error:
         raise RuntimeError("Latest portable-build executable escapes dist") from error
     return executable
+
+
+def smoke_separation(executable: Path) -> None:
+    job = ROOT / "build" / "separation-smoke" / uuid.uuid4().hex
+    job.mkdir(parents=True)
+    try:
+        request = job / "request.json"
+        write_json_atomic(request, {"version": 1, "job_id": job.name, "smoke_test": True})
+        completed = subprocess.run(
+            [str(executable), "--separate-audio", str(request)],
+            check=False, timeout=60,
+        )
+        status_path = job / "status.json"
+        status = json.loads(status_path.read_text()) if status_path.is_file() else {}
+        if completed.returncode != 0 or status.get("state") != "succeeded":
+            raise RuntimeError(f"Packaged separation worker failed: {status}")
+        report = json.loads((job / "smoke.json").read_text())
+        if report != {
+            "frames": 83, "sample_rate": 44100, "numpy": "2.4.6",
+            "onnxruntime": "1.26.0", "soundfile": "0.13.1", "qt_imported": False,
+        }:
+            raise RuntimeError(f"Unexpected packaged separation runtime: {report}")
+        resources = executable.parent / "_internal" / "choicer_voicer_pack_creator" / "resources"
+        manifest = json.loads((resources / "backing-separation.json").read_text())
+        if manifest["model"]["sha256"] != (
+            "68d0bf16428ef66e692cdff8a9ccf28f1ef3f69440d57e58605a4cc55fcc5e74"
+        ):
+            raise RuntimeError("Packaged separation model provenance is incorrect")
+        for name in ("StemSplit-MIT.txt", "Demucs-MIT.txt"):
+            if not (resources / name).is_file() or not (
+                executable.parent / "licenses" / name
+            ).is_file():
+                raise RuntimeError(f"Missing separation license: {name}")
+        for package in ("onnxruntime", "numpy", "soundfile", "cffi", "pycparser",
+                        "flatbuffers", "protobuf", "packaging"):
+            if not any(path.is_file() for path in (
+                executable.parent / "licenses" / package
+            ).rglob("*")):
+                raise RuntimeError(f"Missing separation dependency licenses: {package}")
+        print("PACKAGED QT-FREE CPU SEPARATION + STREAMING AUDIO SMOKE PASSED")
+    finally:
+        shutil.rmtree(job)
 
 
 def smoke_update(executable: Path) -> None:
@@ -197,6 +241,7 @@ def main() -> int:
             raise RuntimeError(f"Packaged {package} license notice is missing")
     print(json.dumps(report, indent=2))
     print("PACKAGED APPLICATION + BUNDLED FFMPEG SMOKE PASSED")
+    smoke_separation(executable)
     if "--update-smoke" in sys.argv:
         smoke_update(executable)
     return 0

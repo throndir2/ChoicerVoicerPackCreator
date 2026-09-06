@@ -64,6 +64,48 @@ The bundled EJS `yt_dlp_ejs/yt/solver/lib.min.js` retains the MIT astring and IS
 copyright and permission notices. yt-dlp is embedded from its Python wheel rather than its
 standalone executable or optional `default` dependency set.
 
+## Optional local backing-track separation
+
+The application includes **ONNX Runtime 1.26.0** (MIT), **NumPy 2.4.6** (BSD-3-Clause
+and bundled numerical-library notices), and **SoundFile 0.13.1** (BSD-3-Clause).
+SoundFile's Windows wheel includes the shared **libsndfile** library under LGPL-2.1-or-later
+and its bundled codec-library notices. These unmodified libraries remain separate shared
+libraries in the portable application's `_internal` directory.
+Their installed wheel license texts, including ONNX Runtime's third-party notices and
+SoundFile's libsndfile COPYING text, are copied to `licenses/onnxruntime`, `licenses/numpy`,
+and `licenses/soundfile`. The build also preserves license texts for their runtime
+dependencies cffi, pycparser, flatbuffers, protobuf, and packaging.
+Flatbuffers is pinned to 25.12.19 because that wheel omits its Apache-2.0 license file;
+the exact [upstream license](https://github.com/google/flatbuffers/blob/v25.12.19/LICENSE)
+is retained in `resources/Flatbuffers-Apache-2.0.txt` and copied to `licenses/flatbuffers`.
+
+Sources and licensing:
+
+- <https://github.com/microsoft/onnxruntime/tree/v1.26.0>
+- <https://github.com/numpy/numpy/tree/v2.4.6>
+- <https://github.com/bastibe/python-soundfile/tree/0.13.1>
+- <https://github.com/libsndfile/libsndfile>
+
+Generating a backing track optionally downloads the **HTDemucs** four-stem ONNX model
+from `StemSplitio/htdemucs-onnx`, revision `d54ed9eb60e258ea82131c6ee14578628816456a`.
+The model is not bundled. Its 316,446,953-byte download requires explicit permission,
+including repairs to an invalid cache; verified cached models work offline. The SHA-256 is
+`68d0bf16428ef66e692cdff8a9ccf28f1ef3f69440d57e58605a4cc55fcc5e74`.
+Audio processing runs locally; no audio is uploaded.
+
+HTDemucs is MIT-licensed, copyright Meta Platforms, Inc. and affiliates.
+The ONNX export and reference inference are MIT-licensed, copyright 2026 StemSplit.
+The application's disk-backed streaming overlap-add implementation adapts the
+[pinned reference inference](https://huggingface.co/StemSplitio/htdemucs-onnx/blob/d54ed9eb60e258ea82131c6ee14578628816456a/infer.py),
+corrects its zero-weight endpoint handling, and sums drums, bass, and other rather than vocals.
+It preserves the video's timeline and applies one global gain only when needed for clipping safety.
+The exact MIT notices and immutable model provenance are in `resources/Demucs-MIT.txt`,
+`resources/StemSplit-MIT.txt`, and `resources/backing-separation.json`; the portable build
+and downloaded model cache both retain these files.
+
+Separation is probabilistic and can leave voice remnants or remove desired music/effects.
+It is not an authoritative recovery of an original instrumental mix.
+
 ## Qt for Python / PySide6
 
 The Windows application uses Qt for Python (PySide6 6.11.2) under the LGPL v3 option. The generic

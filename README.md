@@ -178,8 +178,9 @@ If `py` is unavailable, invoke your installed Python executable directly.
 ## Create a pack
 
 1. Choose **File → New from Video**.
-2. The initial analysis window starts local Whisper automatically. Approve its first-time
-   component download if needed, or decline/cancel to edit manually. Check only the suggestions
+2. Backing generation first separates music/effects from dialogue locally. Approve the first-time
+   model download if needed, or cancel to generate it later. The analysis window then starts local
+   Whisper automatically, with its own first-time download confirmation. Check only the suggestions
    you want to add.
 3. Assign a speaker and verify every suggested caption and boundary against the source video.
 4. Scrub the video or click the waveform to find any remaining line.
@@ -187,7 +188,7 @@ If `py` is unavailable, invoke your installed Python executable directly.
 6. Select **Add Segment**.
 7. Enter the speaker name and the exact line in the right panel.
 8. Repeat for the whole video. Drag segment edges on the timeline for fine adjustments.
-9. Optionally choose a clean backing track and custom icon.
+9. Review the generated backing, or choose a custom clean backing track and icon.
 10. Save the editable project.
 11. Choose **Export Pack + ZIP** and select an output directory.
 
@@ -428,15 +429,16 @@ unflagged because they intentionally support simultaneous speakers; duplicates t
 speaker are flagged. These amber notices are review evidence, not export-blocking errors; the tool
 never moves a range automatically.
 
-Experimental Silero VAD, OCR, source separation, and game-dialogue lookup tools were evaluated but
+Experimental Silero VAD, OCR, and game-dialogue lookup tools were evaluated but
 are not treated as correctness oracles. Their existing results varied with model settings, merged
 speakers, missed stylized vocalizations, or produced timing that did not match the spoken cut.
 Whisper was integrated only as an explicitly optional local drafting tool with pinned provenance;
 it never assigns speakers or silently changes project data. Exact lines still require human review
 against the decoded source.
 
-When no backing track is selected, the exporter creates a duration-matched silent backing track;
-it never places the source video's original voices under new recordings.
+Backing separation is used only to create music/effects audio, not to infer captions, speakers or
+timings. When no backing is selected, the export dialog offers generation or an explicit
+**Export without music** choice. The exporter never puts the original voices under new recordings.
 
 The exporter stages and validates every file before replacing an existing output. It retains the
 previous folder and ZIP until the newly published copies have been hash-checked and fully validated.
@@ -462,7 +464,8 @@ and ZIP pass final validation.
 
 ## Modify an existing pack
 
-1. Choose **File → Import Existing Pack** and select the folder containing `_pack_info.ini`.
+1. Choose **File → Import Existing Pack** for a folder containing `_pack_info.ini`, or
+   **File → Import Pack ZIP** for an exported archive.
 2. Existing MP3 and PNG assets are preserved by default.
 3. Edit captions, speakers, or timeline positions.
 4. Existing packs store a trigger timestamp and padded recording, not the original spoken cut. To
@@ -488,9 +491,44 @@ Use **Duplicate Segment** to create a second prompt at exactly the same timestam
 
 For newly cut segments, prompt audio comes from the source video. The exporter normalizes it and adds 150 ms head / 250 ms tail padding by default; both values are editable. Imported or manually chosen prompt files are preserved when already MP3 and converted otherwise.
 
-A custom backing track is optional. For best results, choose music/effects audio with the original
-dialogue removed. Without one, the app emits silence in the required backing-track file. It
-deliberately never treats the source video's original mix as automatic backing audio.
+**New from Video** and **New from YouTube** automatically generate music/effects backing before
+starting transcript analysis. The first run asks permission to download a pinned, checksum-verified
+HT-Demucs model (approximately 302 MiB). Processing runs locally on the CPU; audio is never uploaded.
+The verified model is retained for offline reuse. Missing or damaged model data requires download
+permission again.
+
+Generation has progress and cancellation and may take several minutes. It mixes the model's drums,
+bass and other stems, excluding vocals, into a full-length backing aligned with the video. Separation
+is approximate: some dialogue can bleed through and some effects or singing may be removed. Listen
+to the result before sharing. Prompt extraction still uses the source video's original audio.
+
+Use **Generate backing** in the Project section or **Tools → Generate Backing Track** at any time.
+If backing is already selected, regeneration asks before replacing the project's selection. It writes
+a new durable audio file under per-user application data, never over the original backing or video.
+Captions, speakers, segment boundaries, analysis drafts, prompt MP3s and still images are not changed.
+Save the project afterward to retain its new backing reference. Keep application data/media files
+when moving a project, or relink them using **Choose**.
+
+You can still choose a custom clean backing track. Declining/canceling automatic generation keeps
+the import and lets you edit normally. If no backing is selected at export, choose generation or
+explicitly **Export without music**; the latter creates the required duration-matched silent MP3.
+Exports also report a warning when an existing or generated backing is silent or below -60 dBFS.
+The source video's original mixed dialogue is never used as automatic backing.
+
+### Recover an older pack with missing music
+
+1. Open the saved `.cvpack.json` project. If only the export remains, use **File → Import Pack ZIP**
+   or **Import Existing Pack**. ZIP media is extracted into a unique durable application-data folder;
+   the original archive is not changed.
+2. Click **Generate backing** (or **Regenerate backing** for the old silent MP3) and approve model
+   download/replacement if prompted. The included `dub_video.ogv` retains the original audio in
+   app-generated packs, so there is no need to redownload or transcribe the video.
+3. **Save Project As**, then **Export Pack + ZIP** into a new output directory.
+
+The existing dialogue text, speakers, trigger timestamps and imported prompt media are preserved.
+Do not start a new project or rerun transcription to repair backing. Imported packs cannot recover
+unsaved editor drafts or original unpadded cut boundaries that were never stored in the ZIP; they
+do recover the exported dialogue and recordings.
 
 ## Validation levels
 
