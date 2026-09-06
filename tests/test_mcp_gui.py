@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QSettings, QThread
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog
 
 from choicer_voicer_pack_creator.automation import (
     PackAutomation,
@@ -179,6 +179,95 @@ def test_live_inspection_preserves_structured_names_and_padding(qtbot, live_edit
     assert read["segments"][-1]["characters"] == ["Doe, John"]
     window._selected_speakers_changed()
     assert in_worker(qtbot, automation.get_project)["revision"] == edited["revision"]
+
+
+def test_gui_option_changes_require_saving_again_before_live_mcp_export(
+    qtbot, live_editor, tmp_path, monkeypatch,
+):
+    from choicer_voicer_pack_creator.mcp_jobs import LiveJobs
+    from choicer_voicer_pack_creator.ui.export_options_dialog import ExportOptionsDialog
+
+    window, bridge, automation = live_editor
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"synthetic")
+    window.project.video_path = str(source)
+    state = in_worker(qtbot, automation.get_project)
+    saved = in_worker(qtbot, lambda: automation.save_project(
+        state["revision"], str(tmp_path / "options.cvpack.json"),
+    ))
+
+    def choose(dialog):
+        dialog.quality_combo.setCurrentIndex(1)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ExportOptionsDialog, "exec", choose)
+    monkeypatch.setattr(window.active_editor, "_confirm_backing_export", lambda: True)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *_args: "")
+    window.active_editor.export_pack()
+    current = in_worker(qtbot, automation.get_project)
+    assert current["project"]["video_height"] == 720
+    assert current["revision"] != saved["revision"]
+    assert window.dirty
+    jobs = LiveJobs(bridge)
+
+    def unexpected_dialog(self):
+        pytest.fail("MCP export must not ask interactive export options")
+
+    monkeypatch.setattr(ExportOptionsDialog, "exec", unexpected_dialog)
+    with pytest.raises(ValueError, match="Save the project"):
+        in_worker(qtbot, lambda: jobs.start(
+            automation, "export", current["revision"], output_parent=str(tmp_path / "output"),
+        ))
+    with pytest.raises(ValueError, match="Save the project"):
+        in_worker(qtbot, lambda: automation.export_pack(
+            str(tmp_path / "output"), current["revision"],
+        ))
+    assert not [job for job in window.job_manager.tasks() if job.kind == "export"]
+    saved_again = in_worker(qtbot, lambda: automation.save_project(current["revision"]))
+    assert not window.dirty
+    assert saved_again["project"]["video_height"] == 720
+    assert ProjectStore.load(window.project_path).video_height == 720
+
+
+@pytest.mark.parametrize("height,fps,preserve,index,expected", [
+    (480, 30, False, 1, (720, 30, False)),
+    (360, 24, True, 2, (360, 24, True)),
+    (480, 30, False, 2, (480, 30, False)),
+    (720, 30, True, 1, (720, 30, True)),
+    (360, 24, True, 1, (720, 30, False)),
+])
+def test_options_ui_selectors_show_draft_and_cancel_without_changing_project(
+    qtbot, live_editor, height, fps, preserve, index, expected,
+):
+    from choicer_voicer_pack_creator.ui.export_options_dialog import ExportOptionsDialog
+    from choicer_voicer_pack_creator.ui_automation import UIAutomation
+
+    window, bridge, _automation = live_editor
+    editor = window.active_editor
+    editor._set_project(PackProject(
+        video_height=height, video_fps=fps, preserve_source_video=preserve,
+    ), None, mark_dirty=False)
+    before = editor.project.to_dict()
+    dialog = ExportOptionsDialog(editor.project, editor)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.activateWindow()
+    qtbot.waitUntil(dialog.isActiveWindow)
+    hooks = UIAutomation(bridge)
+    hooks.interact("exportQualityPreset", "select", editor.session.id, index=index)
+    qtbot.waitUntil(lambda: hooks.state()["actions"][-1]["state"] in {"completed", "failed"})
+    assert hooks.state()["actions"][-1]["state"] == "completed", hooks.state()["actions"]
+    widgets = {item["selector"]: item for item in hooks.state()["widgets"]}
+    assert widgets["exportQualityPreset"]["index"] == index
+    assert widgets["exportHeight"]["value"] == expected[0]
+    assert widgets["exportFps"]["value"] == expected[1]
+    assert widgets["exportPreserveVideo"]["checked"] is expected[2]
+    assert widgets["exportOptionsCancel"]["enabled"]
+    hooks.interact("exportOptionsCancel", "click", editor.session.id)
+    qtbot.waitUntil(lambda: not dialog.isVisible())
+    assert hooks.state()["actions"][-1]["state"] == "completed"
+    assert editor.project.to_dict() == before
+    assert not editor.dirty
 
 
 def test_focusing_unchanged_fields_does_not_dirty_project_on_mcp_call(qtbot, live_editor):
@@ -735,13 +824,18 @@ def test_closed_pending_document_is_not_reactivated_by_mcp(qtbot, live_editor, t
 
 
 @pytest.mark.integration
-def test_real_live_mcp_export_cancellation_cleans_staging(qtbot, live_editor, tmp_path):
+def test_real_live_mcp_export_cancellation_cleans_staging(qtbot, live_editor, tmp_path, monkeypatch):
     from choicer_voicer_pack_creator.mcp_jobs import LiveJobs
     from choicer_voicer_pack_creator.media import MediaTools
+    from choicer_voicer_pack_creator.ui.export_options_dialog import ExportOptionsDialog
 
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         pytest.skip("FFmpeg/FFprobe required")
     window, bridge, automation = live_editor
+    def unexpected_options(self):
+        raise AssertionError("Live MCP export must not open interactive options")
+
+    monkeypatch.setattr(ExportOptionsDialog, "exec", unexpected_options)
     media = MediaTools()
     source = tmp_path / "cancellation-source.mp4"
     media.run([

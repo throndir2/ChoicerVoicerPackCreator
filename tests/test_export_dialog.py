@@ -136,6 +136,9 @@ def test_main_window_opens_popup_and_retires_worker_only_after_finished(
             allow_finish.wait(5)
 
     monkeypatch.setattr(main_window, "ExportWorker", HeldWorker)
+    monkeypatch.setattr(
+        main_window.ExportOptionsDialog, "exec", lambda self: QDialog.DialogCode.Accepted,
+    )
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *_args: str(tmp_path))
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     window = main_window.MainWindow(SimpleNamespace(), settings=settings)

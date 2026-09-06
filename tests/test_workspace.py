@@ -681,6 +681,7 @@ def test_tasks_retry_uses_origin_and_rejects_superseded_source(
 ):
     from choicer_voicer_pack_creator.models import SourceCaption
     from choicer_voicer_pack_creator.ui import analysis_dialog, backing_dialog, youtube_dialog
+    from choicer_voicer_pack_creator.ui.export_options_dialog import ExportOptionsDialog
 
     def failed(*_args, **_kwargs):
         raise RuntimeError("Synthetic retry failure")
@@ -689,6 +690,7 @@ def test_tasks_retry_uses_origin_and_rejects_superseded_source(
     monkeypatch.setattr(backing_dialog.SeparationManager, "generate", failed)
     monkeypatch.setattr(youtube_dialog, "download_youtube", failed)
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *_args: str(tmp_path))
+    monkeypatch.setattr(ExportOptionsDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
     source = tmp_path / "source.mp4"
     source.write_bytes(b"synthetic")
     editor = workspace.add_project(PackProject(
@@ -1446,6 +1448,7 @@ def test_visible_tabs_remain_usable_during_real_ffmpeg_export(qtbot, tmp_path, m
     from choicer_voicer_pack_creator.export_progress import ExportProgress
     from choicer_voicer_pack_creator.exporter import PackExporter
     from choicer_voicer_pack_creator.media import MediaTools
+    from choicer_voicer_pack_creator.ui.export_options_dialog import ExportOptionsDialog
 
     media = MediaTools()
     video, backing = tmp_path / "synthetic.mp4", tmp_path / "backing.wav"
@@ -1481,6 +1484,7 @@ def test_visible_tabs_remain_usable_during_real_ffmpeg_export(qtbot, tmp_path, m
             return exporter.export(project, destination, create_zip=create_zip, progress=progress)
 
     a.exporter = HeldExporter()
+    monkeypatch.setattr(ExportOptionsDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *_args: str(tmp_path))
     a.action_export.trigger()
     qtbot.waitUntil(lambda: a._export_worker is not None and any(

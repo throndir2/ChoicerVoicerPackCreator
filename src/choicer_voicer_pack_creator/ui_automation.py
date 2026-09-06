@@ -10,14 +10,17 @@ from PySide6.QtCore import QBuffer, QIODevice, QObject, QPoint, Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QAbstractScrollArea,
     QApplication,
     QComboBox,
+    QDoubleSpinBox,
     QLineEdit,
     QMenu,
     QPlainTextEdit,
     QScrollArea,
     QScrollBar,
+    QSpinBox,
     QStyle,
     QStyleOptionTab,
     QTableWidget,
@@ -29,6 +32,11 @@ if TYPE_CHECKING:
     from choicer_voicer_pack_creator.ui.main_window import MainWindow
 
 T = TypeVar("T")
+EXPORT_OPTION_SELECTORS = frozenset({
+    "exportOptions", "exportQualityPreset", "exportHeight", "exportFps",
+    "exportPreserveVideo", "exportAdvanced", "exportHeadPadding", "exportTailPadding",
+    "exportOptionsContinue", "exportOptionsCancel",
+})
 SELECTORS = frozenset({
     "projectTabs", "projectTitle", "segmentCaption", "segmentsTable",
     "saveProject", "exportProject", "analyzeProject",
@@ -39,13 +47,13 @@ SELECTORS = frozenset({
     "projectCloseSave", "projectCloseDiscard", "projectCloseCancel",
     "projectEditorScroll",
     "projectEditorScrollbar", "projectDetailsScrollbar", "selectedSegmentScrollbar",
-})
+}) | EXPORT_OPTION_SELECTORS
 EDITOR_SELECTORS = frozenset({
     "projectTitle", "segmentCaption", "segmentsTable",
     "saveProject", "exportProject", "analyzeProject",
     "projectEditorScroll",
     "projectEditorScrollbar", "projectDetailsScrollbar", "selectedSegmentScrollbar",
-})
+}) | EXPORT_OPTION_SELECTORS
 KEYS = {
     "Enter": Qt.Key.Key_Return, "Escape": Qt.Key.Key_Escape,
     "Tab": Qt.Key.Key_Tab, "Backspace": Qt.Key.Key_Backspace,
@@ -195,8 +203,10 @@ class UIAutomation:
                 vertical_scroll=target.verticalScrollBar().value(),
                 vertical_maximum=target.verticalScrollBar().maximum(),
             )
-        elif isinstance(target, QScrollBar):
+        elif isinstance(target, (QScrollBar, QSpinBox, QDoubleSpinBox)):
             result.update(value=target.value(), minimum=target.minimum(), maximum=target.maximum())
+        elif isinstance(target, QAbstractButton):
+            result.update(text=target.text(), checked=target.isChecked())
         return result
 
     def state(self) -> dict[str, Any]:
@@ -436,10 +446,25 @@ class UIAutomation:
                             raise RuntimeError("The row click did not select the requested item.")
                     elif action == "select" and isinstance(target, QComboBox):
                         self._prepare_input(target, self._input_point(target), verify)
-                        target.setFocus()
-                        key_click(Qt.Key.Key_Home)
-                        for _ in range(index):
-                            key_click(Qt.Key.Key_Down)
+                        if target.currentIndex() != index:
+                            self._click(target, verify)
+                            view = target.view()
+
+                            def popup_key(value: Qt.Key) -> None:
+                                verify()
+                                if not view.isVisible():
+                                    raise ValueError("The option popup closed before input.")
+                                self._hit(view, self._input_point(view))
+                                QTest.keyClick(view, value, delay=0)
+
+                            # Navigate the popup, not the closed combobox: only Enter
+                            # applies a choice, without activating intervening presets.
+                            popup_key(Qt.Key.Key_Home)
+                            for _ in range(index):
+                                popup_key(Qt.Key.Key_Down)
+                            popup_key(Qt.Key.Key_Return)
+                            if target.currentIndex() != index:
+                                raise RuntimeError("Input did not select the requested option.")
                     else:
                         self._click(target, verify)
                     record["state"] = "completed"
