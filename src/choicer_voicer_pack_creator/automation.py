@@ -171,6 +171,8 @@ class ProjectAccess(Protocol):
 
     def activate(self, project_id: str) -> ProjectSnapshot: ...
 
+    def open_existing(self, path: Path) -> ProjectSnapshot | None: ...
+
     def create(self, snapshot: ProjectSnapshot) -> ProjectSnapshot: ...
 
     def snapshot(self) -> ProjectSnapshot: ...
@@ -236,14 +238,21 @@ class HeadlessProjectAccess:
     def create(self, snapshot: ProjectSnapshot) -> ProjectSnapshot:
         with self._root._lock:
             if snapshot.path is not None:
-                for current in self._root._projects.values():
-                    if current.path == snapshot.path:
-                        return self.activate(current.project_id)
+                existing = self.open_existing(snapshot.path)
+                if existing is not None:
+                    return existing
             snapshot = snapshot.copy()
             snapshot.project_id = uuid4().hex
             self._root._projects[snapshot.project_id] = snapshot
             self._root._active_id = snapshot.project_id
             return snapshot.copy()
+
+    def open_existing(self, path: Path) -> ProjectSnapshot | None:
+        with self._root._lock:
+            for current in self._root._projects.values():
+                if current.path == path:
+                    return self.activate(current.project_id)
+            return None
 
     def snapshot(self) -> ProjectSnapshot:
         with self._root._lock:
@@ -326,6 +335,9 @@ class PackAutomation:
         return self.describe(self.access.create(ProjectSnapshot(project, dirty=True)))
 
     def open_project(self, path: str, discard_dirty: bool = False) -> dict[str, Any]:
+        existing = self.access.open_existing(local_path(path, exists=False))
+        if existing is not None:
+            return self.describe(existing)
         source = local_path(path)
         before = sha256(source)
         project = ProjectStore.load(source)

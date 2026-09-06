@@ -149,10 +149,9 @@ class EditorProjectAccess:
         def create():
             window = self.bridge.window
             if snapshot.path is not None:
-                for session in window.project_sessions:
-                    editor = window.editor_for_project(session.id)
-                    if editor.project_path == snapshot.path:
-                        return self.activate(editor.session.id)
+                existing = self.open_existing(snapshot.path)
+                if existing is not None:
+                    return existing
             editor = window.add_project(snapshot.project, snapshot.path, dirty=snapshot.dirty)
             editor._saved_project_hash = snapshot.saved_hash
             if snapshot.dirty:
@@ -161,6 +160,12 @@ class EditorProjectAccess:
                 editor._remember_recent_project(snapshot.path)
             return EditorProjectAccess(self.bridge, editor.session.id)._snapshot()
         return self.bridge.call(create)
+
+    def open_existing(self, path: Path) -> ProjectSnapshot | None:
+        def open_existing():
+            editor = self.bridge.window.project_for_path(path)
+            return self.activate(editor.session.id) if editor is not None else None
+        return self.bridge.call(open_existing)
 
     def _snapshot(self) -> ProjectSnapshot:
         window = self._editor()

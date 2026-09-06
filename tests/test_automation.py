@@ -99,6 +99,16 @@ def test_drafts_pagination_and_save_reopen(automation, tmp_path):
     assert ProjectStore.load(destination).readme == "A note"
 
 
+def test_open_existing_document_does_not_reload_an_externally_removed_file(automation, tmp_path):
+    before = automation.get_project()
+    path = tmp_path / "existing.cvpack.json"
+    saved = automation.save_project(before["revision"], str(path))
+    edited = automation.update_project(ProjectPatch(title="Unsaved draft"), saved["revision"])
+    path.unlink()
+    assert automation.open_project(str(path)) == edited
+    assert automation.access.list_projects()["active_project_id"] == saved["project_id"]
+
+
 def test_unsaved_changes_and_external_save_conflicts(automation, tmp_path):
     original = automation.get_project()
     source = automation.get_project()["project"]["video_path"]

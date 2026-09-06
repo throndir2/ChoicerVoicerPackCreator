@@ -9,7 +9,12 @@ import pytest
 from PySide6.QtCore import QSettings, QThread
 from PySide6.QtWidgets import QApplication, QDialog
 
-from choicer_voicer_pack_creator.automation import PackAutomation, ProjectPatch, SegmentPatch
+from choicer_voicer_pack_creator.automation import (
+    PackAutomation,
+    ProjectPatch,
+    ProjectSnapshot,
+    SegmentPatch,
+)
 from choicer_voicer_pack_creator.mcp_gui import EditorBridge, EditorProjectAccess
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
@@ -41,6 +46,9 @@ def live_editor(qtbot, tmp_path):
         analysis_data_root=tmp_path / "analysis",
     )
     window.show()
+    window.raise_()
+    window.activateWindow()
+    qtbot.waitUntil(window.isActiveWindow)
     qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
     segment = Segment(1, 2, "Original", ["Actor"])
     window._set_project(
@@ -556,6 +564,50 @@ def test_mcp_save_respects_pending_gui_destination_reservation(
         release.set()
     qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
     assert ProjectStore.load(destination).title == "Live"
+    assert not window._save_tokens
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_mcp_open_focuses_pending_save_owner_without_loading_stale_file(
+    qtbot, live_editor, tmp_path, monkeypatch, exists,
+):
+    window, _bridge, automation = live_editor
+    owner = window.active_editor
+    window.add_project(PackProject(title="Other"), dirty=False)
+    destination = tmp_path / "pending.cvpack.json"
+    if exists:
+        ProjectStore.save(PackProject(title="Old disk version"), destination)
+    started, release = threading.Event(), threading.Event()
+    original_save = ProjectStore.save
+
+    def held_save(project, path):
+        started.set()
+        assert release.wait(10)
+        original_save(project, path)
+
+    def forbidden_load(_path):
+        pytest.fail("Opening a pending Save As target must focus its owner, not reload it.")
+
+    monkeypatch.setattr(ProjectStore, "save", held_save)
+    monkeypatch.setattr(ProjectStore, "load", forbidden_load)
+    assert window.save_editor(owner, destination=destination)
+    try:
+        qtbot.waitUntil(started.is_set)
+        before = len(window.project_sessions)
+        opened = in_worker(qtbot, lambda: automation.open_project(str(destination)))
+        assert opened["project_id"] == owner.session.id
+        assert opened["project"]["title"] == "Live"
+        assert window.active_editor is owner
+        assert len(window.project_sessions) == before
+        # Also guard the commit phase if a reservation appeared during an earlier file read.
+        stale = ProjectSnapshot(PackProject(title="Earlier read"), destination)
+        assert in_worker(qtbot, lambda: automation.access.create(stale)).project_id == owner.session.id
+        assert len(window.project_sessions) == before
+        assert owner.project.title == "Live"
+    finally:
+        release.set()
+    qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
+    assert owner.project_path == destination
     assert not window._save_tokens
 
 
