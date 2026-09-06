@@ -18,7 +18,12 @@ from choicer_voicer_pack_creator.diagnostics import (
     diagnostic_operation,
 )
 from choicer_voicer_pack_creator.media import MediaError, MediaTools
-from choicer_voicer_pack_creator.models import PackProject, Segment
+from choicer_voicer_pack_creator.models import (
+    DEFAULT_VIDEO_FPS,
+    DEFAULT_VIDEO_HEIGHT,
+    PackProject,
+    Segment,
+)
 from choicer_voicer_pack_creator.operations import (
     OperationCancelled,
     SourceChangedError,
@@ -348,8 +353,8 @@ class PackImporter:
             None,
         )
         duration = 0.0
-        video_height = 720
-        video_fps = 30
+        video_height = DEFAULT_VIDEO_HEIGHT
+        video_fps = DEFAULT_VIDEO_FPS
         preserve_source_video = False
         if video:
             recognized_files.add(video.resolve())
@@ -357,8 +362,8 @@ class PackImporter:
             try:
                 video_info = self.media.probe(video)
                 duration = video_info.duration
-                video_height = video_info.height or 720
-                video_fps = max(1, round(video_info.fps or 30))
+                video_height = video_info.height or DEFAULT_VIDEO_HEIGHT
+                video_fps = max(1, round(video_info.fps or DEFAULT_VIDEO_FPS))
                 preserve_source_video = (
                     video.suffix.casefold() == ".ogv"
                     and video_info.video_codec == "theora"

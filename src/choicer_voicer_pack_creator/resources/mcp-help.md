@@ -81,6 +81,14 @@ the client stops the process.**
   changes to the active saved project are rejected rather than overwritten.
   `validate_pack` can check a folder and optional ZIP afterward.
 
+New projects default to 480p at 30 FPS. For higher quality, set `update_project`'s
+`patch.video_height` and `patch.video_fps`; saved settings and compatible imported
+video profiles are preserved. Repeat exports to the same destination can reuse
+checksum-verified video conversions when source content and encoding settings match.
+Small receipts are kept in the application's `export-cache` data directory, outside
+game packs. Up to two prompts are prepared concurrently and ZIPs avoid recompressing
+media. Full validation, overwrite consent, and rollback protection remain enabled.
+
 Live processing uses the same bounded scheduler as the optional Tools > Tasks window.
 Jobs never open that window automatically; closing it does not cancel processing.
 `start_export(output_parent, expected_revision, project_id?, overwrite=false)`

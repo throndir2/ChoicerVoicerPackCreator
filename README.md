@@ -291,6 +291,20 @@ Closing a tab with active work offers **Keep processing**, **Cancel tasks and cl
 in **Tools > Tasks** restores that same tab. Open projects are selected through their tabs, not
 the Tasks window. Processing does not survive application exit.
 
+New projects default to **480p at 30 FPS** for faster exports. In the project details,
+increase **Export > Height** or **FPS** to opt into higher quality and longer encoding times.
+Saved project settings and compatible imported OGV profiles are retained rather than downgraded.
+
+Repeat exports to the same destination reuse the previous video conversion when source content,
+height, FPS, and encoding recipe still match and the exported video's checksum is intact.
+Small reuse receipts live in the application's `export-cache` data directory, not in game packs;
+no duplicate video cache is kept. Deleting a receipt or the previous export simply causes the next
+export to encode again. Both desktop and MCP exports use this behavior.
+Prompt generation runs up to two prompts at a time, and generated stills use accurate seeking
+and resizing in one FFmpeg operation. ZIPs store already-compressed media without recompressing it
+and lightly compress metadata; they may be larger, but their contents and game compatibility are
+unchanged. Full staged/published validation and rollback protection remain enabled.
+
 Export opens a progress dialog with the current operation, total and current-step elapsed
 time, and a scrollable activity history without repetitive timestamp prefixes. Video conversion
 processes the **full video before extracting prompts**. Its live status shows encoded video
@@ -300,7 +314,8 @@ source range, and caption), or the gap between prompts. If no newer frame is rep
 seconds, the dialog says it is waiting for a newer frame report rather than implying progress.
 Live updates replace the current history entry instead of filling the log.
 
-Each prompt's audio, image, and metadata steps show its identity and source range. The dialog
+Each prompt's audio, image, and metadata steps show its identity and source range; parallel prompts
+can interleave in the activity history. Prompt progress counts completely prepared prompts. The dialog
 also reports staged and published media validation, ZIP creation, and publication.
 The **current-step time remaining** and **whole-export time remaining** start with rough workload
 estimates, then adapt to measured video throughput and completed prompt/validation timings.
@@ -308,7 +323,7 @@ The separate **estimated overall progress** bar includes all remaining steps, in
 creation (when requested), final validation, and cleanup. Estimates can move backward as timings
 change; an unmeasured step that outlasts its estimate shows **re-estimating** instead of a false
 zero-second countdown. Only a successful export reaches 100%. The current-step bar shows measured
-video progress separately and stays indeterminate for operations without measurable progress.
+video or completed-prompt progress separately and stays indeterminate for operations without measurable progress.
 The details window is nonmodal and can be closed while the export continues in the background. It retains
 output locations, cleanup notes, and failures for later inspection. Export uses a snapshot; edits
 made during export affect the next export, not the one already running.

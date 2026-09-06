@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +12,7 @@ import pytest
 
 from choicer_voicer_pack_creator import exporter as exporter_module
 from choicer_voicer_pack_creator.config_format import read_config
+from choicer_voicer_pack_creator.export_cache import ExportVideoCache
 from choicer_voicer_pack_creator.exporter import PackExporter
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.operations import (
@@ -318,4 +320,214 @@ def test_export_waits_cancellably_for_source_and_destination_leases(
             stopped.set()
         with pytest.raises(OperationCancelled):
             future.result(timeout=3)
+    _assert_unchanged(parent)
+
+
+class ConvertingMedia(FakeMedia):
+    def __init__(self) -> None:
+        self.conversions = 0
+
+    def convert_video(self, source, destination, height, fps, *, encoding_progress=None):
+        check_cancelled()
+        self.conversions += 1
+        destination.write_bytes(source.read_bytes() + f"{height}/{fps}".encode())
+
+
+def test_archive_accepts_preserved_media_with_pre_zip_timestamps(tmp_path: Path) -> None:
+    exporter, project, parent = _fixture(tmp_path)
+    for path in (
+        project.video_path, project.segments[0].audio_path, project.segments[0].image_path,
+    ):
+        os.utime(path, (0, 0))
+    result = exporter.export(project, parent)
+    with zipfile.ZipFile(result.zip_path) as archive:
+        for name in ("dub_video.ogv", "001_Speaker.mp3", "001_Speaker.png"):
+            entry = archive.getinfo(f"Pack/{name}")
+            assert entry.compress_type == zipfile.ZIP_STORED
+            assert entry.date_time == (1980, 1, 1, 0, 0, 0)
+
+
+def test_repeat_export_reuses_only_matching_verified_video(tmp_path: Path) -> None:
+    exporter, project, parent = _fixture(tmp_path)
+    media = ConvertingMedia()
+    exporter.media = media
+    exporter.video_cache = ExportVideoCache(tmp_path / "receipts")
+    project.preserve_source_video = False
+    first = exporter.export(project, parent)
+    assert media.conversions == 1
+    project.segments[0].caption = "Edited caption"
+    updates = []
+    repeated = exporter.export(project, parent, progress=updates.append)
+    assert media.conversions == 1
+    assert first.file_hashes["dub_video.ogv"] == repeated.file_hashes["dub_video.ogv"]
+    assert read_config(repeated.pack_path / "001_Speaker.txt")["data"]["caption"] == "Edited caption"
+    assert any("Reusing verified previous video" in update.message for update in updates)
+    assert not any(step.kind == "video-encode" for update in updates for step in update.plan)
+
+    # Hash identity detects edits even when the source's length and timestamp stay the same.
+    source = Path(project.video_path)
+    info = source.stat()
+    source.write_bytes(b"x" * info.st_size)
+    os.utime(source, ns=(info.st_atime_ns, info.st_mtime_ns))
+    exporter.export(project, parent)
+    assert media.conversions == 2
+    project.video_height = 480
+    exporter.export(project, parent)
+    assert media.conversions == 3
+    project.video_fps = 24
+    exporter.export(project, parent)
+    assert media.conversions == 4
+    (parent / "Pack" / "dub_video.ogv").write_bytes(b"tampered video")
+    exporter.export(project, parent)
+    assert media.conversions == 5
+
+
+@pytest.mark.parametrize("operation", ["lookup", "remember"])
+def test_unavailable_video_receipt_reports_warning_without_losing_export(
+    tmp_path: Path, monkeypatch, operation: str,
+) -> None:
+    exporter, project, parent = _fixture(tmp_path)
+    exporter.media = ConvertingMedia()
+    exporter.video_cache = ExportVideoCache(tmp_path / "receipts")
+    project.preserve_source_video = False
+
+    def fail(*_args):
+        raise PermissionError("receipt inaccessible")
+
+    monkeypatch.setattr(exporter.video_cache, operation, fail)
+    result = exporter.export(project, parent)
+    assert result.validation["status"] == "passed"
+    assert any("receipt inaccessible" in warning for warning in result.warnings)
+
+
+def test_failed_export_does_not_replace_video_reuse_receipt(tmp_path: Path) -> None:
+    exporter, project, parent = _fixture(tmp_path)
+    exporter.media = ConvertingMedia()
+    exporter.video_cache = ExportVideoCache(tmp_path / "receipts")
+    project.preserve_source_video = False
+    first = exporter.export(project, parent)
+    receipt = next((tmp_path / "receipts").glob("*.json"))
+    previous_receipt = receipt.read_bytes()
+    project.video_fps = 24
+
+    def fail(update):
+        if update.step == "staged-validation":
+            raise RuntimeError("fixture failure")
+
+    with pytest.raises(RuntimeError, match="fixture failure"):
+        exporter.export(project, parent, progress=fail)
+    assert receipt.read_bytes() == previous_receipt
+    assert exporter_module.sha256(first.pack_path / "dub_video.ogv") == first.file_hashes["dub_video.ogv"]
+
+
+def test_parallel_prompts_are_bounded_with_serial_progress_and_identical_outputs(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    exporter, project, parent = _fixture(tmp_path)
+    project.segments = [project.segments[0].clone() for _ in range(5)]
+    exporter.prompt_workers = 2
+    barrier = threading.Barrier(2, timeout=5)
+    lock = threading.Lock()
+    active = peak = started = 0
+    original_write = exporter._write_audio
+    coordinator = threading.get_ident()
+    updates = []
+
+    def write(*args):
+        nonlocal active, peak, started
+        with lock:
+            active += 1
+            started += 1
+            current = started
+            peak = max(peak, active)
+        try:
+            if current <= 2:
+                barrier.wait()
+            return original_write(*args)
+        finally:
+            with lock:
+                active -= 1
+
+    def progress(update):
+        assert threading.get_ident() == coordinator
+        updates.append(update)
+
+    monkeypatch.setattr(exporter, "_write_audio", write)
+    parallel = exporter.export(project, parent, progress=progress)
+    assert peak == 2
+    assert active == 0
+    fractions = [update.fraction for update in updates if update.step == "prompts"]
+    assert fractions == sorted(fractions)
+    assert fractions[0] == 0 and fractions[-1] == 1
+    assert all(any(f"Prompt {index}/5" in update.message for update in updates) for index in range(1, 6))
+    monkeypatch.setattr(exporter, "_write_audio", original_write)
+    exporter.prompt_workers = 1
+    serial = exporter.export(project, tmp_path / "serial")
+    assert serial.file_hashes == parallel.file_hashes
+
+
+@pytest.mark.parametrize("failure", ["cancel", "callback", "worker"])
+def test_parallel_prompt_interruption_stops_all_workers_before_cleaning_staging(
+    tmp_path: Path, monkeypatch, failure: str,
+) -> None:
+    exporter, project, parent = _fixture(tmp_path)
+    project.segments = [project.segments[0].clone() for _ in range(4)]
+    exporter.prompt_workers = 2
+    barrier = threading.Barrier(2, timeout=5)
+    stopped = threading.Event()
+    lock = threading.Lock()
+    started = []
+    finished = []
+
+    def write(_project, _segment, index, _source, _stage, _duration, _width, _height, notify):
+        with lock:
+            started.append(index)
+        try:
+            barrier.wait()
+            if failure == "worker" and index == 1:
+                raise RuntimeError("prompt failed")
+            notify("Worker started")
+            while True:
+                check_cancelled()
+                threading.Event().wait(0.01)
+        finally:
+            with lock:
+                finished.append(index)
+
+    def progress(update):
+        if update.message.startswith("Worker started"):
+            if failure == "cancel":
+                stopped.set()
+            elif failure == "callback":
+                raise ValueError("progress failed")
+
+    monkeypatch.setattr(exporter, "_write_prompt", write)
+    error = {"cancel": OperationCancelled, "callback": ValueError, "worker": RuntimeError}[failure]
+    with pytest.raises(error):
+        exporter.export(project, parent, progress=progress, cancelled=stopped.is_set)
+    assert sorted(started) == sorted(finished) == [1, 2]
+    _assert_unchanged(parent)
+
+
+def test_worker_cleanup_failure_is_not_hidden_by_cancellation(tmp_path: Path, monkeypatch) -> None:
+    exporter, project, parent = _fixture(tmp_path)
+    stopped = threading.Event()
+
+    def write(*args):
+        notify = args[-1]
+        notify("Worker started")
+        try:
+            while True:
+                check_cancelled()
+                stopped.wait(0.01)
+        finally:
+            raise OSError("worker cleanup failed")
+
+    def progress(update):
+        if update.message.startswith("Worker started"):
+            stopped.set()
+
+    monkeypatch.setattr(exporter, "_write_prompt", write)
+    with pytest.raises(OSError, match="worker cleanup failed"):
+        exporter.export(project, parent, progress=progress, cancelled=stopped.is_set)
     _assert_unchanged(parent)
