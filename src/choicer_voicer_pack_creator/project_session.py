@@ -25,6 +25,7 @@ class ProjectSession:
     backing_revision: int = 0
     draft_revision: int = 0
     hidden: bool = False
+    loading: bool = False
     attention: str = ""
 
     @property

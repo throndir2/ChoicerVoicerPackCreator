@@ -14,11 +14,14 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+
+from choicer_voicer_pack_creator.ui.readable_table import ReadableTableWidget
 
 if TYPE_CHECKING:
     from choicer_voicer_pack_creator.jobs import JobManager, JobRecord
@@ -70,7 +73,7 @@ class TasksPanel(QDockWidget):
         controls.addWidget(self.detail_button)
         controls.addStretch()
         layout.addLayout(controls)
-        self.table = QTableWidget(0, 5)
+        self.table = ReadableTableWidget(0, 5)
         self.table.setObjectName("tasksTable")
         self.table.setHorizontalHeaderLabels(["Project", "Task", "State", "Stage progress", "Elapsed"])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -82,7 +85,9 @@ class TasksPanel(QDockWidget):
         self.details = QPlainTextEdit()
         self.details.setObjectName("taskLog")
         self.details.setReadOnly(True)
-        self.details.setMaximumHeight(95)
+        self.details.setMaximumHeight(65)
+        self.details.setMinimumHeight(32)
+        self.details.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         layout.addWidget(self.details)
         self.setWidget(content)
         manager.changed.connect(self._changed)
@@ -107,7 +112,9 @@ class TasksPanel(QDockWidget):
         if not self._shown_for_task and record.kind not in {"save", "recovery", "workspace"}:
             self._shown_for_task = True
             self.show()
-            self.workspace.resizeDocks([self], [200], Qt.Orientation.Vertical)
+            self.workspace.resizeDocks(
+                [self], [max(260, self.minimumSizeHint().height())], Qt.Orientation.Vertical,
+            )
         previous = self._records.get(record.id)
         self._records[record.id] = record
         if record.state == "running" and record.id not in self._starts:
