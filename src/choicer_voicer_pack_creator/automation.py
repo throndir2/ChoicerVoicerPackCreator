@@ -56,6 +56,7 @@ class ProjectPatch(InputModel):
     video_height: Annotated[int, Field(ge=144, le=2160)] | None = None
     video_fps: Annotated[int, Field(ge=1, le=120)] | None = None
     preserve_source_video: bool | None = None
+    auto_speaker_matching: bool | None = None
 
 
 class SegmentPatch(InputModel):
@@ -67,6 +68,7 @@ class SegmentPatch(InputModel):
     audio_mode: Literal["video", "file"] | None = None
     audio_path: str | None = None
     image_path: str | None = None
+    speaker_assignment: Literal["manual", "excluded"] | None = None
 
 
 @dataclass
@@ -420,6 +422,14 @@ class PackAutomation:
                     fields[name] = str(local_path(fields[name]))
             for name, value in fields.items():
                 setattr(segment, name, value)
+            if "characters" in fields and "speaker_assignment" not in fields:
+                segment.speaker_assignment = (
+                    "manual" if any(name.strip() for name in segment.characters) else "excluded"
+                )
+            if segment.speaker_assignment == "excluded" and any(
+                name.strip() for name in segment.characters
+            ):
+                raise ValueError("Only an unassigned segment can be excluded from speaker matching.")
             if not 0 <= segment.start < segment.end <= project.video_duration + 0.05:
                 raise ValueError("Segment must have 0 <= start < end <= source video duration.")
             if segment.audio_mode == "file" and not segment.audio_path:

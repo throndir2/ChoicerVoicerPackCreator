@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 AudioMode = Literal["video", "file"]
+SpeakerAssignment = Literal["manual", "automatic", "excluded"]
 DEFAULT_VIDEO_HEIGHT = 480
 DEFAULT_VIDEO_FPS = 30
 
@@ -166,6 +167,7 @@ class Segment:
     image_path: str = ""
     source_range_known: bool = True
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    speaker_assignment: SpeakerAssignment = "manual"
 
     @property
     def duration(self) -> float:
@@ -185,6 +187,7 @@ class Segment:
             audio_path=self.audio_path,
             image_path=self.image_path,
             source_range_known=self.source_range_known,
+            speaker_assignment=self.speaker_assignment,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -198,6 +201,7 @@ class Segment:
             "audio_path": self.audio_path,
             "image_path": self.image_path,
             "source_range_known": self.source_range_known,
+            "speaker_assignment": self.speaker_assignment,
         }
 
     @classmethod
@@ -208,6 +212,11 @@ class Segment:
         characters = value.get("characters", [])
         if not isinstance(characters, list):
             characters = [str(characters)] if characters else []
+        assignment = value.get("speaker_assignment", "manual")
+        if not isinstance(assignment, str) or assignment not in {
+            "manual", "automatic", "excluded",
+        }:
+            raise ValueError("Unknown segment speaker assignment")
         return cls(
             id=str(value.get("id") or uuid.uuid4().hex),
             start=float(value.get("start", 0.0)),
@@ -218,6 +227,7 @@ class Segment:
             audio_path=str(value.get("audio_path", "")),
             image_path=str(value.get("image_path", "")),
             source_range_known=bool(value.get("source_range_known", mode == "video")),
+            speaker_assignment=assignment,
         )
 
 
@@ -244,6 +254,7 @@ class PackProject:
     caption_language: str = ""
     source_captions: list[SourceCaption] = field(default_factory=list)
     analysis_review: AnalysisReview | None = None
+    auto_speaker_matching: bool = True
 
     @property
     def speakers(self) -> list[str]:
@@ -304,6 +315,11 @@ class PackProject:
                 character for segment in selected for character in segment.characters
             )),
             image_path=images[0] if images else "",
+            speaker_assignment=(
+                "automatic" if any(item.speaker_assignment == "automatic" for item in selected)
+                else "excluded" if all(item.speaker_assignment == "excluded" for item in selected)
+                else "manual"
+            ),
         )
         self.segments = [
             segment for segment in self.segments if segment.id not in identifiers
@@ -390,6 +406,7 @@ class PackProject:
             "caption_language": self.caption_language,
             "source_captions": [caption.to_dict() for caption in self.source_captions],
             "analysis_review": self.analysis_review.to_dict() if self.analysis_review else None,
+            "auto_speaker_matching": self.auto_speaker_matching,
             "segments": [segment.to_dict() for segment in self.segments],
         }
 
@@ -420,6 +437,9 @@ class PackProject:
         import_warnings = value.get("import_warnings", [])
         if not isinstance(import_warnings, list):
             import_warnings = [str(import_warnings)] if import_warnings else []
+        auto_speaker_matching = value.get("auto_speaker_matching", True)
+        if not isinstance(auto_speaker_matching, bool):
+            raise ValueError("Automatic speaker matching must be a boolean")
         project = cls(
             title=str(value.get("title", "Untitled Dub Pack")),
             authors=[str(item).strip() for item in authors if str(item).strip()],
@@ -439,6 +459,7 @@ class PackProject:
             caption_language=str(value.get("caption_language", "")),
             source_captions=[SourceCaption.from_dict(item) for item in captions_value],
             analysis_review=AnalysisReview.from_dict(review_value) if review_value is not None else None,
+            auto_speaker_matching=auto_speaker_matching,
             segments=[Segment.from_dict(item) for item in segments_value],
         )
         project.sort_segments()

@@ -171,6 +171,47 @@ def smoke_separation(executable: Path) -> None:
         shutil.rmtree(job)
 
 
+def smoke_speaker_matching(executable: Path) -> None:
+    job = ROOT / "build" / "speaker-smoke" / uuid.uuid4().hex
+    job.mkdir(parents=True)
+    try:
+        report_path = job / "report.json"
+        completed = subprocess.run(
+            [str(executable), "--speaker-matching-smoke", str(report_path)],
+            env=mcp_environment(dict(os.environ), executable),
+            check=False, timeout=60,
+        )
+        report = json.loads(report_path.read_text()) if report_path.is_file() else {}
+        if completed.returncode != 0 or report != {
+            "features": [1, 198, 80], "kaldi_native_fbank": "1.22.3",
+            "numpy": "2.4.6", "onnxruntime": "1.26.0", "soundfile": "0.13.1",
+            "qt_imported": False,
+        }:
+            raise RuntimeError(f"Packaged speaker-matching worker failed: {report}")
+        resources = executable.parent / "_internal" / "choicer_voicer_pack_creator" / "resources"
+        manifest = json.loads((resources / "speaker-matching.json").read_text())
+        if manifest["model"]["sha256"] != (
+            "e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012"
+        ) or manifest["model"]["bytes"] != 26530550:
+            raise RuntimeError("Packaged speaker model provenance is incorrect")
+        for name in ("WeSpeaker-Attribution.txt", "WeSpeaker-CC-BY-4.0.txt", "speaker-matching.json"):
+            if not (resources / name).is_file() or not (
+                executable.parent / "licenses" / name
+            ).is_file():
+                raise RuntimeError(f"Missing speaker model attribution: {name}")
+        if not any(path.is_file() for path in (
+            executable.parent / "licenses" / "kaldi-native-fbank"
+        ).rglob("*")):
+            raise RuntimeError("Missing kaldi-native-fbank license")
+        if not (
+            executable.parent / "licenses" / "kaldi-native-fbank" / "KaldiNativeFbank-ThirdParty.txt"
+        ).is_file():
+            raise RuntimeError("Missing kaldi-native-fbank native dependency notices")
+        print("PACKAGED QT-FREE SPEAKER FILTERBANK + SUPERVISED WORKER SMOKE PASSED")
+    finally:
+        shutil.rmtree(job)
+
+
 def smoke_update(executable: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="cvpc-update-smoke-") as temporary:
         root = Path(temporary)
@@ -344,6 +385,8 @@ def main() -> int:
     print("PACKAGED APPLICATION + BUNDLED FFMPEG + MCP STDIO SMOKE PASSED")
     smoke_separation(executable)
     smoke_separation(mcp_executable)
+    smoke_speaker_matching(executable)
+    smoke_speaker_matching(mcp_executable)
     if "--update-smoke" in sys.argv:
         smoke_update(executable)
     return 0
