@@ -210,7 +210,7 @@ def test_caption_fragment_and_three_independent_drafts_round_trip() -> None:
         [AnalysisDraftRow("1", "3", "YouTube edit", "YouTube")],
         [AnalysisDraftRow("1.5", "3", "Whisper edit", "Whisper", 0.8)],
         "refined", "Whisper",
-        [AnalysisDraftRow("unfinished", "3.4", "Refined edit", "Refined YouTube", checked=False)],
+        [AnalysisDraftRow("unfinished", "3.4", "Refined edit", "YouTube", checked=False)],
         0.8,
     )
     project = PackProject(source_captions=[cue], analysis_review=review)

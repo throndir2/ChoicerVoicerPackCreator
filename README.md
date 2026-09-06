@@ -377,7 +377,7 @@ One language selection applies to an entire scan; use Auto-detect for primarily 
 sources, or rerun selected-language passes when a video deliberately mixes languages. Long videos
 also receive conservative free-disk and memory checks before analysis begins.
 
-New Whisper and Refined YouTube drafts include **up to 0.15 seconds of source audio before**
+New Whisper and YouTube drafts include **up to 0.15 seconds of source audio before**
 and **0.25 seconds after** each range. These are real audio handles, not inserted silence, so
 slightly early consonants and trailing syllables can survive extraction. Short gaps are shared
 at their midpoint to avoid introducing overlaps; touching ranges have no room for extra audio,
@@ -480,7 +480,7 @@ you can also select or type a language code. YouTube-generated translations are 
 creator-uploaded tracks can themselves be translations. Some videos have no accessible captions,
 and caption delivery can fail independently of the video download.
 
-The **Refined YouTube** panel stays empty until a local audio-only refinement pass finishes on a
+The **YouTube** panel stays empty until a local audio-only refinement pass finishes on a
 background task, then selects the processed draft for review and use. Unprocessed YouTube
 captions are never displayed or offered for import. Refinement requires no model download;
 original caption evidence stays in the project for regeneration, not as another transcript choice.
@@ -490,10 +490,10 @@ panel without changing the selected draft. Each transcript keeps its own row cou
 In/Out boundaries: a longer Whisper passage is not
 forced onto shorter YouTube captions or flagged as a conflict. You can edit, preview, and uncheck
 rows in each draft independently.
-The playback button names the chosen source: **Play Selected Refined YouTube Line** or
+The playback button names the chosen source: **Play Selected YouTube Line** or
 **Play Selected Whisper Line**.
 
-To adjust pause-aware segmentation, use the **Refined YouTube** panel and click
+To adjust pause-aware segmentation, use the **YouTube** panel and click
 **Refine YouTube Again...**. Refinement and Whisper have separate task entries and cancellation. Refinement
 uses the original imported YouTube words, not edits made to either draft.
 New imports retain YouTube's available word/text-fragment offsets. Refinement uses these
@@ -510,7 +510,7 @@ suggested boundary: this pass measures audio energy, not speaker identity, so mu
 hide pauses and two speakers without a pause can still share a row. It does not correct
 misrecognized words, perform forced alignment, or separate overlapping voices.
 
-Click **Use Refined YouTube Transcript** or **Use Whisper Transcript** directly below the
+Click **Use YouTube Transcript** or **Use Whisper Transcript** directly below the
 draft you want. Both buttons remain visible; you do not need to select that source first.
 Each button is enabled when its draft is ready and at least one row is checked.
 Click a row in a draft or its **Select** control to choose it for playback and the Enter-key
@@ -541,7 +541,7 @@ project edits. **Project → Analyze Video & Suggest Segments** restores complet
 rerunning analysis. If refinement has never completed, reopening resumes that pass without
 starting Whisper. Legacy original-draft edits are preserved in the project file but not displayed
 or imported as refined results. A successful Whisper rescan replaces only the local draft after confirmation;
-refining again replaces only the Refined YouTube draft after confirmation. A failed or canceled
+refining again replaces only the YouTube draft after confirmation. A failed or canceled
 scan keeps its previous result. Original YouTube caption evidence, fragment timings, and the source URL
 are also retained. Replacing or clearing the source video clears its caption evidence and drafts.
 

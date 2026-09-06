@@ -117,6 +117,7 @@ def test_refinement_splits_only_recorded_boundaries_backed_by_actual_pause() -> 
     ]
     assert [fragment for row in rows for fragment in row.fragments] == list(cue.fragments)
     assert all("pause split" in row.source and "music/effects" in row.source for row in rows)
+    assert all(row.source.startswith("YouTube automatic (en) - ") for row in rows)
     assert cue.to_dict() == original
 
 
