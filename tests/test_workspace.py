@@ -5,15 +5,18 @@ from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QMimeData, QObject, QPoint, QPointF, QSettings, Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+from PySide6.QtGui import QAction, QDragEnterEvent, QDragMoveEvent, QDropEvent, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDockWidget,
     QFileDialog,
     QLineEdit,
+    QMenuBar,
     QMessageBox,
     QScrollArea,
+    QTabBar,
+    QToolButton,
 )
 from shiboken6 import isValid
 
@@ -66,6 +69,201 @@ def send_drop(target, mime, actions=Qt.DropAction.CopyAction | Qt.DropAction.Mov
     for event in events:
         QApplication.sendEvent(target, event)
     return events
+
+
+@pytest.mark.parametrize("width", [1050, 1500])
+@pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
+def test_workspace_menu_precedes_tabs_and_project_toolbar(
+    workspace, qtbot, width, stylesheet,
+):
+    workspace.setStyleSheet(stylesheet)
+    workspace.resize(width, 950)
+    menu = workspace.menuBar()
+    tabs = workspace.tabs.tabBar()
+    toolbar = workspace.active_editor.project_toolbar
+    qtbot.waitUntil(lambda: (
+        workspace.active_editor._layout_restored
+        and workspace.tabs.y() >= menu.height()
+    ))
+    assert workspace.findChildren(QMenuBar) == [menu]
+    assert menu.parent() is workspace
+    assert menu.y() == 0
+    assert menu.mapTo(workspace, QPoint(0, menu.height())).y() <= (
+        tabs.mapTo(workspace, QPoint(0, 0)).y()
+    )
+    assert tabs.mapTo(workspace, QPoint(0, tabs.height())).y() <= (
+        toolbar.mapTo(workspace, QPoint(0, 0)).y()
+    )
+    assert [action.text() for action in menu.actions()] == [
+        "&File", "&Project", "&Segments", "&Tools", "&Help",
+    ]
+    actions = [action for action in toolbar.actions() if not action.isSeparator()]
+    assert actions == [
+        workspace.action_save, workspace.action_export,
+        workspace.action_analyze, workspace.action_backing,
+    ]
+    assert [toolbar.widgetForAction(action).text() for action in actions] == [
+        "Save", "Export", "Analyze", "Backing",
+    ]
+    assert all(toolbar.widgetForAction(action).isVisible() for action in actions)
+    assert toolbar.widgetForAction(actions[-1]).geometry().right() < toolbar.width()
+    assert workspace.tools_menu.actions() == [workspace.tasks_window.show_action]
+
+
+def test_global_commands_survive_project_replacement_and_close(workspace, qtbot):
+    menu = workspace.menuBar()
+    initial = workspace.active_editor
+    new_action = workspace.action_new
+    help_actions = workspace.help_menu.actions()
+    editor = workspace.add_project(PackProject(title="Replacement"), dirty=False)
+    qtbot.waitUntil(lambda: not isValid(initial))
+    workspace.action_close_project.trigger()
+    qtbot.waitUntil(lambda: not isValid(editor))
+    assert workspace.menuBar() is menu
+    assert workspace.action_new is new_action
+    assert new_action.parent() is workspace
+    assert workspace.help_menu.actions() == help_actions
+    assert workspace.updater.check_action in help_actions
+    assert workspace.action_logs in help_actions
+    assert workspace.findChildren(QMenuBar) == [menu]
+    assert len([
+        action for action in workspace.findChildren(QAction)
+        if action.shortcut() == new_action.shortcut()
+    ]) == 1
+
+
+def test_project_menus_follow_active_tab_without_duplicate_actions(workspace, qtbot):
+    first = workspace.add_project(PackProject(title="First"), dirty=False)
+    second = workspace.add_project(PackProject(title="Second"), dirty=False)
+    for current, previous in ((first, second), (second, first), (first, second)):
+        workspace.tabs.setCurrentWidget(current)
+        for menu, current_actions, previous_actions in (
+            (workspace.file_menu, current.file_actions, previous.file_actions),
+            (workspace.project_menu, current.project_actions, previous.project_actions),
+            (workspace.segments_menu, current.segment_actions, previous.segment_actions),
+        ):
+            assert all(menu.actions().count(action) == 1 for action in current_actions)
+            assert not any(action in menu.actions() for action in previous_actions)
+    workspace.tabs.tabBar().moveTab(0, 1)
+    assert workspace.active_editor is first
+    assert first.action_save in workspace.file_menu.actions()
+    workspace.close_project_tab(workspace.tabs.indexOf(second))
+    qtbot.waitUntil(lambda: not isValid(second))
+    assert first.action_save in workspace.file_menu.actions()
+
+
+@pytest.mark.parametrize("control", ["menu", "shortcut", "toolbar"])
+def test_project_save_commands_only_save_active_tab(
+    workspace, qtbot, monkeypatch, control,
+):
+    first = workspace.add_project(PackProject(title="First"), dirty=False)
+    second = workspace.add_project(PackProject(title="Second"), dirty=False)
+    saved = []
+    monkeypatch.setattr(workspace, "save_editor", lambda editor, **_kwargs: saved.append(editor))
+    workspace.activateWindow()
+    qtbot.waitUntil(workspace.isActiveWindow)
+    for editor in (first, second, first):
+        workspace.tabs.setCurrentWidget(editor)
+        editor.title_edit.setFocus()
+        qtbot.waitUntil(editor.title_edit.hasFocus)
+        if control == "menu":
+            menu = workspace.file_menu
+            menu.popup(workspace.menuBar().mapToGlobal(QPoint(0, workspace.menuBar().height())))
+            qtbot.waitUntil(menu.isVisible)
+            qtbot.mouseClick(
+                menu, Qt.MouseButton.LeftButton, pos=menu.actionGeometry(editor.action_save).center(),
+            )
+        elif control == "shortcut":
+            qtbot.keyClick(editor.title_edit, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
+        else:
+            qtbot.mouseClick(
+                editor.project_toolbar.widgetForAction(editor.action_save),
+                Qt.MouseButton.LeftButton,
+            )
+    assert saved == [first, second, first]
+
+
+def test_global_open_shortcut_is_not_duplicated_across_tabs(workspace, qtbot, monkeypatch):
+    first = workspace.add_project(PackProject(title="First"), dirty=False)
+    second = workspace.add_project(PackProject(title="Second"), dirty=False)
+    opened = []
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (opened.append(1) or "", ""))
+    workspace.activateWindow()
+    qtbot.waitUntil(workspace.isActiveWindow)
+    for editor in (first, second):
+        workspace.tabs.setCurrentWidget(editor)
+        editor.title_edit.setFocus()
+        qtbot.waitUntil(editor.title_edit.hasFocus)
+        qtbot.keyClick(editor.title_edit, Qt.Key.Key_O, Qt.KeyboardModifier.ControlModifier)
+        assert editor.action_open is workspace.action_open
+    assert opened == [1, 1]
+
+
+def test_project_loading_disables_matching_menu_and_toolbar_actions(workspace):
+    ready = workspace.add_project(PackProject(title="Ready"), dirty=False)
+    loading = workspace.add_project(PackProject(title="Loading"), dirty=False)
+    loading._set_loading(True)
+    for action in loading.file_actions + loading.project_actions + loading.segment_actions:
+        assert not action.isEnabled()
+        button = loading.project_toolbar.widgetForAction(action)
+        if button is not None:
+            assert not button.isEnabled()
+    assert workspace.action_open.isEnabled()
+    assert workspace.action_new.isEnabled()
+    assert workspace.tasks_window.show_action.isEnabled()
+    workspace.tabs.setCurrentWidget(ready)
+    assert ready.action_save.isEnabled()
+    assert ready.action_save in workspace.file_menu.actions()
+    assert ready.action_backing in workspace.project_menu.actions()
+    loading._set_loading(False)
+    workspace.tabs.setCurrentWidget(loading)
+    assert loading.action_save.isEnabled()
+    assert loading.action_backing.isEnabled()
+
+
+@pytest.mark.parametrize("control", ["tab-button", "shortcut"])
+def test_close_project_controls_keep_unsaved_confirmation(workspace, qtbot, control):
+    editor = workspace.add_project(PackProject(title="Unsaved"), dirty=True)
+    workspace.activateWindow()
+    qtbot.waitUntil(workspace.isActiveWindow)
+    if control == "tab-button":
+        button = workspace.tabs.tabBar().tabButton(
+            workspace.tabs.indexOf(editor), QTabBar.ButtonPosition.RightSide,
+        )
+        assert button.accessibleName() == "Close project: Unsaved"
+        qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    else:
+        editor.title_edit.setFocus()
+        qtbot.keyClick(editor.title_edit, Qt.Key.Key_W, Qt.KeyboardModifier.ControlModifier)
+    qtbot.waitUntil(lambda: bool(workspace._decisions))
+    box = workspace._decisions[-1]
+    qtbot.mouseClick(box.button(QMessageBox.StandardButton.Cancel), Qt.MouseButton.LeftButton)
+    assert workspace.active_editor is editor
+    assert editor.dirty
+
+
+def test_command_icons_and_compact_buttons_are_described(workspace):
+    editor = workspace.active_editor
+    for action in editor.file_actions + editor.project_actions + editor.segment_actions + [
+        workspace.action_new, workspace.action_open, workspace.action_import,
+        workspace.tasks_window.show_action, workspace.action_logs, workspace.updater.check_action,
+    ]:
+        assert action.toolTip()
+        assert action.statusTip()
+        for mode in (QIcon.Mode.Normal, QIcon.Mode.Disabled):
+            image = action.icon().pixmap(32, 32, mode).toImage()
+            assert not image.isNull()
+            assert any(
+                image.pixelColor(x, y).alpha() > 0
+                for x in range(image.width()) for y in range(image.height())
+            )
+    for button in editor.findChildren(QToolButton):
+        if button.defaultAction() is not None:
+            assert button.toolTip()
+            assert button.accessibleName()
+    assert "Ctrl+S" in editor.action_save.toolTip()
+    assert "Ctrl+Shift+M" in editor.combine_button.toolTip()
+    assert editor.combine_button.defaultAction() is editor.action_combine
 
 
 @pytest.mark.parametrize("target", [
@@ -617,7 +815,12 @@ def test_fresh_native_layout_keeps_task_and_segment_rows_clickable(workspace, qt
         parent = field.parentWidget()
         while parent is not None:
             if isinstance(parent, QScrollArea):
-                parent.ensureWidgetVisible(field)
+                # Text editors expose their caret to ensureWidgetVisible; reveal the full field
+                # through both scroll layers instead, regardless of the workspace header height.
+                center = field.mapTo(parent.widget(), field.rect().center())
+                parent.ensureVisible(
+                    center.x(), center.y(), field.width() // 2 + 10, field.height() // 2 + 10,
+                )
             parent = parent.parentWidget()
         QApplication.processEvents()
         point = target.rect().center()

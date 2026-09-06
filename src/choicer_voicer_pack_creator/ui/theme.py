@@ -9,6 +9,32 @@ QFrame#projectEditorPanel { background: #0d141f; }
 QMenuBar, QMenu, QToolBar, QStatusBar { background: #0d141f; color: #dbe7f7; }
 QMenuBar::item:selected, QMenu::item:selected { background: #19344c; }
 QToolBar { border: 0; border-bottom: 1px solid #233246; spacing: 6px; padding: 6px; }
+QToolBar#projectToolbar { padding: 3px 6px; }
+QToolBar#projectToolbar QToolButton { padding: 3px 6px; }
+QToolBar::separator { background: #2a3c52; width: 1px; margin: 3px 5px; }
+QToolTip {
+    background: #18283a; color: #e7edf7;
+    border: 1px solid #42617e; padding: 5px;
+}
+QTabWidget::pane { border: 0; }
+QTabBar::tab {
+    background: #0d141f; color: #9eb0c6;
+    border: 0; border-bottom: 2px solid transparent;
+    padding: 4px 10px; margin-right: 2px;
+}
+QTabBar::tab:selected { background: #162334; color: #e7edf7; border-bottom-color: #42d6e7; }
+QTabBar::tab:hover { background: #192a3d; }
+QToolButton {
+    background: transparent; border: 1px solid transparent;
+    border-radius: 4px; padding: 5px;
+}
+QToolButton:hover { background: #1c3047; border-color: #324a64; }
+QToolButton:pressed { background: #102030; }
+QToolButton:disabled { color: #617086; }
+QToolButton#primary { background: #087a8d; border-color: #33d1df; color: white; }
+QToolButton#primary:disabled { background: #111720; border-color: #202a38; color: #617086; }
+QToolButton#danger:hover, QToolButton#closeProjectTab:hover { background: #512832; border-color: #733b47; }
+QToolButton#closeProjectTab { padding: 2px; }
 QStatusBar { border-top: 1px solid #233246; }
 QGroupBox {
     background: #0d141f;

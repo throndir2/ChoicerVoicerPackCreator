@@ -46,7 +46,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QMenuBar,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -57,10 +56,12 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStatusBar,
+    QTabBar,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -93,6 +94,7 @@ from choicer_voicer_pack_creator.ui.analysis_dialog import (
 )
 from choicer_voicer_pack_creator.ui.backing_dialog import BackingDialog
 from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
+from choicer_voicer_pack_creator.ui.commands import action_button, command_icon, describe_action
 from choicer_voicer_pack_creator.ui.export_dialog import ExportProgressDialog
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.ui.readable_table import ReadableTableWidget
@@ -195,8 +197,7 @@ class ProjectEditor(QWidget):
         self.session = session
         self._document_layout = QVBoxLayout(self)
         self._document_layout.setContentsMargins(0, 0, 0, 0)
-        self._menu_bar = QMenuBar(self)
-        self._document_layout.addWidget(self._menu_bar)
+        self._document_layout.setSpacing(0)
         self._status_bar = QStatusBar(self)
         self.media = media
         self.importer = PackImporter(media)
@@ -264,9 +265,6 @@ class ProjectEditor(QWidget):
         if initial_path:
             QTimer.singleShot(0, lambda: self._open_initial_path(initial_path))
 
-    def menuBar(self) -> QMenuBar:  # noqa: N802
-        return self._menu_bar
-
     def statusBar(self) -> QStatusBar:  # noqa: N802
         return self._status_bar
 
@@ -327,21 +325,12 @@ class ProjectEditor(QWidget):
     # ---------- UI construction ----------
 
     def _build_actions(self) -> None:
-        self.action_new = QAction("New from Video…", self)
-        self.action_new.setShortcut(QKeySequence.StandardKey.New)
-        self.action_new.triggered.connect(self.new_from_video)
-        self.action_youtube = QAction("New from YouTube…", self)
-        self.action_youtube.triggered.connect(self.new_from_youtube)
-        self.action_open = QAction("Open Project…", self)
-        self.action_open.setShortcut(QKeySequence.StandardKey.Open)
-        self.action_open.triggered.connect(self.open_project)
-        self.action_clear_recent = QAction("Clear Recent Projects", self)
-        self.action_clear_recent.triggered.connect(lambda: self._set_recent_project_paths([]))
-        self.action_import = QAction("Import Existing Pack…", self)
-        self.action_import.setShortcut(QKeySequence("Ctrl+I"))
-        self.action_import.triggered.connect(self.import_pack)
-        self.action_import_zip = QAction("Import Pack ZIP...", self)
-        self.action_import_zip.triggered.connect(self.import_pack_zip)
+        # Keep editor integrations compatible without duplicating application commands per tab.
+        for name in (
+            "action_new", "action_youtube", "action_open", "action_clear_recent",
+            "action_import", "action_import_zip", "action_exit", "recent_projects_menu",
+        ):
+            setattr(self, name, getattr(self.workspace, name))
         self.action_save = QAction("Save Project", self)
         self.action_save.setObjectName("saveProject")
         self.action_save.setShortcut(QKeySequence.StandardKey.Save)
@@ -355,8 +344,6 @@ class ProjectEditor(QWidget):
         self.action_export.setObjectName("exportProject")
         self.action_export.setShortcut(QKeySequence("Ctrl+E"))
         self.action_export.triggered.connect(self.export_pack)
-        self.action_exit = QAction("Exit", self)
-        self.action_exit.triggered.connect(self.workspace.close)
         self.action_analyze = QAction("Analyze Video && Suggest Segments…", self)
         self.action_analyze.setObjectName("analyzeProject")
         self.action_analyze.setShortcut(QKeySequence("Ctrl+Shift+R"))
@@ -366,23 +353,12 @@ class ProjectEditor(QWidget):
 
         self.action_add = QAction("Add Segment", self)
         self.action_add.setShortcut(QKeySequence("Ctrl+Shift+A"))
-        self.action_add.setToolTip(
-            "Create a new segment using the current In/Out times. "
-            "Existing segments are not changed. (Ctrl+Shift+A)"
-        )
         self.action_add.triggered.connect(self.add_segment)
         self.action_split = QAction("Split at Playhead", self)
         self.action_split.setShortcut(QKeySequence("Ctrl+Shift+S"))
-        self.action_split.setToolTip(
-            "Cut the selected segment into two at the white playback line (playhead). "
-            "Move the playhead inside the segment first. (Ctrl+Shift+S)"
-        )
         self.action_split.triggered.connect(self.split_segment)
         self.action_combine = QAction("Combine Selected Segments", self)
         self.action_combine.setShortcut(QKeySequence("Ctrl+Shift+M"))
-        self.action_combine.setToolTip(
-            "Select multiple rows with Ctrl or Shift, then combine their ranges and lines."
-        )
         self.action_combine.triggered.connect(self.combine_segments)
         self.action_delete = QAction("Delete Segment", self)
         self.action_delete.setShortcuts(
@@ -396,60 +372,52 @@ class ProjectEditor(QWidget):
         self.action_duplicate.setShortcut(QKeySequence("Ctrl+D"))
         self.action_duplicate.triggered.connect(self.duplicate_segment)
 
-        file_menu = self.menuBar().addMenu("&File")
-        file_menu.addActions([self.action_new, self.action_youtube, self.action_open])
-        self.recent_projects_menu = file_menu.addMenu("Open &Recent")
-        self.recent_projects_menu.setToolTipsVisible(True)
-        self.recent_projects_menu.aboutToShow.connect(self._refresh_recent_projects_menu)
-        for editor in self.workspace.editors.values():
-            editor._refresh_recent_projects_menu()
-        file_menu.addActions([self.action_import, self.action_import_zip])
-        file_menu.addSeparator()
-        file_menu.addActions([self.action_save, self.action_save_as, self.action_restore_previous])
-        file_menu.addSeparator()
-        file_menu.addAction(self.action_export)
-        file_menu.addSeparator()
-        file_menu.addAction(self.action_exit)
-        edit_menu = self.menuBar().addMenu("&Segments")
-        edit_menu.addActions(
-            [
-                self.action_add, self.action_split, self.action_combine,
-                self.action_duplicate, self.action_delete,
-            ]
-        )
-        tools_menu = self.menuBar().addMenu("&Tools")
-        tools_menu.addAction(self.action_analyze)
-        tools_menu.addAction(self.action_backing)
-        tools_menu.addAction(self.workspace.tasks_window.show_action)
-        help_menu = self.menuBar().addMenu("&Help")
-        self.help_menu = help_menu
-        self.action_mcp_help = help_menu.addAction("LLM / MCP Help")
-        self.action_mcp_help.triggered.connect(self.show_mcp_help)
-        if hasattr(self.workspace, "updater"):
-            help_menu.addActions([
-                self.updater.check_action, self.updater.auto_action,
-                self.updater.prerelease_action,
-            ])
-            help_menu.addSeparator()
-        self.action_logs = help_menu.addAction("Open Diagnostic Logs...")
-        self.action_logs.triggered.connect(
-            lambda: open_diagnostic_logs(self, self.analysis_data_root)
-        )
-        self.action_save_logs = help_menu.addAction("Save Diagnostic Bundle...")
-        self.action_save_logs.triggered.connect(
-            lambda: save_diagnostic_logs(self, self.analysis_data_root)
-        )
-        about = help_menu.addAction("About")
-        about.triggered.connect(self.show_about)
+        self.action_apply_range = QAction("Update Segment Timing", self)
+        self.action_apply_range.triggered.connect(self.apply_selected_range)
+        self.action_preview = QAction("Play Selected Segment", self)
+        self.action_preview.triggered.connect(self.preview_segment)
+        self.file_actions = [
+            self.action_save, self.action_save_as, self.action_restore_previous, self.action_export,
+        ]
+        self.project_actions = [self.action_analyze, self.action_backing]
+        self.segment_actions = [
+            self.action_add, self.action_split, self.action_combine,
+            self.action_duplicate, self.action_delete,
+            self.action_apply_range, self.action_preview,
+        ]
+        for action, icon, label, description in (
+            (self.action_save, "save", "Save", "Save the active project's editable file."),
+            (self.action_save_as, "save", None, "Save the active project to a different file."),
+            (self.action_restore_previous, "restore", None, "Restore this project's previous save."),
+            (self.action_export, "export", "Export", "Export the active project as a game-ready pack and ZIP."),
+            (self.action_analyze, "analyze", "Analyze", "Analyze this video's dialogue and review suggested segments."),
+            (self.action_backing, "backing", "Backing", "Generate music/effects backing for this project without changing the source."),
+            (self.action_add, "add", "Add", "Create a new segment using the current In/Out times. Existing segments are not changed."),
+            (self.action_split, "split", "Split", "Cut the selected segment into two at the white playback line (playhead). Move the playhead inside the segment first."),
+            (self.action_combine, "combine", "Combine", "Select multiple rows with Ctrl or Shift, then combine their ranges and lines."),
+            (self.action_duplicate, "duplicate", "Duplicate", "Duplicate the selected segment at the same timestamp."),
+            (self.action_delete, "delete", "Delete", "Delete the selected segment after confirmation."),
+            (self.action_apply_range, "apply", "Update Timing", "Update Segment Timing: replace the selected segment's start and end with the In/Out times above. Does not create a new segment. Preserved audio is only regenerated with your approval."),
+            (self.action_preview, "play", "Preview", "Play Selected Segment: play its saved range, then pause. For preserved audio, listen to the prompt recording instead of the video. Does not use pending changes in the In/Out fields."),
+        ):
+            describe_action(action, icon, description, label=label)
+        self.addActions(self.file_actions + self.project_actions + self.segment_actions)
 
     def _build_ui(self) -> None:
-        toolbar = QToolBar("Main", self)
+        toolbar = QToolBar("Project", self)
+        toolbar.setObjectName("projectToolbar")
+        toolbar.setAccessibleName("Active project commands")
         toolbar.setMovable(False)
-        toolbar.addActions(
-            [self.action_new, self.action_youtube, self.action_open, self.action_import]
-        )
-        toolbar.addSeparator()
+        toolbar.setIconSize(QSize(20, 20))
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         toolbar.addActions([self.action_save, self.action_export])
+        toolbar.addSeparator()
+        toolbar.addActions(self.project_actions)
+        for action in self.file_actions + self.project_actions:
+            button = toolbar.widgetForAction(action)
+            if button is not None:
+                button.setAccessibleName(action.text().replace("&&", "&"))
+        self.project_toolbar = toolbar
         self.addToolBar(toolbar)
 
         root = QWidget(self)
@@ -485,7 +453,9 @@ class ProjectEditor(QWidget):
         left_layout.addWidget(self.video_widget, 1)
 
         transport = QHBoxLayout()
-        self.play_button = QPushButton("▶ Play")
+        self.play_button = QPushButton("Play")
+        self.play_button.setIcon(command_icon("play"))
+        self.play_button.setAccessibleName("Play video")
         self.play_button.setToolTip("Play / pause (Space)")
         self.play_button.clicked.connect(self.toggle_playback)
         self.play_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
@@ -493,7 +463,9 @@ class ProjectEditor(QWidget):
         self.play_shortcut.setAutoRepeat(False)
         self.play_shortcut.activated.connect(self.toggle_playback)
         transport.addWidget(self.play_button)
-        self.stop_button = QPushButton("■")
+        self.stop_button = QToolButton(self)
+        self.stop_button.setIcon(command_icon("stop"))
+        self.stop_button.setAccessibleName("Stop video")
         self.stop_button.setToolTip("Stop and return to the start")
         self.stop_button.clicked.connect(self.stop_playback)
         transport.addWidget(self.stop_button)
@@ -501,7 +473,8 @@ class ProjectEditor(QWidget):
         self.position_label.setMinimumWidth(165)
         transport.addWidget(self.position_label)
         self.seek_slider = QSlider(Qt.Orientation.Horizontal)
-        self.seek_slider.setToolTip("Seek to a different position in the source video.")
+        self.seek_slider.setAccessibleName("Video position")
+        self.seek_slider.setToolTip("Seek within the current project's video.")
         self.seek_slider.setRange(0, 100_000)
         self.seek_slider.sliderPressed.connect(lambda: setattr(self, "_slider_dragging", True))
         self.seek_slider.sliderReleased.connect(self._seek_slider_released)
@@ -509,7 +482,8 @@ class ProjectEditor(QWidget):
         transport.addWidget(self.seek_slider, 1)
         transport.addWidget(QLabel("Volume"))
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
-        self.volume_slider.setToolTip("Adjust preview playback volume; exported audio is unchanged.")
+        self.volume_slider.setAccessibleName("Preview volume")
+        self.volume_slider.setToolTip("Adjust video and segment preview volume; exported audio is unchanged.")
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(80)
         self.volume_slider.setFixedWidth(90)
@@ -549,29 +523,34 @@ class ProjectEditor(QWidget):
         self.mark_out_spin.valueChanged.connect(self._marks_changed)
         cutter.addWidget(QLabel("In"))
         cutter.addWidget(self.mark_in_spin)
-        self.set_in_button = QPushButton("Set In")
-        self.set_in_button.setToolTip(
+        action_set_in = QAction("Set In at Playhead", self)
+        describe_action(
+            action_set_in, "mark-in",
             "Copy the current playback position into In (the range start). "
-            "This marks a range; it does not change an existing segment."
+            "This marks a range; it does not change an existing segment.",
         )
-        self.set_in_button.clicked.connect(
+        action_set_in.triggered.connect(
             lambda: self.mark_in_spin.setValue(self.current_position())
         )
+        self.set_in_button = action_button(action_set_in, self, compact=True)
         cutter.addWidget(self.set_in_button)
         cutter.addWidget(QLabel("Out"))
         cutter.addWidget(self.mark_out_spin)
-        self.set_out_button = QPushButton("Set Out")
-        self.set_out_button.setToolTip(
+        action_set_out = QAction("Set Out at Playhead", self)
+        describe_action(
+            action_set_out, "mark-out",
             "Copy the current playback position into Out (the range end). "
-            "This marks a range; it does not change an existing segment."
+            "This marks a range; it does not change an existing segment.",
         )
-        self.set_out_button.clicked.connect(
+        action_set_out.triggered.connect(
             lambda: self.mark_out_spin.setValue(self.current_position())
         )
+        self.set_out_button = action_button(action_set_out, self, compact=True)
         cutter.addWidget(self.set_out_button)
         cutter.addStretch()
         cutter.addWidget(QLabel("Zoom"))
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.zoom_slider.setAccessibleName("Timeline zoom")
         self.zoom_slider.setToolTip(
             "Zoom the timeline in or out without changing segment timing. "
             "You can also scroll over the timeline."
@@ -584,30 +563,15 @@ class ProjectEditor(QWidget):
         left_layout.addLayout(cutter)
 
         segment_actions = QHBoxLayout()
-        self.add_segment_button = QPushButton("+ Add Segment")
+        self.add_segment_button = action_button(self.action_add, self)
         self.add_segment_button.setObjectName("primary")
-        self.add_segment_button.setToolTip(self.action_add.toolTip())
-        self.add_segment_button.clicked.connect(self.add_segment)
         segment_actions.addWidget(self.add_segment_button)
         segment_actions.addSpacing(12)
-        self.apply_range_button = QPushButton("Update Segment Timing")
-        self.apply_range_button.setToolTip(
-            "Replace the selected segment's start and end with the In/Out times above. "
-            "Does not create a new segment. Preserved audio is only regenerated with your approval."
-        )
-        self.apply_range_button.clicked.connect(self.apply_selected_range)
+        self.apply_range_button = action_button(self.action_apply_range, self, compact=True)
         segment_actions.addWidget(self.apply_range_button)
-        self.split_button = QPushButton(self.action_split.text())
-        self.split_button.setToolTip(self.action_split.toolTip())
-        self.split_button.clicked.connect(self.split_segment)
+        self.split_button = action_button(self.action_split, self, compact=True)
         segment_actions.addWidget(self.split_button)
-        self.preview_segment_button = QPushButton("Play Selected Segment")
-        self.preview_segment_button.setToolTip(
-            "Play the selected segment from its start to its end, then pause.\n"
-            "For preserved audio, listen to the prompt recording instead of the video.\n"
-            "Does not use pending changes in the In/Out fields."
-        )
-        self.preview_segment_button.clicked.connect(self.preview_segment)
+        self.preview_segment_button = action_button(self.action_preview, self, compact=True)
         segment_actions.addWidget(self.preview_segment_button)
         segment_actions.addStretch()
         left_layout.addLayout(segment_actions)
@@ -642,20 +606,19 @@ class ProjectEditor(QWidget):
         self.readme_edit.textChanged.connect(self._pack_details_changed)
         project_form.addRow("Notes", self.readme_edit)
         self.video_path_label, video_row = self._path_controls(
-            self.choose_source_video, self.clear_source_video
+            self.choose_source_video, self.clear_source_video, purpose="source video",
         )
         project_form.addRow("Video", video_row)
         self.backing_path_label, backing_row = self._path_controls(
-            self.choose_backing_track, self.clear_backing_track
+            self.choose_backing_track, self.clear_backing_track, purpose="backing track",
         )
         project_form.addRow("Backing", backing_row)
-        self.generate_backing_button = QPushButton("Generate backing...")
-        self.generate_backing_button.setToolTip(
-            "Create music/effects backing from the video without changing dialogue or prompt files."
-        )
-        self.generate_backing_button.clicked.connect(lambda: self.generate_backing_track())
+        self.generate_backing_button = action_button(self.action_backing, self)
+        self.action_backing.changed.connect(self._refresh_backing_controls)
         project_form.addRow("", self.generate_backing_button)
-        self.icon_path_label, icon_row = self._path_controls(self.choose_icon, self.clear_icon)
+        self.icon_path_label, icon_row = self._path_controls(
+            self.choose_icon, self.clear_icon, purpose="pack icon",
+        )
         project_form.addRow("Icon", icon_row)
 
         export_settings = QHBoxLayout()
@@ -722,22 +685,13 @@ class ProjectEditor(QWidget):
         self.segment_table.cellDoubleClicked.connect(lambda _row, _column: self.preview_segment())
         segment_layout.addWidget(self.segment_table, 1)
         row_buttons = QHBoxLayout()
-        for label, handler in (
-            ("+ Add", self.add_segment),
-            ("Duplicate", self.duplicate_segment),
-            ("Delete", self.delete_segment),
-        ):
-            button = QPushButton(label)
-            if label == "Delete":
+        row_buttons.addWidget(action_button(self.action_add, self))
+        for action in (self.action_duplicate, self.action_delete):
+            button = action_button(action, self, compact=True)
+            if action is self.action_delete:
                 button.setObjectName("danger")
-            button.clicked.connect(handler)
             row_buttons.addWidget(button)
-        self.combine_button = QPushButton("Combine")
-        self.combine_button.setToolTip(self.action_combine.toolTip())
-        self.combine_button.clicked.connect(self.action_combine.trigger)
-        self.action_combine.changed.connect(
-            lambda: self.combine_button.setEnabled(self.action_combine.isEnabled())
-        )
+        self.combine_button = action_button(self.action_combine, self, compact=True)
         row_buttons.addWidget(self.combine_button)
         row_buttons.addStretch()
         segment_layout.addLayout(row_buttons)
@@ -764,11 +718,12 @@ class ProjectEditor(QWidget):
         self.audio_mode_combo.currentIndexChanged.connect(self._audio_mode_changed)
         editor_form.addRow("Prompt audio", self.audio_mode_combo)
         self.segment_audio_label, audio_row = self._path_controls(
-            self.choose_segment_audio, self.use_video_audio, clear_text="Use video"
+            self.choose_segment_audio, self.use_video_audio,
+            purpose="segment audio file", clear_text="Use video",
         )
         editor_form.addRow("Audio file", audio_row)
         self.segment_image_label, image_row = self._path_controls(
-            self.choose_segment_image, self.clear_segment_image
+            self.choose_segment_image, self.clear_segment_image, purpose="segment still image",
         )
         editor_form.addRow("Still image", image_row)
         self.segment_audio_help = QLabel()
@@ -828,20 +783,33 @@ class ProjectEditor(QWidget):
         spin.setMinimumWidth(105)
         return spin
 
-    def _path_controls(self, choose, clear, clear_text: str = "Clear") -> tuple[QLabel, QWidget]:
+    def _path_controls(
+        self, choose, clear, *, purpose: str, clear_text: str = "Clear",
+    ) -> tuple[QLabel, QWidget]:
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         label = QLabel("None")
         label.setObjectName("path")
         label.setWordWrap(False)
+        label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout.addWidget(label, 1)
-        choose_button = QPushButton("Choose…")
-        choose_button.clicked.connect(choose)
-        layout.addWidget(choose_button)
-        clear_button = QPushButton(clear_text)
-        clear_button.clicked.connect(clear)
-        layout.addWidget(clear_button)
+        choose_action = QAction(f"Choose {purpose}", container)
+        describe_action(choose_action, "open", f"Choose a {purpose} for this project.")
+        choose_action.triggered.connect(choose)
+        layout.addWidget(action_button(choose_action, container, compact=True))
+        clear_action = QAction(
+            "Use source-video audio" if clear_text == "Use video" else f"Clear {purpose}",
+            container,
+        )
+        describe_action(
+            clear_action, "restore" if clear_text == "Use video" else "close",
+            "Regenerate this segment's prompt from the source video on export."
+            if clear_text == "Use video"
+            else f"Remove the {purpose} reference; the file on disk is not deleted.",
+        )
+        clear_action.triggered.connect(clear)
+        layout.addWidget(action_button(clear_action, container, compact=True))
         return label, container
 
     def _setting_is_true(self, key: str) -> bool:
@@ -1023,50 +991,11 @@ class ProjectEditor(QWidget):
 
     # ---------- Project lifecycle ----------
 
-    def _recent_project_paths(self) -> list[Path]:
-        return [
-            Path(value) for value in self.settings.value("recentProjects", [], type=list)
-        ][:10]
-
-    def _set_recent_project_paths(self, paths: list[Path]) -> None:
-        self.settings.setValue("recentProjects", [str(path) for path in paths[:10]])
-        self.settings.sync()
-        self._refresh_recent_projects_menu()
-        if self.settings.status() != QSettings.Status.NoError:
-            QMessageBox.warning(
-                self,
-                "Could not save recent projects",
-                "The recent-project list could not be saved to your application settings. "
-                "Project files are not affected.\n\n"
-                f"Settings location: {self.settings.fileName()}",
-            )
-
     def _remember_recent_project(self, path: Path) -> None:
-        path = path.resolve()
-        self._set_recent_project_paths(
-            [path] + [recent for recent in self._recent_project_paths() if recent != path]
-        )
+        self.workspace._remember_recent_project(path)
 
     def _refresh_recent_projects_menu(self) -> None:
-        self.recent_projects_menu.clear()
-        paths = self._recent_project_paths()
-        for index, path in enumerate(paths, start=1):
-            label = f"{index}. {path.name} ({path.parent})".replace("&", "&&")
-            action = self.recent_projects_menu.addAction(label)
-            action.setData(str(path))
-            action.setToolTip(str(path))
-            action.setStatusTip(str(path))
-            action.triggered.connect(
-                lambda _checked=False, path=path: self._open_recent_project(path)
-            )
-        if not paths:
-            self.recent_projects_menu.addAction("No Recent Projects").setEnabled(False)
-        self.recent_projects_menu.addSeparator()
-        self.action_clear_recent.setEnabled(bool(paths))
-        self.recent_projects_menu.addAction(self.action_clear_recent)
-
-    def _open_recent_project(self, path: Path) -> None:
-        self.workspace.open_path(path)
+        self.workspace._refresh_recent_projects_menu()
 
     def _write_recovery_snapshot(self) -> None:
         if not self.recovery_store or not self.dirty:
@@ -1676,12 +1605,10 @@ class ProjectEditor(QWidget):
         self.mark_out_spin.setMaximum(self.project.video_duration)
 
     def _playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
-        self.play_button.setText(
-            "❚❚ Pause"
-            if state == QMediaPlayer.PlaybackState.PlayingState
-            and not self._stopped_seek_active
-            else "▶ Play"
-        )
+        playing = state == QMediaPlayer.PlaybackState.PlayingState and not self._stopped_seek_active
+        self.play_button.setText("Pause" if playing else "Play")
+        self.play_button.setIcon(command_icon("pause" if playing else "play"))
+        self.play_button.setAccessibleName("Pause video" if playing else "Play video")
         if state == QMediaPlayer.PlaybackState.PlayingState:
             self._follow_playback_segment(self.current_position())
 
@@ -2185,16 +2112,15 @@ class ProjectEditor(QWidget):
         segment = self.selected_segment()
         self._syncing = True
         try:
-            enabled = segment is not None
+            enabled = segment is not None and not self.session.loading
             for widget in (
                 self.speakers_edit,
                 self.caption_edit,
                 self.audio_mode_combo,
-                self.apply_range_button,
-                self.split_button,
-                self.preview_segment_button,
             ):
                 widget.setEnabled(enabled)
+            for action in (self.action_apply_range, self.action_split, self.action_preview):
+                action.setEnabled(enabled)
             if not segment:
                 self.speakers_edit.clear()
                 self.caption_edit.clear()
@@ -2798,10 +2724,12 @@ class ProjectEditor(QWidget):
         self.session.loading = loading
         self.editor_splitter.setEnabled(not loading)
         for action in (
-            self.action_save, self.action_save_as, self.action_analyze, self.action_add,
-            self.action_split, self.action_delete, self.action_duplicate,
+            self.action_save, self.action_save_as, self.action_restore_previous,
+            self.action_analyze, self.action_backing, self.action_add,
+            self.action_delete, self.action_duplicate,
         ):
             action.setEnabled(not loading)
+        self._sync_selected_editor()
         self.action_export.setEnabled(not loading and self._export_worker is None)
         self._update_combine_action()
         if loading:
@@ -2991,9 +2919,10 @@ class MainWindow(QMainWindow):
             lambda record: QTimer.singleShot(0, self._retire_closed_editors)
             if not record.active else None
         )
+        self._build_workspace_actions()
         editor = self.add_project(PackProject(authors=[getpass.getuser()]), dirty=False)
         self._initial_editor_id = editor.session.id
-        self.updater = UpdateController(self, editor.help_menu)
+        self._refresh_recent_projects_menu()
         self.setAcceptDrops(True)
         # Intercept file URLs before child text editors can insert them as text.
         QApplication.instance().installEventFilter(self)
@@ -3043,11 +2972,166 @@ class MainWindow(QMainWindow):
     def editor_for_project(self, project_id: str) -> ProjectEditor:
         return self.editors[project_id]
 
-    def menuBar(self) -> QMenuBar:  # noqa: N802
-        return self.active_editor.menuBar()
-
     def statusBar(self) -> QStatusBar:  # noqa: N802
         return self.active_editor.statusBar()
+
+    def _build_workspace_actions(self) -> None:
+        menu_bar = self.menuBar()
+        menu_bar.setObjectName("workspaceMenuBar")
+        menu_bar.setNativeMenuBar(False)
+        self.file_menu = menu_bar.addMenu("&File")
+        self.project_menu = menu_bar.addMenu("&Project")
+        self.segments_menu = menu_bar.addMenu("&Segments")
+        self.tools_menu = menu_bar.addMenu("&Tools")
+        self.help_menu = menu_bar.addMenu("&Help")
+        for menu in (
+            self.file_menu, self.project_menu, self.segments_menu,
+            self.tools_menu, self.help_menu,
+        ):
+            menu.setToolTipsVisible(True)
+
+        self.action_new = QAction("New from Video...", self)
+        self.action_new.setShortcut(QKeySequence.StandardKey.New)
+        self.action_new.triggered.connect(lambda: self.new_from_video())
+        self.action_youtube = QAction("New from YouTube...", self)
+        self.action_youtube.triggered.connect(self.new_from_youtube)
+        self.action_open = QAction("Open Project...", self)
+        self.action_open.setShortcut(QKeySequence.StandardKey.Open)
+        self.action_open.triggered.connect(lambda: self.active_editor.open_project())
+        self.action_import = QAction("Import Existing Pack...", self)
+        self.action_import.setShortcut(QKeySequence("Ctrl+I"))
+        self.action_import.triggered.connect(lambda: self.active_editor.import_pack())
+        self.action_import_zip = QAction("Import Pack ZIP...", self)
+        self.action_import_zip.triggered.connect(lambda: self.active_editor.import_pack_zip())
+        self.action_clear_recent = QAction("Clear Recent Projects", self)
+        self.action_clear_recent.triggered.connect(lambda: self._set_recent_project_paths([]))
+        self.action_close_project = QAction("Close Project", self)
+        self.action_close_project.setShortcut(QKeySequence("Ctrl+W"))
+        self.action_close_project.triggered.connect(
+            lambda: self.close_project_tab(self.tabs.currentIndex())
+        )
+        self.action_exit = QAction("Exit", self)
+        self.action_exit.triggered.connect(self.close)
+
+        self.file_menu.addActions([self.action_new, self.action_youtube, self.action_open])
+        self.recent_projects_menu = self.file_menu.addMenu("Open &Recent")
+        self.recent_projects_menu.setToolTipsVisible(True)
+        self.recent_projects_menu.aboutToShow.connect(self._refresh_recent_projects_menu)
+        self.file_menu.addActions([self.action_import, self.action_import_zip])
+        self.file_menu.addSeparator()
+        self._file_export_separator = self.file_menu.addSeparator()
+        self.file_menu.addAction(self.action_close_project)
+        self.file_menu.addSeparator()
+        self.file_menu.addAction(self.action_exit)
+
+        self.tools_menu.addAction(self.tasks_window.show_action)
+        self.action_mcp_help = QAction("LLM / MCP Help", self)
+        self.action_mcp_help.triggered.connect(lambda: self.active_editor.show_mcp_help())
+        self.help_menu.addAction(self.action_mcp_help)
+        self.help_menu.addSeparator()
+        self.updater = UpdateController(self, self.help_menu)
+        self.action_logs = QAction("Open Diagnostic Logs...", self)
+        self.action_logs.triggered.connect(
+            lambda: open_diagnostic_logs(self, self.analysis_data_root)
+        )
+        self.action_save_logs = QAction("Save Diagnostic Bundle...", self)
+        self.action_save_logs.triggered.connect(
+            lambda: save_diagnostic_logs(self, self.analysis_data_root)
+        )
+        self.help_menu.addActions([self.action_logs, self.action_save_logs])
+        self.help_menu.addSeparator()
+        self.action_about = QAction("About", self)
+        self.action_about.triggered.connect(lambda: self.active_editor.show_about())
+        self.help_menu.addAction(self.action_about)
+
+        for action, icon, description in (
+            (self.action_new, "new", "Create a project from a local video in a new tab."),
+            (self.action_youtube, "link", "Download a YouTube video into a new project tab."),
+            (self.action_open, "open", "Open an editable project in its own tab."),
+            (self.action_import, "import", "Import a pack folder into a new project tab."),
+            (self.action_import_zip, "archive", "Import a pack ZIP into a new project tab."),
+            (self.action_clear_recent, "close", "Clear the application-wide recent-project list without deleting files."),
+            (self.action_close_project, "close", "Close the active project tab; unsaved work and running tasks are protected."),
+            (self.action_exit, "close", "Exit the application after handling unsaved projects and running tasks."),
+            (self.tasks_window.show_action, "tasks", "View and manage background tasks across all projects."),
+            (self.action_mcp_help, "help", "Open assistant connection instructions and the MCP safety guide."),
+            (self.updater.check_action, "restore", "Check GitHub for application updates."),
+            (self.updater.auto_action, "restore", "Check for application updates automatically on startup."),
+            (self.updater.prerelease_action, "info", "Include prerelease versions when checking for application updates."),
+            (self.action_logs, "logs", "Open application diagnostic logs."),
+            (self.action_save_logs, "archive", "Save an application diagnostic bundle for troubleshooting."),
+            (self.action_about, "info", "Show application version, credits, and licensing information."),
+        ):
+            describe_action(action, icon, description)
+
+    def _bind_project_menus(
+        self, previous: ProjectEditor | None, current: ProjectEditor | None,
+    ) -> None:
+        # Use the editor's actual actions so menus, toolbar state, and shortcuts agree.
+        if previous is not None:
+            for menu, actions in (
+                (self.file_menu, previous.file_actions),
+                (self.project_menu, previous.project_actions),
+                (self.segments_menu, previous.segment_actions),
+            ):
+                for action in actions:
+                    menu.removeAction(action)
+        if current is not None:
+            for action in current.file_actions[:-1]:
+                self.file_menu.insertAction(self._file_export_separator, action)
+            self.file_menu.insertAction(self.action_close_project, current.action_export)
+            self.project_menu.addActions(current.project_actions)
+            self.segments_menu.addActions(current.segment_actions)
+        for action in (
+            self.project_menu.menuAction(), self.segments_menu.menuAction(),
+            self.action_close_project,
+        ):
+            action.setEnabled(current is not None)
+
+    def _recent_project_paths(self) -> list[Path]:
+        return [
+            Path(value) for value in self.settings.value("recentProjects", [], type=list)
+        ][:10]
+
+    def _set_recent_project_paths(self, paths: list[Path]) -> None:
+        self.settings.setValue("recentProjects", [str(path) for path in paths[:10]])
+        self.settings.sync()
+        self._refresh_recent_projects_menu()
+        if self.settings.status() != QSettings.Status.NoError:
+            QMessageBox.warning(
+                self,
+                "Could not save recent projects",
+                "The recent-project list could not be saved to your application settings. "
+                "Project files are not affected.\n\n"
+                f"Settings location: {self.settings.fileName()}",
+            )
+
+    def _remember_recent_project(self, path: Path) -> None:
+        path = path.resolve()
+        self._set_recent_project_paths(
+            [path] + [recent for recent in self._recent_project_paths() if recent != path]
+        )
+
+    def _refresh_recent_projects_menu(self) -> None:
+        self.recent_projects_menu.clear()
+        paths = self._recent_project_paths()
+        for index, path in enumerate(paths, start=1):
+            label = f"{index}. {path.name} ({path.parent})".replace("&", "&&")
+            action = self.recent_projects_menu.addAction(label)
+            action.setData(str(path))
+            action.setToolTip(str(path))
+            action.setStatusTip(str(path))
+            action.triggered.connect(
+                lambda _checked=False, path=path: self._open_recent_project(path)
+            )
+        if not paths:
+            self.recent_projects_menu.addAction("No Recent Projects").setEnabled(False)
+        self.recent_projects_menu.addSeparator()
+        self.action_clear_recent.setEnabled(bool(paths))
+        self.recent_projects_menu.addAction(self.action_clear_recent)
+
+    def _open_recent_project(self, path: Path) -> None:
+        self.open_path(path)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
         if (
@@ -3164,6 +3248,7 @@ class MainWindow(QMainWindow):
             previous.player.pause()
             previous.prompt_player.stop()
         self._active_editor = current if isinstance(current, ProjectEditor) else None
+        self._bind_project_menus(previous, self._active_editor)
         if "tasks_window" in self.__dict__:
             self.tasks_window.project_id = current.session.id if self._active_editor else None
             self.tasks_window.refresh()
@@ -3174,6 +3259,23 @@ class MainWindow(QMainWindow):
             index = self.tabs.indexOf(editor)
             if index >= 0:
                 label = editor.project.title or "Untitled Dub Pack"
+                bar = self.tabs.tabBar()
+                close_button = bar.tabButton(index, QTabBar.ButtonPosition.RightSide)
+                if not isinstance(close_button, QToolButton):
+                    close_button = QToolButton(bar)
+                    close_button.setObjectName("closeProjectTab")
+                    close_button.setAutoRaise(True)
+                    close_button.setIcon(command_icon("close"))
+                    close_button.setIconSize(QSize(16, 16))
+                    close_button.clicked.connect(
+                        lambda _checked=False, editor=editor: self.close_project_tab(
+                            self.tabs.indexOf(editor)
+                        )
+                    )
+                    bar.setTabButton(index, QTabBar.ButtonPosition.LeftSide, None)
+                    bar.setTabButton(index, QTabBar.ButtonPosition.RightSide, close_button)
+                close_button.setAccessibleName(f"Close project: {label}")
+                close_button.setToolTip(f"Close project: {label}")
                 active = [
                     job for job in self.job_manager.active_jobs(editor.session.id)
                     if job.kind not in {"recovery", "workspace"}

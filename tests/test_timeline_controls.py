@@ -47,9 +47,12 @@ def test_controls_use_two_rows_with_help_only_in_tooltips(window, qtbot, stylesh
         for label in window.findChildren(QLabel)
     )
     assert "Drag the white playback line" in window.timeline.toolTip()
-    assert window.apply_range_button.text() == "Update Segment Timing"
-    assert window.split_button.text() == "Split at Playhead"
-    assert window.preview_segment_button.text() == "Play Selected Segment"
+    assert window.apply_range_button.accessibleName() == "Update Segment Timing"
+    assert window.split_button.accessibleName() == "Split at Playhead"
+    assert window.preview_segment_button.accessibleName() == "Play Selected Segment"
+    for button in (window.apply_range_button, window.split_button, window.preview_segment_button):
+        assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
+        assert not button.icon().isNull()
     assert window.mark_in_spin.geometry().bottom() < window.add_segment_button.y()
     assert window.zoom_slider.y() < window.add_segment_button.y()
     buttons = (
@@ -85,11 +88,14 @@ def test_native_timeline_controls_fit_without_clipping(window, qtbot, stylesheet
 
 def test_segment_buttons_require_one_selection_and_reset_with_project(window):
     buttons = (window.apply_range_button, window.split_button, window.preview_segment_button)
+    actions = (window.action_apply_range, window.action_split, window.action_preview)
     assert all(not button.isEnabled() for button in buttons)
+    assert all(not action.isEnabled() for action in actions)
     assert window.add_segment_button.isEnabled()
     first = window.project.segments[0]
     window.select_segment(first.id)
     assert all(button.isEnabled() for button in buttons)
+    assert all(action.isEnabled() for action in actions)
 
     window.segment_table.selectionModel().select(
         window.segment_table.model().index(1, 0),
@@ -97,6 +103,7 @@ def test_segment_buttons_require_one_selection_and_reset_with_project(window):
     )
     assert window.selected_segment() is None
     assert all(not button.isEnabled() for button in buttons)
+    assert all(not action.isEnabled() for action in actions)
     window.select_segment(first.id)
     assert all(button.isEnabled() for button in buttons)
     window.segment_table.clearSelection()
