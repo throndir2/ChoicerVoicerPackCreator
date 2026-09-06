@@ -257,6 +257,8 @@ class ProjectEditor(QWidget):
     def setCentralWidget(self, widget: QWidget) -> None:  # noqa: N802
         scroll = QScrollArea(self)
         scroll.setObjectName("projectEditorScroll")
+        scroll.verticalScrollBar().setObjectName("projectEditorScrollbar")
+        scroll.verticalScrollBar().setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(widget)
@@ -622,7 +624,9 @@ class ProjectEditor(QWidget):
         self.preserve_video_check = QCheckBox("Preserve imported compatible OGV without re-encoding")
         self.preserve_video_check.toggled.connect(self._pack_details_changed)
         project_form.addRow("Video mode", self.preserve_video_check)
-        self.project_section.set_content(project_content, scrollable=True)
+        self.project_section.set_content(
+            project_content, scrollable=True, scrollbar_name="projectDetailsScrollbar",
+        )
         self.inspector_splitter.addWidget(self.project_section)
 
         self.segments_section = CollapsibleSection("SEGMENTS", self.inspector_splitter)
@@ -707,7 +711,9 @@ class ProjectEditor(QWidget):
         self.segment_audio_help.setObjectName("muted")
         self.segment_audio_help.setWordWrap(True)
         editor_form.addRow("", self.segment_audio_help)
-        self.selected_section.set_content(editor_content, scrollable=True)
+        self.selected_section.set_content(
+            editor_content, scrollable=True, scrollbar_name="selectedSegmentScrollbar",
+        )
         self.inspector_splitter.addWidget(self.selected_section)
 
         self.inspector_sections = (

@@ -386,8 +386,6 @@ def _run_application(
 
         window.windowTitleChanged.connect(mark_isolated)
         mark_isolated(window.windowTitle())
-    if not smoke_test:
-        window.restore_workspace()
 
     def open_paths(received: Sequence[Path]) -> None:
         for path in received:

@@ -121,6 +121,15 @@ def test_fresh_native_layout_keeps_task_and_segment_rows_clickable(workspace, qt
     qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
     QApplication.processEvents()
     assert workspace.height() <= available.height()
+    scrollbar = editor.editor_scroll.verticalScrollBar()
+    assert scrollbar.objectName() == "projectEditorScrollbar"
+    assert scrollbar.isVisible()
+    qtbot.mouseClick(scrollbar, Qt.MouseButton.LeftButton, pos=scrollbar.rect().center())
+    qtbot.keyClick(scrollbar, Qt.Key.Key_Home)
+    assert scrollbar.value() == 0
+    qtbot.keyClick(scrollbar, Qt.Key.Key_PageDown)
+    assert scrollbar.value() > 0
+    qtbot.keyClick(scrollbar, Qt.Key.Key_Home)
     for table in (workspace.tasks_panel.table, editor.segment_table):
         assert table.viewport().height() >= 2 * table.verticalHeader().defaultSectionSize(), (
             table.objectName(), table.size(), table.viewport().size(), workspace.size(), available
