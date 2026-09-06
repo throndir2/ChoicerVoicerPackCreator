@@ -58,11 +58,33 @@ def test_main_window_starts_with_empty_editor(qtbot) -> None:
     qtbot.addWidget(window)
     window.show()
     assert window.project.title == "Untitled Dub Pack"
+    assert window.height_spin.value() == 480
+    assert window.fps_spin.value() == 30
     assert window.segment_table.rowCount() == 0
     assert "Choicer Voicer Pack Creator" in window.windowTitle()
     help_actions = window.menuBar().actions()[-1].menu().actions()
     assert window.updater.check_action in help_actions
     assert window.action_logs in help_actions
+    window.dirty = False
+    window.close()
+
+
+def test_export_quality_controls_keep_saved_profiles_and_allow_opt_in(qtbot, tmp_path) -> None:
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(
+        UnusedMedia(), settings=settings, analysis_data_root=tmp_path / "analysis",
+    )  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    window._set_project(
+        PackProject(video_height=720, video_fps=60, preserve_source_video=True),
+        None, mark_dirty=False,
+    )
+    assert window.height_spin.value() == 720
+    assert window.fps_spin.value() == 60
+    window.height_spin.setValue(1080)
+    assert window.project.video_height == 1080
+    assert window.project.video_fps == 60
+    assert not window.project.preserve_source_video
     window.dirty = False
     window.close()
 

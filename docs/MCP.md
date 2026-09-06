@@ -112,6 +112,14 @@ project file concurrently in the editor, another client, or another headless pro
 Do not rely on editor recovery as a headless persistence mechanism. Exporting a pack does not
 replace saving its editable source project.
 
+New projects default to 480p at 30 FPS. Opt into higher quality with `update_project`'s
+`patch.video_height` and `patch.video_fps`; saved settings and compatible imported video
+profiles are preserved. Repeat exports to the same destination can reuse a checksum-verified
+video conversion when the source content and encoding settings are unchanged. Small reuse
+receipts are stored in the application's `export-cache` data directory outside game packs.
+Up to two prompts are prepared concurrently, and ZIPs avoid recompressing media. These
+optimizations retain full media validation, overwrite consent, and rollback protection.
+
 ## Tools and workflow
 
 Start with `get_help` and client tool discovery. The advertised schemas are the authoritative

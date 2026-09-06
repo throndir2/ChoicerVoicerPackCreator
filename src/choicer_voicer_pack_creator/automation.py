@@ -498,7 +498,9 @@ class PackAutomation:
         protected.extend(protected_assets(snapshot.project))
         if any(is_same_or_within(path, folder) or path == archive for path in protected):
             raise ValueError("Export would replace the saved project or source assets.")
-        result = PackExporter(self.media).export(snapshot.project, parent, progress=progress)
+        result = PackExporter(
+            self.media, cache_root=self.data_root.parent / "export-cache",
+        ).export(snapshot.project, parent, progress=progress)
         return {
             "project_id": snapshot.project_id,
             "pack_path": str(result.pack_path),

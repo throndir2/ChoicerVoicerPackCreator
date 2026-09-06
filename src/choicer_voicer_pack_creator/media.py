@@ -808,8 +808,22 @@ class MediaTools:
         threshold = round(32767 * 10 ** (threshold_dbfs / 20.0))
         return any(abs(value) >= threshold for value in samples)
 
-    def extract_frame(self, video: Path, timestamp: float, destination: Path) -> None:
+    def extract_frame(
+        self,
+        video: Path,
+        timestamp: float,
+        destination: Path,
+        *,
+        size: tuple[int, int] | None = None,
+    ) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
+        image_args = []
+        if size is not None:
+            width, height = size
+            image_args = [
+                "-vf",
+                f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}",
+            ]
         self.run(
             [
                 self.ffmpeg,
@@ -817,12 +831,14 @@ class MediaTools:
                 "-loglevel",
                 "error",
                 "-y",
-                "-i",
-                str(video),
+                # Input seeking still decodes from the preceding keyframe for accuracy.
                 "-ss",
                 f"{max(0.0, timestamp):.6f}",
+                "-i",
+                str(video),
                 "-frames:v",
                 "1",
+                *image_args,
                 str(destination),
             ],
             f"Extracting frame at {timestamp:.3f}s",

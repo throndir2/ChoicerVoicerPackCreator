@@ -12,6 +12,7 @@ from choicer_voicer_pack_creator.automation import (
     ProjectSnapshot,
     SegmentPatch,
 )
+from choicer_voicer_pack_creator.exporter import ExportResult
 from choicer_voicer_pack_creator.media import MediaInfo
 from choicer_voicer_pack_creator.models import AnalysisReview, PackProject, Segment, SourceCaption
 from choicer_voicer_pack_creator.project_io import ProjectStore
@@ -29,6 +30,17 @@ def automation(tmp_path):
     service = PackAutomation(HeadlessProjectAccess(), tmp_path, StubMedia())
     service.new_project(str(source), "Test Pack", ["Tester"])
     return service
+
+
+def test_mcp_new_projects_use_fast_defaults_and_allow_higher_quality(automation):
+    before = automation.get_project()
+    assert before["project"]["video_height"] == 480
+    assert before["project"]["video_fps"] == 30
+    updated = automation.update_project(
+        ProjectPatch(video_height=1080, video_fps=60), before["revision"],
+    )
+    assert updated["project"]["video_height"] == 1080
+    assert updated["project"]["video_fps"] == 60
 
 
 def test_batch_edits_are_atomic_and_revisions_reject_stale_writers(automation):
@@ -279,6 +291,28 @@ def test_export_requires_saved_project_and_protects_project_folder(automation, t
     saved = automation.save_project(before["revision"], str(destination))
     with pytest.raises(ValueError, match="saved project"):
         automation.export_pack(str(tmp_path), saved["revision"], overwrite=True)
+
+
+def test_mcp_export_enables_reuse_receipts_in_application_data(
+    automation, tmp_path, monkeypatch,
+):
+    saved = automation.save_project(
+        automation.get_project()["revision"], str(tmp_path / "saved.cvpack.json"),
+    )
+    received = {}
+
+    class Exporter:
+        def __init__(self, media, *, cache_root):
+            received["media"] = media
+            received["cache_root"] = cache_root
+
+        def export(self, project, parent, *, progress):
+            return ExportResult(parent / project.title, None, {"status": "passed"}, {}, [])
+
+    monkeypatch.setattr("choicer_voicer_pack_creator.automation.PackExporter", Exporter)
+    automation.export_pack(str(tmp_path / "output"), saved["revision"])
+    assert received["media"] is automation.media
+    assert received["cache_root"] == automation.data_root.parent / "export-cache"
 
 
 def test_preview_bounds_and_headless_show_errors(automation):

@@ -200,7 +200,6 @@ class ProjectEditor(QWidget):
         self._status_bar = QStatusBar(self)
         self.media = media
         self.importer = PackImporter(media)
-        self.exporter = PackExporter(media)
         self.settings = settings or QSettings(
             "ChoicerVoicerCommunity", "ChoicerVoicerPackCreator"
         )
@@ -214,6 +213,9 @@ class ProjectEditor(QWidget):
                 )
             )
             / "analysis"
+        )
+        self.exporter = PackExporter(
+            media, cache_root=self.analysis_data_root.parent / "export-cache",
         )
         self.project = session.project
         self.project_path = session.path
@@ -629,8 +631,15 @@ class ProjectEditor(QWidget):
         self.height_spin = QSpinBox()
         self.height_spin.setRange(144, 2160)
         self.height_spin.setSingleStep(72)
+        self.height_spin.setToolTip(
+            "New projects default to 480p for faster exports. "
+            "Increase Height for higher quality and slower encoding."
+        )
         self.fps_spin = QSpinBox()
         self.fps_spin.setRange(1, 120)
+        self.fps_spin.setToolTip(
+            "New projects default to 30 FPS. Higher frame rates take longer to encode."
+        )
         for widget in (self.head_pad_spin, self.tail_pad_spin):
             widget.valueChanged.connect(self._pack_details_changed)
         self.height_spin.valueChanged.connect(self._video_profile_changed)
@@ -3398,7 +3407,7 @@ class MainWindow(QMainWindow):
             filename, _ = QFileDialog.getSaveFileName(
                 self, "Save Pack Creator project",
                 str(Path(self.settings.value("lastProjectDir", str(Path.home())))
-                    / f"{editor.project.title}.cvpack.json"),
+                    / f"{safe_name(editor.project.title)}.cvpack.json"),
                 "Pack Creator projects (*.cvpack.json)",
             )
             if not filename:

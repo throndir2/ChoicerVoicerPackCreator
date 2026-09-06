@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
+from pathlib import Path
 from threading import Event, current_thread, main_thread
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QDialog, QMessageBox
+from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
 
 from choicer_voicer_pack_creator.jobs import JobManager
 from choicer_voicer_pack_creator.models import SourceCaption
 from choicer_voicer_pack_creator.operations import SourceSnapshot
+from choicer_voicer_pack_creator.project_io import ProjectStore
 from choicer_voicer_pack_creator.ui import main_window, youtube_dialog
 from choicer_voicer_pack_creator.youtube import (
     ExistingYouTubeImport,
@@ -78,8 +81,6 @@ def test_workspace_youtube_hides_without_cancel_and_emits_async_completion(
 def test_workspace_youtube_validates_destination_on_worker_and_reports_inline(
     qtbot, tmp_path, monkeypatch,
 ):
-    from pathlib import Path
-
     folder = tmp_path / "missing-destination"
     original_is_dir = Path.is_dir
     checks = []
@@ -382,10 +383,10 @@ def test_invalid_url_never_starts_worker(qtbot, tmp_path, monkeypatch):
     assert warnings
 
 
-def test_main_window_loads_download_and_starts_caption_comparison(
+def test_main_window_imports_youtube_title_and_saves_with_safe_filename(
     qtbot, tmp_path, monkeypatch,
 ):
-    result = make_download(tmp_path)
+    result = replace(make_download(tmp_path), title='Example: "clip"?*')
 
     class ImportDialog(QDialog):
         download_result = result
@@ -398,7 +399,11 @@ def test_main_window_loads_download_and_starts_caption_comparison(
             QTimer.singleShot(0, self.accept)
 
     monkeypatch.setattr(main_window, "YouTubeDialog", ImportDialog)
-    window = main_window.MainWindow(UnusedMedia(), analysis_data_root=tmp_path / "analysis")
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    settings.setValue("lastProjectDir", str(tmp_path))
+    window = main_window.MainWindow(
+        UnusedMedia(), settings=settings, analysis_data_root=tmp_path / "analysis",
+    )
     qtbot.addWidget(window)
     scans = []
     backing_runs = []
@@ -425,7 +430,23 @@ def test_main_window_loads_download_and_starts_caption_comparison(
     assert window.editor_splitter.isEnabled()
     window._set_busy(False, "Ready")
     assert window.action_export.isEnabled()
-    window.dirty = False
+    assert window.project.title == result.title
+    assert window.title_edit.text() == result.title
+    destination = tmp_path / "Example clip.cvpack.json"
+
+    def save_suggested_filename(_parent, _caption, suggested, _filter):
+        assert Path(suggested) == destination
+        return suggested, ""
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", save_suggested_filename)
+    assert window.save_project()
+    qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
+    assert window.project_path == destination
+    saved = ProjectStore.load(destination)
+    assert saved.title == result.title
+    assert saved.video_path == str(result.video_path)
+    assert saved.source_captions == result.captions
+    assert not window.dirty
     window.close()
 
 

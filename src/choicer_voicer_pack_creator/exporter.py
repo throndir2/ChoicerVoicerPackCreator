@@ -3,13 +3,17 @@ from __future__ import annotations
 import copy
 import hashlib
 import os
+import queue
 import re
 import shutil
 import tempfile
+import threading
 import unicodedata
 import uuid
 import zipfile
 from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextvars import copy_context
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -21,6 +25,7 @@ from choicer_voicer_pack_creator.diagnostics import (
     diagnostic_exception,
     diagnostic_operation,
 )
+from choicer_voicer_pack_creator.export_cache import ExportVideoCache
 from choicer_voicer_pack_creator.export_progress import (
     VIDEO_CONVERSION_STEP,
     ExportProgress,
@@ -30,6 +35,7 @@ from choicer_voicer_pack_creator.export_progress import (
 from choicer_voicer_pack_creator.media import MediaInfo, MediaTools, VideoEncodingProgress
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.operations import (
+    OperationCancelled,
     SourceSnapshot,
     check_cancelled,
     critical_stage,
@@ -43,7 +49,13 @@ ProgressCallback = Callable[[ExportProgress], None]
 
 
 def safe_name(value: str, fallback: str = "Dub Pack") -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "", value).strip().rstrip(".")
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "", value).strip().rstrip(". ")
+    # Windows device names stay reserved even when followed by a file extension.
+    stem = cleaned.partition(".")[0].rstrip(" ").upper()
+    if stem in {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} or re.fullmatch(
+        r"(?:COM|LPT)[1-9\u00b9\u00b2\u00b3]", stem,
+    ):
+        cleaned = f"_{cleaned}"
     return cleaned or fallback
 
 
@@ -113,7 +125,7 @@ def video_prompt_context(segments: list[Segment], position: float) -> str:
 
 def export_plan(
     project: PackProject, source: MediaInfo, segments: list[Segment],
-    *, preserve_video: bool, create_zip: bool,
+    *, preserve_video: bool, create_zip: bool, prompt_workers: int = 2,
 ) -> tuple[ExportStep, ...]:
     # These are deliberately rough cold-start estimates. Live frame throughput and
     # completed operations replace them; repeated prompt/validation work shares timings.
@@ -133,23 +145,11 @@ def export_plan(
         ExportStep("backing", "Backing track", "backing", 0.5 + duration / 50),
         ExportStep("backing-check", "Backing audibility", "audio-check", 0.5 + duration / 100),
     ]
-    for index, segment in enumerate(segments, start=1):
-        key = f"prompt-{index}"
-        label = f"Prompt {index}/{len(segments)}"
-        steps.append(ExportStep(
-            f"{key}-audio", f"{label}: audio",
-            "prompt-audio" if segment.audio_mode == "video" else "imported-audio",
-            0.5 + segment.duration / 10,
-        ))
-        if segment.audio_mode == "video":
-            steps.append(ExportStep(
-                f"{key}-check", f"{label}: audio checks", "audio-check",
-                0.5 + segment.duration / 100,
-            ))
-        steps.extend((
-            ExportStep(f"{key}-image", f"{label}: still image", "image", 1.0),
-            ExportStep(f"{key}-metadata", f"{label}: metadata", "metadata", 0.1),
-        ))
+    steps.append(ExportStep(
+        "prompts", f"Preparing {len(segments)} prompts", "prompts",
+        sum(2.1 + segment.duration / 10 for segment in segments)
+        / max(1, min(prompt_workers, len(segments))),
+    ))
     validation_time = 1.0 + duration / 20 + len(segments) * 2
     steps.extend((
         ExportStep("staged-validation", "Validating staged pack", "validation", validation_time),
@@ -182,9 +182,16 @@ class ExportResult:
 
 
 class PackExporter:
-    def __init__(self, media: MediaTools) -> None:
+    def __init__(
+        self, media: MediaTools, *, cache_root: Path | None = None,
+        prompt_workers: int | None = None,
+    ) -> None:
+        if prompt_workers is not None and prompt_workers < 1:
+            raise ValueError("Prompt worker count must be positive")
         self.media = media
         self.validator = PackValidator(media)
+        self.video_cache = ExportVideoCache(cache_root) if cache_root is not None else None
+        self.prompt_workers = min(2, prompt_workers or os.cpu_count() or 1)
 
     @diagnostic_operation("pack_export")
     def export(
@@ -295,11 +302,33 @@ class PackExporter:
                 and source_info.audio_sample_rate in {44100, 48000}
                 and source_info.audio_channels in {1, 2}
             )
+            cache_warnings: list[str] = []
+            source_hash = None
+            reusable_video = None
+            if self.video_cache is not None and not preserve_video:
+                notify("Checking whether the previous video conversion can be reused...")
+                source_hash = sha256(source_video)
+                try:
+                    expected_hash = self.video_cache.lookup(
+                        target, source_hash, project.video_height, project.video_fps,
+                    )
+                    previous_video = target / "dub_video.ogv"
+                    if expected_hash is not None and previous_video.is_file():
+                        if sha256(previous_video) == expected_hash:
+                            reusable_video = previous_video
+                        else:
+                            diagnostic_event("export_video_cache_mismatch", target=target)
+                except OSError as error:
+                    diagnostic_exception("export_video_cache_read_failed", error)
+                    cache_warnings.append(
+                        f"Video reuse was unavailable; the video was converted again: {error}"
+                    )
             notify(
                 "Writing pack metadata…", step="metadata",
                 plan=export_plan(
-                    project, source_info, segments, preserve_video=preserve_video,
-                    create_zip=create_zip,
+                    project, source_info, segments,
+                    preserve_video=preserve_video or reusable_video is not None,
+                    create_zip=create_zip, prompt_workers=self.prompt_workers,
                 ),
             )
             (stage / "_pack_info.ini").write_bytes(
@@ -311,6 +340,12 @@ class PackExporter:
                 notify("Preserving existing Ogg video…", step=VIDEO_CONVERSION_STEP)
                 _copy_file(source_video, output_video)
                 diagnostic_event("pack_export_video_preserved")
+            elif reusable_video is not None:
+                notify("Reusing verified previous video conversion...", step=VIDEO_CONVERSION_STEP)
+                _copy_file(reusable_video, output_video)
+                if sha256(output_video) != expected_hash:
+                    raise RuntimeError("Previous exported video changed while it was being reused")
+                diagnostic_event("pack_export_video_reused")
             else:
                 conversion_message = (
                     "Converting full video to Ogg Theora/Vorbis "
@@ -394,63 +429,22 @@ class PackExporter:
             notify("Checking backing track audibility...", step="backing-check")
             backing_is_silent = self.media.audio_peak_dbfs(stage / "_backing_track.mp3") < -60
 
-            def notify_prompt(index: int, operation: str, part: str) -> None:
+            def notify_prompt(index: int, operation: str, fraction: float) -> None:
                 context = prompt_description(segments[index - 1], index, total)
                 notify(
                     f"{operation}\n{context}",
                     diagnostic_message=f"Prompt {index}/{total}: {operation}",
-                    step=f"prompt-{index}-{part}",
+                    step="prompts", fraction=fraction,
                 )
 
-            for index, segment in enumerate(segments, start=1):
-                notify_prompt(index, "Preparing prompt audio", "audio")
-                base = f"{index:03d}_{slug(segment.primary_character)}"
-                audio_path = stage / f"{base}.mp3"
-                image_path = stage / f"{base}.png"
-                timestamp = self._write_audio(project, segment, source_video, audio_path, source_info.duration)
-                if segment.audio_mode == "video":
-                    notify_prompt(index, "Checking prompt audio duration, padding, and audibility", "check")
-                    actual_head = min(segment.start, project.head_padding)
-                    actual_tail = min(
-                        project.tail_padding,
-                        max(0.0, source_info.duration - segment.end),
-                    )
-                    expected_duration = segment.duration + actual_head + actual_tail
-                    stats = self.media.decoded_audio_stats(audio_path)
-                    if abs(stats.duration - expected_duration) > 0.026:
-                        raise RuntimeError(
-                            f"{audio_path.name} lost source audio during encoding: expected "
-                            f"{expected_duration:.3f}s, decoded {stats.duration:.3f}s"
-                        )
-                    if stats.leading_quiet + 0.020 < actual_head:
-                        raise RuntimeError(
-                            f"{audio_path.name} has insufficient physical head padding"
-                        )
-                    if stats.trailing_quiet + 0.020 < actual_tail:
-                        raise RuntimeError(
-                            f"{audio_path.name} has insufficient physical tail padding"
-                        )
-                    if not stats.has_activity:
-                        raise RuntimeError(
-                            f"{audio_path.name} contains no audible source content"
-                        )
-                notify_prompt(index, "Preparing prompt still image", "image")
-                self._write_image(
-                    segment,
-                    source_video,
-                    image_path,
-                    output_video_info.width,
-                    output_video_info.height,
-                )
-                notify_prompt(index, "Writing prompt caption and character metadata", "metadata")
-                (stage / f"{base}.txt").write_bytes(
-                    render_clip_metadata(
-                        segment.caption.strip(),
-                        image_path.name,
-                        timestamp,
-                        [name.strip() for name in segment.characters],
-                    )
-                )
+            notify(
+                f"Preparing prompts (up to {self.prompt_workers} at a time)...",
+                step="prompts", fraction=0.0,
+            )
+            self._write_prompts(
+                project, segments, source_video, stage, source_info.duration,
+                output_video_info.width, output_video_info.height, notify_prompt,
+            )
             diagnostic_event("pack_export_prompts_built", segment_count=total)
 
             notify("Validating staged pack…", step="staged-validation")
@@ -471,12 +465,16 @@ class PackExporter:
             if create_zip:
                 notify("Creating and testing ZIP archive…", step="zip")
                 staged_zip = temporary_root / f"{folder_name}.zip"
-                with zipfile.ZipFile(staged_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+                with zipfile.ZipFile(staged_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
                     for index, path in enumerate(files, start=1):
-                        notify(f"Creating ZIP: compressing file {index}/{len(files)}...")
+                        notify(f"Creating ZIP: adding file {index}/{len(files)}...")
+                        entry: str | zipfile.ZipInfo = f"{folder_name}/{path.name}"
+                        if path.suffix in {".ogv", ".mp3", ".png"}:
+                            entry = zipfile.ZipInfo(entry)
+                            entry.compress_type = zipfile.ZIP_STORED
                         with (
                             path.open("rb") as source,
-                            archive.open(f"{folder_name}/{path.name}", "w", force_zip64=True) as output,
+                            archive.open(entry, "w", force_zip64=True) as output,
                         ):
                             _copy_stream(source, output)
                 notify("Testing staged ZIP integrity and file inventory...", step="zip-check")
@@ -501,6 +499,18 @@ class PackExporter:
                     progress=publish_progress,
                     snapshot=snapshot,
                 )
+                publish_warnings.extend(cache_warnings)
+                if self.video_cache is not None and source_hash is not None:
+                    try:
+                        self.video_cache.remember(
+                            target, source_hash, project.video_height, project.video_fps,
+                            file_hashes["dub_video.ogv"],
+                        )
+                    except OSError as error:
+                        diagnostic_exception("export_video_cache_write_failed", error)
+                        publish_warnings.append(
+                            f"Export succeeded, but its video reuse receipt could not be saved: {error}"
+                        )
                 if backing_is_silent:
                     publish_warnings.append(
                         "Exported without backing music: the backing track is silent or below -60 dBFS. "
@@ -520,6 +530,104 @@ class PackExporter:
                     file_hashes=file_hashes,
                     warnings=publish_warnings,
                 )
+
+    def _write_prompts(
+        self, project: PackProject, segments: list[Segment], source: Path, stage: Path,
+        duration: float, width: int, height: int,
+        progress: Callable[[int, str, float], None],
+    ) -> None:
+        events: queue.SimpleQueue[tuple[int, str]] = queue.SimpleQueue()
+        stop = threading.Event()
+        items = iter(enumerate(segments, start=1))
+        completed = 0
+
+        def build(index: int, segment: Segment) -> None:
+            def notify(message: str) -> None:
+                check_cancelled()
+                events.put((index, message))
+
+            with operation_scope(
+                cancelled=stop.is_set,
+                progress=lambda message, _fraction: notify(message),
+            ):
+                self._write_prompt(
+                    project, segment, index, source, stage, duration, width, height, notify,
+                )
+
+        executor = ThreadPoolExecutor(
+            max_workers=self.prompt_workers, thread_name_prefix="export-prompt",
+        )
+        pending: dict[Future[None], int] = {}
+
+        def submit_next() -> None:
+            check_cancelled()
+            item = next(items, None)
+            if item is not None:
+                index, segment = item
+                # Each worker needs its own context, including cancellation and lease ownership.
+                future = executor.submit(copy_context().run, build, index, segment)
+                pending[future] = index
+
+        try:
+            for _ in range(self.prompt_workers):
+                submit_next()
+            while pending:
+                check_cancelled()
+                done, _ = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+                while not events.empty():
+                    index, message = events.get_nowait()
+                    progress(index, message, completed / len(segments))
+                for future in done:
+                    future.result()
+                for future in sorted(done, key=pending.__getitem__):
+                    index = pending.pop(future)
+                    completed += 1
+                    progress(index, "Prompt ready", completed / len(segments))
+                for _ in done:
+                    submit_next()
+        finally:
+            stop.set()
+            executor.shutdown(wait=True, cancel_futures=True)
+            for future in pending:
+                if not future.cancelled():
+                    error = future.exception()
+                    if error is not None and not isinstance(error, OperationCancelled):
+                        # A worker cleanup failure must not be hidden by a cancellation request.
+                        raise error
+
+    def _write_prompt(
+        self, project: PackProject, segment: Segment, index: int, source: Path, stage: Path,
+        duration: float, width: int, height: int, notify: Callable[[str], None],
+    ) -> None:
+        notify("Preparing prompt audio")
+        base = f"{index:03d}_{slug(segment.primary_character)}"
+        audio_path = stage / f"{base}.mp3"
+        image_path = stage / f"{base}.png"
+        timestamp = self._write_audio(project, segment, source, audio_path, duration)
+        if segment.audio_mode == "video":
+            notify("Checking prompt audio duration, padding, and audibility")
+            actual_head = min(segment.start, project.head_padding)
+            actual_tail = min(project.tail_padding, max(0.0, duration - segment.end))
+            expected_duration = segment.duration + actual_head + actual_tail
+            stats = self.media.decoded_audio_stats(audio_path)
+            if abs(stats.duration - expected_duration) > 0.026:
+                raise RuntimeError(
+                    f"{audio_path.name} lost source audio during encoding: expected "
+                    f"{expected_duration:.3f}s, decoded {stats.duration:.3f}s"
+                )
+            if stats.leading_quiet + 0.020 < actual_head:
+                raise RuntimeError(f"{audio_path.name} has insufficient physical head padding")
+            if stats.trailing_quiet + 0.020 < actual_tail:
+                raise RuntimeError(f"{audio_path.name} has insufficient physical tail padding")
+            if not stats.has_activity:
+                raise RuntimeError(f"{audio_path.name} contains no audible source content")
+        notify("Preparing prompt still image")
+        self._write_image(segment, source, image_path, width, height)
+        notify("Writing prompt caption and character metadata")
+        (stage / f"{base}.txt").write_bytes(render_clip_metadata(
+            segment.caption.strip(), image_path.name, timestamp,
+            [name.strip() for name in segment.characters],
+        ))
 
     def _write_audio(
         self,
@@ -567,19 +675,10 @@ class PackExporter:
             else:
                 self.media.convert_image(source, destination, width, height)
             return
-        extracted = destination.with_name(f".{destination.stem}.source.png")
-        try:
-            self.media.extract_frame(
-                source_video,
-                segment.start + segment.duration / 2.0,
-                extracted,
-            )
-            if self.media.probe_image_dimensions(extracted) == (width, height):
-                os.replace(extracted, destination)
-            else:
-                self.media.convert_image(extracted, destination, width, height)
-        finally:
-            extracted.unlink(missing_ok=True)
+        self.media.extract_frame(
+            source_video, segment.start + segment.duration / 2.0, destination,
+            size=(width, height),
+        )
 
     @diagnostic_operation("pack_publish")
     def _publish_verified(
