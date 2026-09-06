@@ -14,12 +14,15 @@ import select
 import signal
 import socket
 import struct
+import subprocess
 import threading
 import time
 import traceback
 from collections.abc import Callable
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from typing import Any
+
+from choicer_voicer_pack_creator.operations import OperationCancelled, check_cancelled
 
 _POLL_INTERVAL = 0.1
 _HEADER = struct.Struct("!Q")
@@ -42,7 +45,7 @@ class ProcessWorkerError(RuntimeError):
         self.remote_traceback = remote_traceback
 
 
-class ProcessWorkerCancelled(ProcessWorkerError):
+class ProcessWorkerCancelled(ProcessWorkerError, OperationCancelled):
     """The caller cancelled the operation."""
 
 
@@ -367,6 +370,50 @@ def _kill_group(pid: int) -> None:
         os.killpg(pid, signal.SIGKILL)
 
 
+@contextmanager
+def owned_subprocess(command, **kwargs):
+    """Contain an external program before it executes, and reap its whole tree.
+
+    Windows starts suspended until assignment to a kill-on-close Job Object; POSIX
+    creates a new process group in Popen itself. Cleanup failures propagate rather
+    than reporting a cancelled job while descendants still own output files.
+    """
+    check_cancelled()
+    with ExitStack() as resources:
+        job = _WindowsJob() if os.name == "nt" else None
+        if job is not None:
+            resources.callback(job.close)
+            kwargs["creationflags"] = kwargs.get("creationflags", 0) | 0x4  # CREATE_SUSPENDED
+        else:
+            kwargs["start_new_session"] = True
+        process = subprocess.Popen(command, **kwargs)
+        try:
+            if job is not None:
+                import ctypes
+
+                job.assign(process.pid)
+                resume = ctypes.WinDLL("ntdll").NtResumeProcess
+                resume.argtypes = [ctypes.c_void_p]
+                resume.restype = ctypes.c_long
+                status = resume(int(process._handle))
+                if status < 0:
+                    raise OSError(f"Could not resume contained process (NTSTATUS {status:#x})")
+            yield process
+        finally:
+            try:
+                if job is not None:
+                    job.close()
+                else:
+                    _kill_group(process.pid)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
+
+
 def run_process_worker(
     target: Callable[..., Any],
     args: tuple,
@@ -389,6 +436,7 @@ def run_process_worker(
     next_wait = started + 1.0
 
     def check_limits() -> float:
+        check_cancelled()
         if cancelled():
             raise ProcessWorkerCancelled("Process worker cancelled")
         now = time.monotonic()
