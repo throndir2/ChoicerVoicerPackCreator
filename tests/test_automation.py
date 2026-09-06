@@ -59,6 +59,35 @@ def test_batch_edits_are_atomic_and_revisions_reject_stale_writers(automation):
     assert deleted["total_segments"] == 1
 
 
+def test_speaker_edits_record_manual_intent_and_exclude_explicitly_cleared_names(automation):
+    before = automation.get_project()
+    created = automation.edit_segments(
+        [SegmentPatch(start=1, end=3, characters=["Alice"])], [], before["revision"],
+    )
+    identity = created["changed_ids"][0]
+    cleared = automation.edit_segments(
+        [SegmentPatch(id=identity, characters=[])], [], created["revision"],
+    )
+    assert cleared["segments"][0]["speaker_assignment"] == "excluded"
+    included = automation.edit_segments(
+        [SegmentPatch(id=identity, speaker_assignment="manual")], [], cleared["revision"],
+    )
+    assert included["segments"][0]["speaker_assignment"] == "manual"
+    named = automation.edit_segments(
+        [SegmentPatch(id=identity, characters=["Bob"])], [], included["revision"],
+    )
+    assert named["segments"][0]["speaker_assignment"] == "manual"
+    with pytest.raises(ValueError, match="Only an unassigned"):
+        automation.edit_segments(
+            [SegmentPatch(id=identity, speaker_assignment="excluded")], [], named["revision"],
+        )
+    assert automation.get_project()["revision"] == named["revision"]
+    disabled = automation.update_project(
+        ProjectPatch(auto_speaker_matching=False), named["revision"],
+    )
+    assert disabled["project"]["auto_speaker_matching"] is False
+
+
 @pytest.mark.parametrize("data", [
     {"start": float("nan")}, {"end": float("inf")}, {"start": -1}, {"start": True},
     {"caption": None}, {"characters": "Alice"}, {"audio_mode": "stem"}, {"surprise": 1},

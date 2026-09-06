@@ -28,6 +28,10 @@ def test_separation_dependency_licenses_are_copied_from_installed_wheels(tmp_pat
                for path in (tmp_path / "licenses" / "onnxruntime").rglob("*"))
     assert any("copying" in path.name.casefold()
                for path in (tmp_path / "licenses" / "soundfile").rglob("*"))
+    native_notices = (
+        tmp_path / "licenses" / "kaldi-native-fbank" / "KaldiNativeFbank-ThirdParty.txt"
+    ).read_text()
+    assert "Mark Borgerding" in native_notices and "Wenzel Jakob" in native_notices
 
 
 def _prepare_candidate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path]:
@@ -238,9 +242,22 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
         "choicer_voicer_pack_creator/resources",
     ) in analyses[0].datas
     assert ("yt_dlp_ejs-data", "yt_dlp_ejs") in analyses[0].datas
-    assert analyses[0].runtime_hooks == [str(root / "scripts" / "separation_runtime_hook.py")]
+    assert analyses[0].runtime_hooks == [
+        str(BUILD_SCRIPT.BUILD / "speaker_runtime_hook.py"),
+        str(root / "scripts" / "separation_runtime_hook.py"),
+    ]
+    speaker_hook = (BUILD_SCRIPT.BUILD / "speaker_runtime_hook.py").read_text()
+    assert speaker_hook.index("multiprocessing.freeze_support()") < speaker_hook.index(
+        "--speaker-matching-smoke"
+    )
+    assert "_kaldi_native_fbank" in analyses[0].hiddenimports
+    assert "choicer_voicer_pack_creator.speaker_worker" in analyses[0].hiddenimports
+    assert any(
+        Path(source).name == "kaldi-native-fbank-core.dll" and destination == "."
+        for source, destination in analyses[0].binaries
+    )
     assert analyses[0].pathex == [str(root / "src")]
-    for name in ("onnxruntime", "_soundfile_data"):
+    for name in ("onnxruntime", "_soundfile_data", "kaldi_native_fbank"):
         assert ("all", name) in hook_calls
         assert (f"{name}-data", name) in analyses[0].datas
         assert (f"{name}-binary", name) in analyses[0].binaries

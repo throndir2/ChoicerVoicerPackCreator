@@ -66,3 +66,20 @@ def test_declined_consent_can_be_requested_again_and_exit_cancels(qtbot):
     assert consent.box is not None
     consent.cancel_all()
     assert replies == [False, False] and consent.box is None
+
+
+def test_cancelling_one_request_preserves_other_components_for_the_same_project(qtbot):
+    host = QDialog()
+    qtbot.addWidget(host)
+    consent = SetupConsent(host)
+    speaker_replies, backing_replies = [], []
+    speaker_callback = speaker_replies.append
+    consent.request("a", {"speaker:hash": "Speaker model"}, speaker_callback, lambda: True)
+    consent.request("a", {"backing:hash": "Backing model"}, backing_replies.append, lambda: True)
+    consent.cancel_request(speaker_callback)
+    assert speaker_replies == [False]
+    assert backing_replies == []
+    assert "Speaker model" not in consent.box.text()
+    assert "Backing model" in consent.box.text()
+    consent.box.button(QMessageBox.StandardButton.Yes).click()
+    assert backing_replies == [True]

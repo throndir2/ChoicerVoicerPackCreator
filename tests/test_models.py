@@ -58,6 +58,35 @@ def test_clone_gets_independent_identity() -> None:
     assert clone.to_dict() | {"id": original.id} == original.to_dict()
 
 
+@pytest.mark.parametrize("assignment", ["manual", "automatic", "excluded"])
+def test_speaker_assignment_and_matching_preference_survive_roundtrip_and_clone(assignment):
+    segment = Segment(1, 3, speaker_assignment=assignment)
+    project = PackProject(segments=[segment], auto_speaker_matching=False)
+    restored = PackProject.from_dict(project.to_dict())
+    assert restored.segments[0].speaker_assignment == assignment
+    assert restored.segments[0].clone().speaker_assignment == assignment
+    assert not restored.auto_speaker_matching
+
+
+@pytest.mark.parametrize("value", [None, True, "guess", []])
+def test_invalid_speaker_assignment_is_rejected(value):
+    with pytest.raises(ValueError, match="speaker assignment"):
+        Segment.from_dict({"start": 1, "end": 3, "speaker_assignment": value})
+
+
+@pytest.mark.parametrize("value", ["false", 0, None, []])
+def test_matching_preference_requires_boolean(value):
+    with pytest.raises(ValueError, match="boolean"):
+        PackProject.from_dict({"schema_version": 1, "auto_speaker_matching": value})
+
+
+def test_combining_automatic_names_never_promotes_them_to_manual_references():
+    first = Segment(1, 3, characters=["Alice"], speaker_assignment="automatic")
+    second = Segment(3, 5, characters=["Alice"])
+    project = PackProject(segments=[first, second])
+    assert project.combine_segments([first.id, second.id]).speaker_assignment == "automatic"
+
+
 def test_combine_segments_joins_in_timeline_order_and_preserves_unselected() -> None:
     first = Segment(1, 9, " First\nline ", ["Alice", "Bob"])
     second = Segment(2, 3, " \n ", ["Bob"])

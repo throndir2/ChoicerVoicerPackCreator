@@ -29,6 +29,7 @@ dependencies = [
   "onnxruntime==1.26.0",
   "numpy==2.4.6",
   "soundfile==0.13.1",
+  "kaldi-native-fbank==1.22.3",
   "flatbuffers==25.12.19",
 ]
 
