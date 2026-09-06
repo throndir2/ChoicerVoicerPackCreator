@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QSettings, Qt, QThread, Signal
-from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
 from shiboken6 import isValid
 
 from choicer_voicer_pack_creator.models import PackProject, Segment
@@ -14,6 +14,7 @@ from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
 from choicer_voicer_pack_creator.project_session import canonical_project_path
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.ui.main_window import MainWindow, WaveformWorker
+from choicer_voicer_pack_creator.ui.theme import APP_STYLESHEET
 
 
 class QuietMedia:
@@ -98,6 +99,45 @@ def test_tabs_keep_selection_range_and_zoom(workspace):
     assert first.mark_out_spin.value() == 5
     assert first.zoom_slider.value() == 35
     assert second.project.segments == []
+
+
+def test_fresh_native_layout_keeps_task_and_segment_rows_clickable(workspace, qtbot, tmp_path):
+    workspace.setStyleSheet(APP_STYLESHEET)
+    first = workspace.active_editor
+    first._set_project(PackProject(title="A"), None, True)
+    workspace.add_project(PackProject(title="B"), dirty=False)
+    editor = workspace.add_project(PackProject(
+        title="C", video_duration=10,
+        segments=[Segment(index, index + 0.5, f"Line {index}", ["Actor"]) for index in range(4)],
+    ), dirty=True)
+    jobs = [
+        workspace.job_manager.submit(first.session.id, "analysis", f"Task {index}", lambda _ctx: None)
+        for index in range(6)
+    ]
+    detail = QDialog(workspace)
+    workspace.tasks_panel.register_detail(jobs[-1].id, detail)
+    available = workspace.screen().availableGeometry()
+    workspace.resize(min(1500, available.width() - 40), min(850, available.height() - 80))
+    qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
+    QApplication.processEvents()
+    assert workspace.height() <= available.height()
+    for table in (workspace.tasks_panel.table, editor.segment_table):
+        assert table.viewport().height() >= 2 * table.verticalHeader().defaultSectionSize(), (
+            table.objectName(), table.size(), table.viewport().size(), workspace.size(), available
+        )
+        item = table.item(table.rowCount() - 1, 0)
+        table.scrollToItem(item)
+        rectangle = table.visualItemRect(item)
+        assert table.viewport().rect().contains(rectangle.center())
+        qtbot.mouseClick(table.viewport(), Qt.MouseButton.LeftButton, pos=rectangle.center())
+        assert table.currentRow() == table.rowCount() - 1
+    assert workspace.tasks_panel.detail_button.isEnabled()
+    qtbot.mouseClick(workspace.tasks_panel.detail_button, Qt.MouseButton.LeftButton)
+    assert detail.isVisible()
+    detail.close()
+    root = editor.editor_splitter.parentWidget()
+    assert root.grab().toImage().pixelColor(2, 2).name() == "#080d14"
+    assert workspace.grab().save(str(tmp_path / "native-readable-workspace.png"))
 
 
 def test_save_snapshot_cannot_clear_newer_edits(workspace, qtbot, tmp_path, monkeypatch):
@@ -346,6 +386,12 @@ def test_reopening_cancelled_pending_load_keeps_new_request_identity(
     workspace.open_path(path)
     old = workspace.active_editor
     qtbot.waitUntil(started[0].is_set)
+    assert old.session.loading
+    assert not old.action_save.isEnabled()
+    assert old.action_open.isEnabled()
+    assert not workspace.save_editor(old, destination=path)
+    assert original(path).title == "Saved document"
+    workspace._decisions[-1].accept()
     workspace.close_project_tab(workspace.tabs.indexOf(old))
     box = workspace._decisions[-1]
     button = next(b for b in box.buttons() if b.objectName() == "projectCloseCancelTasks")
@@ -365,6 +411,7 @@ def test_reopening_cancelled_pending_load_keeps_new_request_identity(
     qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
     assert new.project.title == "Saved document"
     assert not new.dirty
+    assert not new.session.loading and new.action_save.isEnabled()
 
 
 def test_new_edits_in_discarded_document_require_a_fresh_exit_decision(workspace, qtbot):

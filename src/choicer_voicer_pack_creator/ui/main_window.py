@@ -80,6 +80,7 @@ from choicer_voicer_pack_creator.ui.backing_dialog import BackingDialog
 from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
 from choicer_voicer_pack_creator.ui.export_dialog import ExportProgressDialog
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
+from choicer_voicer_pack_creator.ui.readable_table import ReadableTableWidget
 from choicer_voicer_pack_creator.ui.subtitles import SubtitleVideoWidget
 from choicer_voicer_pack_creator.ui.tasks_panel import TasksPanel
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
@@ -168,6 +169,8 @@ class ProjectEditor(QWidget):
         session: ProjectSession,
     ) -> None:
         super().__init__(workspace)
+        self.setObjectName("projectEditor")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.workspace = workspace
         self.session = session
         self._document_layout = QVBoxLayout(self)
@@ -414,6 +417,8 @@ class ProjectEditor(QWidget):
         self.addToolBar(toolbar)
 
         root = QWidget(self)
+        root.setObjectName("projectEditorContent")
+        root.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(10, 10, 10, 8)
         root_layout.setSpacing(8)
@@ -435,7 +440,7 @@ class ProjectEditor(QWidget):
 
         self.video_widget = SubtitleVideoWidget(left)
         self.video_widget.setObjectName("videoPreview")
-        self.video_widget.setMinimumHeight(320)
+        self.video_widget.setMinimumHeight(96)
         self.video_widget.setStyleSheet(
             "QGraphicsView#videoPreview { background: #000; border: 1px solid #26384d; }"
         )
@@ -615,7 +620,7 @@ class ProjectEditor(QWidget):
         segment_content = QWidget(self.segments_section)
         segment_layout = QVBoxLayout(segment_content)
         segment_layout.setContentsMargins(0, 0, 0, 0)
-        self.segment_table = QTableWidget(0, 6)
+        self.segment_table = ReadableTableWidget(0, 6)
         self.segment_table.setObjectName("segmentsTable")
         self.segment_table.setHorizontalHeaderLabels(
             ["#", "In", "Out", "Speaker(s)", "Line", "Audio"]
@@ -2681,8 +2686,21 @@ class ProjectEditor(QWidget):
         self.progress_bar.setRange(0, 0 if busy else 1)
         self.progress_bar.setValue(0 if busy else 1)
         self.progress_bar.setVisible(busy)
-        self.action_export.setEnabled(not busy)
+        self.action_export.setEnabled(not busy and not self.session.loading)
         self._update_combine_action()
+
+    def _set_loading(self, loading: bool) -> None:
+        self.session.loading = loading
+        self.editor_splitter.setEnabled(not loading)
+        for action in (
+            self.action_save, self.action_save_as, self.action_analyze, self.action_add,
+            self.action_split, self.action_delete, self.action_duplicate,
+        ):
+            action.setEnabled(not loading)
+        self.action_export.setEnabled(not loading and self._export_worker is None)
+        self._update_combine_action()
+        if loading:
+            self.action_combine.setEnabled(False)
 
     def _refresh_validation_label(self) -> None:
         errors = self.project.validate()
@@ -3002,7 +3020,7 @@ class MainWindow(QMainWindow):
                 return
         editor = self.add_project(PackProject(title=path.stem), dirty=False)
         self._opening_paths[key] = editor.session.id
-        editor.editor_splitter.setEnabled(False)
+        editor._set_loading(True)
 
         def load(_context):
             if path.is_dir():
@@ -3044,7 +3062,7 @@ class MainWindow(QMainWindow):
         def finished():
             if self._opening_paths.get(key) == editor.session.id:
                 self._opening_paths.pop(key)
-            editor.editor_splitter.setEnabled(True)
+            editor._set_loading(False)
         job.finished.connect(finished)
 
     def new_from_video(self, source: Path | None = None, *, auto_process: bool = True) -> None:
@@ -3056,7 +3074,7 @@ class MainWindow(QMainWindow):
         editor = self.add_project(PackProject(
             title=source.stem, authors=[getpass.getuser()],
         ), dirty=False)
-        editor.editor_splitter.setEnabled(False)
+        editor._set_loading(True)
         token = editor.session.source_token()
 
         def ready(info):
@@ -3075,7 +3093,7 @@ class MainWindow(QMainWindow):
         )
         job.completed.connect(ready)
         job.failed.connect(lambda message: self.notice("Could not open video", message))
-        job.finished.connect(lambda: editor.editor_splitter.setEnabled(True))
+        job.finished.connect(lambda: editor._set_loading(False))
 
     def new_from_youtube(self) -> None:
         editor = self.add_project(PackProject(title="YouTube import"), dirty=False)
@@ -3128,7 +3146,7 @@ class MainWindow(QMainWindow):
         try:
             reservation = self.reserve_project_save(editor.session.id, destination)
         except ValueError as error:
-            self.notice("Project is already open", str(error))
+            self.notice("Could not save project", str(error))
             return False
         snapshot, revision = editor.session.snapshot(), editor.session.revision
 
@@ -3169,6 +3187,8 @@ class MainWindow(QMainWindow):
 
     def reserve_project_save(self, project_id: str, destination: Path) -> str:
         editor = self.editor_for_project(project_id)
+        if editor.session.loading:
+            raise ValueError("Wait for this project to finish opening before saving it.")
         key = canonical_project_path(destination)
         owner = self._save_targets.get(key)
         if owner is None:
