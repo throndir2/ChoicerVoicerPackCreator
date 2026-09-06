@@ -5,15 +5,17 @@ import time
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QEvent, QPoint, QSettings, Qt, QThread, QUrl, Slot
+from PySide6.QtCore import QEvent, QPoint, QSettings, Qt, QThread, QTimer, QUrl, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QKeyEvent
 from PySide6.QtMultimedia import QMediaPlayer
-from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QMessageBox, QPushButton
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QLineEdit, QMessageBox, QPushButton
 from shiboken6 import isValid
 
+from choicer_voicer_pack_creator import __version__
 from choicer_voicer_pack_creator.exporter import ExportResult
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
+from choicer_voicer_pack_creator.ui.about_dialog import AboutDialog
 from choicer_voicer_pack_creator.ui.main_window import (
     ExportWorker,
     MainWindow,
@@ -66,7 +68,7 @@ def test_main_window_starts_with_empty_editor(qtbot) -> None:
 
 
 @pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
-def test_support_button_opens_browser_only_when_activated(
+def test_support_button_only_appears_in_help_about(
     qtbot, tmp_path: Path, monkeypatch, stylesheet: str
 ) -> None:
     urls: list[str] = []
@@ -82,50 +84,73 @@ def test_support_button_opens_browser_only_when_activated(
     window.setStyleSheet(stylesheet)
     window.resize(window.minimumSize())
     window.show()
-    button = window.support_button
-    assert window.tabs.cornerWidget(Qt.Corner.TopRightCorner) is button
-    assert button.isVisible() and button.isEnabled()
-    assert button.accessibleName() == "Buy Me a Coffee"
-    assert not button.icon().pixmap(button.iconSize()).isNull()
-    assert button.iconSize().height() == 40
+    assert window.tabs.cornerWidget(Qt.Corner.TopRightCorner) is None
+    assert window.tabs.tabBar().styleSheet() == ""
+    assert not window.findChildren(QPushButton, "coffeeSupport")
+    assert window.action_about in window.help_menu.actions()
     assert urls == []
     original = window.active_editor
-    assert button.mapTo(window, QPoint(0, button.height())).y() <= original.mapTo(
-        window, QPoint(0, 0)
-    ).y()
     original._set_project(PackProject(title="First pack"), None, mark_dirty=False)
     before = original.project.to_dict()
-    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
-    assert urls == ["https://www.buymeacoffee.com/throndir"]
+    another = window.add_project(PackProject(title="Another pack"), dirty=False)
+
+    def interact_with_about() -> None:
+        dialog = QApplication.activeModalWidget()
+        try:
+            assert isinstance(dialog, AboutDialog)
+            assert dialog.windowTitle() == "About Choicer Voicer Pack Creator"
+            text = "".join(label.text() for label in dialog.findChildren(QLabel))
+            assert __version__ in text
+            assert "THIRD_PARTY_NOTICES.md" in text
+            assert "Source media remains yours." in text
+            button = dialog.support_button
+            assert button.window() is dialog
+            assert button.isVisible() and button.isEnabled()
+            assert button.accessibleName() == "Buy Me a Coffee"
+            assert not button.icon().pixmap(button.iconSize()).isNull()
+            assert button.iconSize().height() == 40
+            if window.active_editor is original:
+                qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+            else:
+                button.setFocus()
+                qtbot.keyClick(button, Qt.Key.Key_Space)
+            assert dialog.isVisible()
+            qtbot.keyClick(dialog, Qt.Key.Key_Return)
+            assert not dialog.isVisible()
+        finally:
+            if isinstance(dialog, QDialog):
+                dialog.reject()
+
+    for count, editor in enumerate((original, another), start=1):
+        window.tabs.setCurrentWidget(editor)
+        QTimer.singleShot(0, interact_with_about)
+        window.action_about.trigger()
+        assert urls == ["https://www.buymeacoffee.com/throndir"] * count
+        assert not editor.dirty
+        assert not any(
+            button.isVisible() for button in window.findChildren(QPushButton, "coffeeSupport")
+        )
     assert original.project.to_dict() == before
-    assert not original.dirty
-
-    window.add_project(PackProject(title="Another pack"), dirty=False)
-    assert button.isVisible() and button.isEnabled()
-    button.setFocus()
-    qtbot.keyClick(button, Qt.Key.Key_Space)
-    assert urls == ["https://www.buymeacoffee.com/throndir"] * 2
-    assert not window.dirty
     assert window.tabs.count() == 2
-    assert len(window.findChildren(QPushButton, "coffeeSupport")) == 1
     window.close()
 
 
-def test_support_button_reports_browser_failure(qtbot, tmp_path: Path, monkeypatch) -> None:
+def test_about_support_button_reports_browser_failure(qtbot, monkeypatch) -> None:
     monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(lambda _url: False))
-    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
-    window = MainWindow(UnusedMedia(), settings=settings)  # type: ignore[arg-type]
-    qtbot.addWidget(window)
-    window.show()
-    qtbot.mouseClick(window.support_button, Qt.MouseButton.LeftButton)
-    assert len(window._decisions) == 1
-    message = window._decisions[0]
-    assert message.windowTitle() == "Could not open browser"
-    assert "https://www.buymeacoffee.com/throndir" in message.text()
-    assert message.windowModality() == Qt.WindowModality.NonModal
-    message.accept()
-    assert not window.dirty
-    window.close()
+    warnings = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda *args: warnings.append(args)
+    )
+    dialog = AboutDialog()
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.mouseClick(dialog.support_button, Qt.MouseButton.LeftButton)
+    assert warnings == [(
+        dialog, "Could not open browser",
+        "Open this URL manually:\nhttps://www.buymeacoffee.com/throndir",
+    )]
+    assert dialog.isVisible()
+    dialog.close()
 
 
 def test_timeline_separates_simultaneous_segments(qtbot) -> None:

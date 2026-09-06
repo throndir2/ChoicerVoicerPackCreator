@@ -25,9 +25,7 @@ from PySide6.QtGui import (
     QBrush,
     QCloseEvent,
     QColor,
-    QDesktopServices,
     QDropEvent,
-    QIcon,
     QKeySequence,
     QShortcut,
 )
@@ -66,7 +64,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from choicer_voicer_pack_creator import __version__
 from choicer_voicer_pack_creator.analysis import AnalysisSuggestion
 from choicer_voicer_pack_creator.diagnostics import diagnostic_event, diagnostic_exception
 from choicer_voicer_pack_creator.export_progress import ExportProgress, format_time
@@ -107,7 +104,6 @@ from choicer_voicer_pack_creator.ui.youtube_dialog import YouTubeDialog
 
 VIDEO_EXTENSIONS = (".mp4", ".mkv", ".mov", ".webm", ".ogv", ".avi")
 VIDEO_FILE_FILTER = f"Video files ({' '.join('*' + ext for ext in VIDEO_EXTENSIONS)});;All files (*)"
-SUPPORT_URL = "https://www.buymeacoffee.com/throndir"
 
 
 class WaveformWorker(JobWorker):
@@ -2810,23 +2806,9 @@ class ProjectEditor(QWidget):
             )
 
     def show_about(self) -> None:
-        QMessageBox.about(
-            self,
-            "About Choicer Voicer Pack Creator",
-            f"<h3>Choicer Voicer Pack Creator {__version__}</h3>"
-            "<p>An unofficial community desktop editor for creating, importing, and validating "
-            "Choicer Voicer dub packs.</p>"
-            "<p>The desktop interface uses PySide6/Qt. Windows bundles include an unmodified "
-            "FFmpeg LGPL shared build for media conversion; its license, provenance, and source "
-            "links are in <code>THIRD_PARTY_NOTICES.md</code>.</p>"
-            "<p>Godot is <b>not</b> the GUI framework or an end-user dependency. Release tests use "
-            "Godot's native <code>ConfigFile</code> parser because The Choicer Voicer is a Godot "
-            "application and reads pack metadata with that parser.</p>"
-            "<p>Optional video analysis uses deterministic audio-energy scanning and can download "
-            "a pinned local whisper.cpp CPU runtime/model. No media is uploaded. Transcripts and "
-            "timestamps are editable suggestions, never correctness claims.</p>"
-            "<p>Project files store paths and edit decisions only. Source media remains yours.</p>",
-        )
+        from choicer_voicer_pack_creator.ui.about_dialog import AboutDialog
+
+        AboutDialog(self).exec()
 
     def show_mcp_help(self) -> None:
         from choicer_voicer_pack_creator.ui.mcp_help_dialog import McpHelpDialog
@@ -2888,22 +2870,6 @@ class MainWindow(QMainWindow):
         self.tabs.setMovable(True)
         self.tabs.currentChanged.connect(self._tab_changed)
         self.tabs.tabCloseRequested.connect(self.close_project_tab)
-        self.support_button = QPushButton(self.tabs)
-        self.support_button.setObjectName("coffeeSupport")
-        self.support_button.setAccessibleName("Buy Me a Coffee")
-        self.support_button.setToolTip(f"Support development - opens in your browser:\n{SUPPORT_URL}")
-        self.support_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.support_button.setIcon(QIcon(str(
-            Path(__file__).resolve().parent.parent / "resources" / "buy-me-a-coffee.png"
-        )))
-        self.support_button.setIconSize(QSize(144, 40))
-        self.support_button.setFixedSize(150, 46)
-        self.support_button.clicked.connect(self.open_support_page)
-        self.tabs.setCornerWidget(self.support_button, Qt.Corner.TopRightCorner)
-        # Qt sizes the corner area from the tabs' size hints, not the bar's minimum height.
-        self.tabs.tabBar().setStyleSheet(
-            f"QTabBar::tab {{ min-height: {self.support_button.height()}px; }}"
-        )
         self.setCentralWidget(self.tabs)
         self.setWindowTitle("Choicer Voicer Pack Creator")
         self.resize(1500, 950)
@@ -2931,12 +2897,6 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self.open_path(initial_path))
         if recovery_store:
             QTimer.singleShot(0, self.restore_workspace)
-
-    def open_support_page(self) -> None:
-        opened = QDesktopServices.openUrl(QUrl(SUPPORT_URL))
-        diagnostic_event("support_page_opened", url=SUPPORT_URL, opened=opened)
-        if not opened:
-            self.notice("Could not open browser", f"Open this URL manually:\n{SUPPORT_URL}")
 
     def __getattr__(self, name: str):
         editor = self.__dict__.get("_active_editor")

@@ -2,7 +2,7 @@
 
 ## Buy Me a Coffee button
 
-The support link uses Buy Me a Coffee's
+The support link in **Help > About** uses Buy Me a Coffee's
 [official yellow button image](https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png).
 An unmodified copy is bundled at `resources/buy-me-a-coffee.png` so the app can display it
 without contacting the image host. Clicking the button opens the support page in the user's browser.
