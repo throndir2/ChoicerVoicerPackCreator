@@ -101,8 +101,8 @@ finished executable. It does not require a system FFmpeg installation. Use
 The finished outputs are:
 
 ```text
-dist/v0.9.0/portable-<build-id>/Choicer Voicer Pack Creator/
-dist/v0.9.0/Choicer-Voicer-Pack-Creator-0.9.0-Windows-x64.zip
+dist/v1.0.0/portable-<build-id>/Choicer Voicer Pack Creator/
+dist/v1.0.0/Choicer-Voicer-Pack-Creator-1.0.0-Windows-x64.zip
 ```
 
 The script prints the exact generated application-folder path. Each rebuild uses a new path to avoid
@@ -131,7 +131,7 @@ source.
 
 Portable Windows builds check the public
 [GitHub releases](https://github.com/throndir2/ChoicerVoicerPackCreator/releases) in the background
-on startup. **Prereleases are included by default**, since the current releases use that channel.
+on startup. **Prereleases are included by default**, alongside stable releases.
 The **Help** menu provides **Check for Updates**, **Check for Updates on Startup**, and
 **Include Prereleases**. An offline or rate-limited automatic check reports its failure in the
 status bar without interrupting your work. Checks contact GitHub, not your media or project files.
@@ -595,8 +595,8 @@ with another compatible pair.
 .\Build-Portable.ps1
 ```
 
-The Windows application folder is written below `dist/v0.9.0/portable-<build-id>/`, with a
-shareable `Choicer-Voicer-Pack-Creator-0.9.0-Windows-x64.zip` beside it. The first build downloads
+The Windows application folder is written below `dist/v1.0.0/portable-<build-id>/`, with a
+shareable `Choicer-Voicer-Pack-Creator-1.0.0-Windows-x64.zip` beside it. The first build downloads
 about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. The stable sharing ZIP is not
 replaced until both the application folder and a clean ZIP extraction pass packaged smoke tests.
 Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or
