@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "choicer-voicer-pack-creator"
-version = "0.9.0"
+version = "1.0.0"
 description = "A visual desktop editor for creating and modifying Choicer Voicer dub packs."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Choicer Voicer Pack Creator contributors" }]
 keywords = ["choicer-voicer", "dub", "voice-acting", "video", "editor"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Win32 (MS Windows)",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
@@ -25,6 +25,10 @@ dependencies = [
   "yt-dlp==2026.8.19",
   "yt-dlp-ejs==0.8.0",
   "deno==2.9.6",
+  "onnxruntime==1.26.0",
+  "numpy==2.4.6",
+  "soundfile==0.13.1",
+  "flatbuffers==25.12.19",
 ]
 
 [project.optional-dependencies]

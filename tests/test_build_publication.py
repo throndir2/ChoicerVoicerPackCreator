@@ -19,6 +19,16 @@ finally:
     sys.path.pop(0)
 
 
+def test_separation_dependency_licenses_are_copied_from_installed_wheels(tmp_path):
+    BUILD_SCRIPT.copy_separation_licenses(tmp_path)
+    for package in BUILD_SCRIPT.SEPARATION_PACKAGES:
+        assert any(path.is_file() for path in (tmp_path / "licenses" / package).rglob("*"))
+    assert any("thirdpartynotices" in path.name.casefold()
+               for path in (tmp_path / "licenses" / "onnxruntime").rglob("*"))
+    assert any("copying" in path.name.casefold()
+               for path in (tmp_path / "licenses" / "soundfile").rglob("*"))
+
+
 def _prepare_candidate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path]:
     distribution = tmp_path / "dist" / "vtest"
     application = distribution / "portable-build" / "Choicer Voicer Pack Creator"

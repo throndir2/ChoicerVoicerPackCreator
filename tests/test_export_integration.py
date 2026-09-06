@@ -116,6 +116,8 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
     assert result.validation["status"] == "passed"
     assert result.validation["clip_count"] == 2
     assert result.validation["file_count"] == 10
+    assert any("without backing music" in warning for warning in result.warnings)
+    assert media.audio_peak_dbfs(result.pack_path / "_backing_track.mp3") == float("-inf")
     metadata = read_config(result.pack_path / "001_Alice.txt")["data"]
     assert metadata["dub_timestamps"] == [0.1]
     assert metadata["caption"] == "First line"
@@ -152,11 +154,25 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
     assert not any("compressing file" in message for message in messages)
     assert modified.zip_path is None
     assert modified.validation["status"] == "passed"
+    assert any("without backing music" in warning for warning in modified.warnings)
     assert read_config(modified.pack_path / "001_Alice.txt")["data"]["caption"] == (
         "Edited first line"
     )
     assert file_hash(modified.pack_path / "001_Alice.mp3") == original_audio_hash
     assert file_hash(modified.pack_path / "001_Alice.png") == original_image_hash
+
+    recovered = PackImporter(media).import_zip(result.zip_path, tmp_path / "recovered").project
+    dialogue_before = [segment.to_dict() for segment in recovered.segments]
+    recovered_backing = tmp_path / "recovered-backing.mp3"
+    media.convert_audio(source, recovered_backing, mono=False, duration=recovered.video_duration)
+    recovered.backing_track_path = str(recovered_backing)
+    repaired = PackExporter(media).export(recovered, tmp_path / "repaired-output")
+    assert [segment.to_dict() for segment in recovered.segments] == dialogue_before
+    assert media.decoded_audio_stats(repaired.pack_path / "_backing_track.mp3").has_activity
+    assert not repaired.warnings
+    assert file_hash(repaired.pack_path / "dub_video.ogv") == file_hash(result.pack_path / "dub_video.ogv")
+    for name in ("001_Alice.mp3", "001_Alice.png", "001_Alice.txt", "002_Bob.txt"):
+        assert file_hash(repaired.pack_path / name) == file_hash(result.pack_path / name)
 
     project.combine_segments([segment.id for segment in reversed(project.segments)])
     combined = PackExporter(media).export(project, tmp_path / "combined-output")
@@ -169,6 +185,23 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path) -> None:
     assert combined_metadata["dub_timestamps"] == [0.1]
     combined_duration = media.probe_audio_duration(combined.pack_path / "001_Alice.mp3")
     assert combined_duration == pytest.approx(1.55 - 0.2 + 0.1 + 0.15, abs=0.05)
+
+
+@pytest.mark.integration
+def test_backing_peak_checks_both_channels_without_mono_cancellation(tmp_path: Path) -> None:
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg is not available")
+    media = MediaTools()
+    stereo = tmp_path / "opposite-channels.wav"
+    media.run(
+        [
+            media.ffmpeg, "-v", "error", "-f", "lavfi", "-i",
+            "aevalsrc=0.1*sin(2*PI*440*t)|-0.1*sin(2*PI*440*t):s=44100:d=0.2",
+            str(stereo),
+        ],
+        "Creating stereo backing fixture",
+    )
+    assert media.audio_peak_dbfs(stereo) == pytest.approx(-20, abs=0.02)
 
 
 @pytest.mark.integration

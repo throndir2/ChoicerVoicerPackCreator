@@ -67,6 +67,7 @@ from choicer_voicer_pack_creator.ui.analysis_dialog import (
     open_diagnostic_logs,
     save_diagnostic_logs,
 )
+from choicer_voicer_pack_creator.ui.backing_dialog import BackingDialog
 from choicer_voicer_pack_creator.ui.collapsible import CollapsibleSection
 from choicer_voicer_pack_creator.ui.export_dialog import ExportProgressDialog
 from choicer_voicer_pack_creator.ui.subtitles import SubtitleVideoWidget
@@ -184,6 +185,7 @@ class MainWindow(QMainWindow):
         self._waveform_request_id = 0
         self._export_worker: ExportWorker | None = None
         self._export_dialog: ExportProgressDialog | None = None
+        self._backing_dialog: BackingDialog | None = None
         self._restoring_layout = False
         self._layout_restored = False
         self._range_edit_record: tuple[str, float, float, bool] | None = None
@@ -233,6 +235,8 @@ class MainWindow(QMainWindow):
         self.action_import = QAction("Import Existing Pack…", self)
         self.action_import.setShortcut(QKeySequence("Ctrl+I"))
         self.action_import.triggered.connect(self.import_pack)
+        self.action_import_zip = QAction("Import Pack ZIP...", self)
+        self.action_import_zip.triggered.connect(self.import_pack_zip)
         self.action_save = QAction("Save Project", self)
         self.action_save.setShortcut(QKeySequence.StandardKey.Save)
         self.action_save.triggered.connect(self.save_project)
@@ -249,6 +253,8 @@ class MainWindow(QMainWindow):
         self.action_analyze = QAction("Analyze Video && Suggest Segments…", self)
         self.action_analyze.setShortcut(QKeySequence("Ctrl+Shift+R"))
         self.action_analyze.triggered.connect(lambda: self.open_analysis_dialog())
+        self.action_backing = QAction("Generate Backing Track...", self)
+        self.action_backing.triggered.connect(lambda: self.generate_backing_track())
 
         self.action_add = QAction("Add Segment", self)
         self.action_add.setShortcut(QKeySequence("Ctrl+Shift+A"))
@@ -274,7 +280,10 @@ class MainWindow(QMainWindow):
 
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addActions(
-            [self.action_new, self.action_youtube, self.action_open, self.action_import]
+            [
+                self.action_new, self.action_youtube, self.action_open,
+                self.action_import, self.action_import_zip,
+            ]
         )
         file_menu.addSeparator()
         file_menu.addActions([self.action_save, self.action_save_as, self.action_restore_previous])
@@ -291,6 +300,7 @@ class MainWindow(QMainWindow):
         )
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self.action_analyze)
+        tools_menu.addAction(self.action_backing)
         help_menu = self.menuBar().addMenu("&Help")
         self.updater = UpdateController(self, help_menu)
         self.action_logs = help_menu.addAction("Open Diagnostic Logs...")
@@ -468,6 +478,12 @@ class MainWindow(QMainWindow):
             self.choose_backing_track, self.clear_backing_track
         )
         project_form.addRow("Backing", backing_row)
+        self.generate_backing_button = QPushButton("Generate backing...")
+        self.generate_backing_button.setToolTip(
+            "Create music/effects backing from the video without changing dialogue or prompt files."
+        )
+        self.generate_backing_button.clicked.connect(lambda: self.generate_backing_track())
+        project_form.addRow("", self.generate_backing_button)
         self.icon_path_label, icon_row = self._path_controls(self.choose_icon, self.clear_icon)
         project_form.addRow("Icon", icon_row)
 
@@ -975,9 +991,7 @@ class MainWindow(QMainWindow):
         self._set_project(project, None, mark_dirty=True)
         diagnostic_event("video_import_ready", source=source, duration_seconds=info.duration)
         self.statusBar().showMessage(f"Loaded {source.name}. Mark a range and add the first segment.")
-        QTimer.singleShot(
-            0, lambda: self.open_analysis_dialog(initial_scan=True, auto_start=True)
-        )
+        QTimer.singleShot(0, lambda: self._finish_new_import(project))
 
     def new_from_youtube(self) -> None:
         diagnostic_event("youtube_import_dialog_requested")
@@ -1014,9 +1028,16 @@ class MainWindow(QMainWindow):
             diagnostic_event("youtube_import_notes_shown", warnings=result.warnings)
             QMessageBox.warning(self, "YouTube import notes", "\n\n".join(result.warnings))
         diagnostic_event("youtube_analysis_handoff_scheduled")
-        QTimer.singleShot(
-            0, lambda: self.open_analysis_dialog(initial_scan=True, auto_start=True)
-        )
+        QTimer.singleShot(0, lambda: self._finish_new_import(project))
+
+    def _finish_new_import(self, project: PackProject) -> None:
+        if self.project is not project:
+            diagnostic_event("new_import_handoff_skipped", reason="project_changed")
+            return
+        if not project.backing_track_path:
+            self.generate_backing_track()
+        if self.project is project:
+            self.open_analysis_dialog(initial_scan=True, auto_start=True)
 
     def open_analysis_dialog(
         self, *, initial_scan: bool = False, auto_start: bool = False
@@ -1135,16 +1156,25 @@ class MainWindow(QMainWindow):
 
     def open_path(self, path: Path) -> None:
         try:
-            if path.is_dir():
-                result = self.importer.import_folder(path)
+            if path.is_dir() or path.suffix.casefold() == ".zip":
+                result = (
+                    self.importer.import_folder(path) if path.is_dir()
+                    else self.importer.import_zip(
+                        path, self.analysis_data_root.parent / "imported-packs",
+                    )
+                )
                 self._set_project(result.project, None, mark_dirty=True)
                 self._show_import_warnings(result.warnings)
+                self._show_pack_recovery_hint()
             else:
                 project = ProjectStore.load(path)
                 self._set_project(project, path.resolve(), mark_dirty=False)
                 self.settings.setValue("lastProjectDir", str(path.resolve().parent))
         except Exception as error:
-            previous = ProjectStore.previous_path(path) if not path.is_dir() else None
+            previous = (
+                ProjectStore.previous_path(path)
+                if not path.is_dir() and path.suffix.casefold() != ".zip" else None
+            )
             if previous and previous.is_file():
                 answer = QMessageBox.question(
                     self,
@@ -1189,8 +1219,30 @@ class MainWindow(QMainWindow):
         self.settings.setValue("lastPackDir", str(Path(folder).parent))
         self._set_project(result.project, None, mark_dirty=True)
         self._show_import_warnings(result.warnings)
+        self._show_pack_recovery_hint()
+
+    def import_pack_zip(self) -> None:
+        if not self._maybe_save():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import an existing Choicer Voicer pack ZIP",
+            str(self.settings.value("lastPackDir", "")),
+            "Choicer Voicer packs (*.zip)",
+        )
+        if not path:
+            return
+        self.settings.setValue("lastPackDir", str(Path(path).parent))
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self.open_path(Path(path))
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _show_pack_recovery_hint(self) -> None:
         self.statusBar().showMessage(
-            f"Imported {len(result.project.segments)} segments. Existing prompt media will be preserved."
+            f"Imported {len(self.project.segments)} segments with existing prompt media. "
+            "Missing music? Use Generate backing, then Save Project As and export to a new location."
         )
 
     def save_project(self, save_as: bool = False) -> bool:
@@ -1263,8 +1315,7 @@ class MainWindow(QMainWindow):
             self.readme_edit.setPlainText(project.readme)
             self.video_path_label.setText(project.video_path or "No video loaded")
             self.video_path_label.setToolTip(project.video_path)
-            self.backing_path_label.setText(Path(project.backing_track_path).name if project.backing_track_path else "None")
-            self.backing_path_label.setToolTip(project.backing_track_path)
+            self._refresh_backing_controls()
             self.icon_path_label.setText(Path(project.icon_path).name if project.icon_path else "Generated from video")
             self.icon_path_label.setToolTip(project.icon_path)
             self.head_pad_spin.setValue(project.head_padding)
@@ -2260,15 +2311,82 @@ class MainWindow(QMainWindow):
         )
         if path:
             self.project.backing_track_path = str(Path(path).resolve())
-            self.backing_path_label.setText(Path(path).name)
-            self.backing_path_label.setToolTip(path)
+            self._refresh_backing_controls()
             self._set_dirty(True)
 
     def clear_backing_track(self) -> None:
         self.project.backing_track_path = ""
-        self.backing_path_label.setText("None")
-        self.backing_path_label.setToolTip("")
+        self._refresh_backing_controls()
         self._set_dirty(True)
+
+    def _refresh_backing_controls(self) -> None:
+        path = self.project.backing_track_path
+        self.backing_path_label.setText(Path(path).name if path else "None (no music)")
+        self.backing_path_label.setToolTip(path or "Generate backing to keep music under recordings.")
+        self.generate_backing_button.setText("Regenerate backing..." if path else "Generate backing...")
+
+    def generate_backing_track(self) -> bool:
+        if self._backing_dialog is not None or self._export_worker is not None:
+            QMessageBox.information(
+                self, "Media operation running", "Wait for the current media operation to finish.",
+            )
+            return False
+        self._commit_editors()
+        project = self.project
+        source = Path(project.video_path)
+        if not project.video_path or not source.is_file():
+            QMessageBox.warning(
+                self, "Source video needed",
+                "Open or relink the source video first. For an exported pack, import its folder "
+                "or ZIP to use the included dub_video.ogv without changing your dialogue.",
+            )
+            return False
+        if project.backing_track_path:
+            answer = QMessageBox.question(
+                self,
+                "Regenerate backing track?",
+                "Generate new backing from the video? Only this project's backing selection will "
+                "change after successful generation. The existing backing file, captions, speakers, "
+                "timings and prompt files will be preserved.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+        self.player.pause()
+        try:
+            dialog = BackingDialog(
+                self.media, source.resolve(), self.analysis_data_root.parent / "backing", self,
+            )
+            self._backing_dialog = dialog
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            result = dialog.backing_path
+        except Exception as error:
+            diagnostic_exception("backing_generation_failed", error)
+            QMessageBox.critical(self, "Could not generate backing", str(error))
+            return False
+        finally:
+            self._backing_dialog = None
+        if not accepted or result is None:
+            self.statusBar().showMessage(
+                "Backing was not changed. Your dialogue is safe; generate backing later from Tools."
+            )
+            return False
+        if self.project is not project or Path(project.video_path).resolve() != source.resolve():
+            diagnostic_event("backing_result_not_applied", reason="source_or_project_changed")
+            QMessageBox.warning(
+                self, "Project changed",
+                f"The source project changed during generation. Backing was saved at {result}, "
+                "but was not attached to the new project.",
+            )
+            return False
+        project.backing_track_path = str(result)
+        self._refresh_backing_controls()
+        self._set_dirty(True)
+        self.statusBar().showMessage(
+            "Backing generated; dialogue and prompts preserved. Save the project, then re-export."
+        )
+        return True
 
     def choose_icon(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -2374,6 +2492,8 @@ class MainWindow(QMainWindow):
                 "Fix these items before exporting:\n\n" + "\n".join(f"• {item}" for item in errors),
             )
             return
+        if not self._confirm_backing_export():
+            return
         destination = QFileDialog.getExistingDirectory(
             self,
             "Choose export location",
@@ -2413,6 +2533,25 @@ class MainWindow(QMainWindow):
         dialog.show()
         worker.start()
 
+    def _confirm_backing_export(self) -> bool:
+        if self.project.backing_track_path:
+            return True
+        box = QMessageBox(self)
+        box.setWindowTitle("This pack has no backing music")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(
+            "Without a backing track, dubbed playback will contain only the players' recordings. "
+            "Generate music/effects backing from the video before exporting?"
+        )
+        generate = box.addButton("Generate backing", QMessageBox.ButtonRole.AcceptRole)
+        silent = box.addButton("Export without music", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(generate)
+        box.exec()
+        if box.clickedButton() is generate:
+            return self.generate_backing_track()
+        return box.clickedButton() is silent
+
     @Slot(object)
     def _export_completed(self, value: object) -> None:
         result = value
@@ -2450,10 +2589,12 @@ class MainWindow(QMainWindow):
             self.action_youtube,
             self.action_open,
             self.action_import,
+            self.action_import_zip,
             self.action_save,
             self.action_save_as,
             self.action_restore_previous,
             self.action_analyze,
+            self.action_backing,
             self.action_export,
             self.action_add,
             self.action_split,
@@ -2562,6 +2703,10 @@ class MainWindow(QMainWindow):
             return
         if self._export_worker is not None:
             QMessageBox.information(self, "Export running", "Wait for the current export to finish.")
+            event.ignore()
+            return
+        if self._backing_dialog is not None:
+            self._backing_dialog.reject()
             event.ignore()
             return
         if not self._maybe_save():

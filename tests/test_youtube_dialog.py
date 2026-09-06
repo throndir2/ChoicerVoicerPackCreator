@@ -151,10 +151,15 @@ def test_main_window_loads_download_and_starts_caption_comparison(
     window = main_window.MainWindow(UnusedMedia(), analysis_data_root=tmp_path / "analysis")
     qtbot.addWidget(window)
     scans = []
+    backing_runs = []
+    monkeypatch.setattr(
+        window, "generate_backing_track", lambda: backing_runs.append(window.project.video_path),
+    )
     monkeypatch.setattr(window, "open_analysis_dialog", lambda **kwargs: scans.append(kwargs))
     window.new_from_youtube()
     qtbot.waitUntil(lambda: bool(scans))
     assert scans == [{"initial_scan": True, "auto_start": True}]
+    assert backing_runs == [str(result.video_path)]
     assert window.project.video_path == str(result.video_path)
     assert window.project.source_captions == result.captions
     assert window.project.source_url == result.url

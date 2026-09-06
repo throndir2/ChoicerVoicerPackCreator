@@ -882,6 +882,7 @@ def test_new_local_video_starts_whisper_automatically(qtbot, tmp_path, monkeypat
     window = MainWindow(media, analysis_data_root=tmp_path / "analysis")
     qtbot.addWidget(window)
     scans = []
+    monkeypatch.setattr(window, "generate_backing_track", lambda: False)
     monkeypatch.setattr(window, "open_analysis_dialog", lambda **kwargs: scans.append(kwargs))
     window.new_from_video()
     qtbot.waitUntil(lambda: bool(scans))

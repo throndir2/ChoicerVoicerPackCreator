@@ -378,6 +378,9 @@ class ExportMedia:
     def create_silent_backing(self, destination, _duration):
         destination.write_bytes(b"audio")
 
+    def audio_peak_dbfs(self, _path):
+        return float("-inf")
+
 
 def test_pack_export_and_import_report_counts_not_metadata(tmp_path: Path) -> None:
     source = tmp_path / "source.ogv"
