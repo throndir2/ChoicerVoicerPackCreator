@@ -55,6 +55,34 @@ def test_projects_run_concurrently_and_results_reach_qt_thread(qtbot, manager):
     assert first.record.detail == ("stage", 3)
 
 
+def test_priority_orders_waiting_work_without_preempting_running_jobs(qtbot, manager):
+    manager.limits["cpu"] = 1
+    started, release = threading.Event(), threading.Event()
+    order = []
+
+    def running(_context):
+        started.set()
+        release.wait(5)
+        order.append("running")
+
+    manager.submit("one", "test", "Already running", running)
+    qtbot.waitUntil(started.is_set)
+    for name, priority in (("backing", -10), ("voices", 10), ("transcript", 20), ("second", 10)):
+        manager.submit(
+            "one", "test", name, lambda _context, name=name: order.append(name), priority=priority,
+        )
+    assert order == []
+    release.set()
+    finish(qtbot, manager)
+    assert order == ["running", "transcript", "voices", "second", "backing"]
+
+
+@pytest.mark.parametrize("priority", [True, 1.5, "high"])
+def test_invalid_priority_rejected(manager, priority):
+    with pytest.raises(ValueError, match="priority"):
+        manager.submit("one", "test", "Invalid", lambda _context: None, priority=priority)
+
+
 def test_same_destination_excludes_alias_and_nested_path(qtbot, manager, tmp_path):
     release = threading.Event()
     started = threading.Event()

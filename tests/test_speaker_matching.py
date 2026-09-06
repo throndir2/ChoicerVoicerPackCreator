@@ -25,6 +25,8 @@ from choicer_voicer_pack_creator.speaker_matching import (
     SpeakerMatchingCancelled,
     SpeakerMatchingError,
     SpeakerMatchingManager,
+    SpeakerPreparationRequired,
+    SpeakerPreparationResult,
     choose_matches,
 )
 
@@ -90,6 +92,36 @@ def run(engine, **kwargs):
     )
 
 
+def prepare(engine, **kwargs):
+    return engine.manager.prepare(
+        kwargs.pop("media", engine.media), kwargs.pop("clips", engine.clips),
+        allow_download=kwargs.pop("allow_download", False),
+        progress=kwargs.pop("progress", lambda *_: None),
+        cancelled=kwargs.pop("cancelled", lambda: False), **kwargs,
+    )
+
+
+def match_cached(engine, **kwargs):
+    return engine.manager.match_cached(
+        kwargs.pop("media", engine.media), kwargs.pop("clips", engine.clips),
+        progress=kwargs.pop("progress", lambda *_: None),
+        cancelled=kwargs.pop("cancelled", lambda: False), **kwargs,
+    )
+
+
+def forbid_preparation(engine, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Cached matching must not verify a model, decode, infer, or write caches")
+
+    for module, names in (
+        (speaker, ("verify_model", "run_process_worker")),
+        (worker, ("verify_model", "load_session", "decode_clip", "source_duration", "embed_clips")),
+        (engine.manager, ("_ensure_model", "_write_cache")),
+    ):
+        for name in names:
+            monkeypatch.setattr(module, name, forbidden)
+
+
 def test_single_reference_requires_strong_absolute_evidence():
     clips = (clip("reference", "Alice"), clip("same"), clip("unknown"), clip("weak"))
     result = choose_matches(clips, {
@@ -147,6 +179,90 @@ def test_cache_reuses_signatures_but_recomputes_labels(engine):
     assert not list(engine.source.parent.glob("*.json"))
 
 
+@pytest.mark.parametrize("characters", [(), ("Alice",), ("Alice", "Bob"), (" ",)])
+def test_preparation_is_name_independent_and_runs_without_references(engine, characters):
+    clips = tuple(replace(item, characters=characters) for item in engine.clips)
+    result = prepare(engine, clips=clips)
+    assert isinstance(result, SpeakerPreparationResult)
+    assert result.sources == SourceSnapshot.capture([engine.source])
+    assert (result.prepared, result.cached, result.skipped, result.skip_reasons) == (2, 0, 0, ())
+    assert len(engine.calls) == 1
+    assert all(not item.characters for _, item in engine.calls[0])
+    assert len(list(engine.manager.cache_directory.glob("*.json"))) == 2
+    assert not list((engine.manager.data_root / "speaker-jobs").iterdir())
+
+
+def test_prepared_draft_ranges_are_reused_for_current_ids_and_names_without_model(
+    engine, monkeypatch,
+):
+    drafts = tuple(
+        replace(item, segment_id=f"draft-{item.segment_id}", characters=())
+        for item in engine.clips
+    )
+    engine.signatures.update({
+        draft.segment_id: engine.signatures[item.segment_id]
+        for draft, item in zip(drafts, engine.clips, strict=True)
+    })
+    prepare(engine, clips=drafts)
+    engine.manager.model_path.unlink()
+    forbid_preparation(engine, monkeypatch)
+    cache_files = {path: path.read_bytes() for path in engine.manager.cache_directory.glob("*.json")}
+    actual = (
+        replace(engine.clips[0], segment_id="actual-reference", characters=("Bob",)),
+        replace(engine.clips[1], segment_id="actual-target"),
+    )
+    result = match_cached(engine, clips=actual, media=object())
+    assert [(match.segment_id, match.character) for match in result.matches] == [
+        ("actual-target", "Bob"),
+    ]
+    assert (result.examined, result.cached, result.skipped) == (1, 2, 0)
+    assert result.sources == SourceSnapshot.capture([engine.source])
+    assert run(engine, clips=actual).matches == result.matches
+    prepared = prepare(engine, clips=actual, media=object())
+    assert (prepared.prepared, prepared.cached, prepared.skipped) == (2, 2, 0)
+    assert cache_files == {
+        path: path.read_bytes() for path in engine.manager.cache_directory.glob("*.json")
+    }
+    assert len(engine.calls) == 1
+    assert not list((engine.manager.data_root / "speaker-jobs").iterdir())
+
+
+@pytest.mark.parametrize("indices", [(0, 1), (0,), (1,)])
+def test_cache_only_miss_explicitly_requires_preparation_without_model_or_job(
+    engine, monkeypatch, indices,
+):
+    engine.manager.model_path.unlink()
+    forbid_preparation(engine, monkeypatch)
+    clips = tuple(engine.clips[index] for index in indices)
+    with pytest.raises(SpeakerPreparationRequired, match="preparation") as failure:
+        match_cached(engine, clips=clips, media=object())
+    assert failure.value.segment_ids == tuple(item.segment_id for item in clips)
+    assert not engine.calls
+    assert not engine.manager.cache_directory.exists()
+    assert not (engine.manager.data_root / "speaker-jobs").exists()
+
+
+def test_empty_and_short_preparation_needs_no_model_or_media_tools(engine, monkeypatch):
+    engine.manager.model_path.unlink()
+    forbid_preparation(engine, monkeypatch)
+    short = replace(engine.clips[0], end=0.4, characters=("Alice", "Bob"))
+    result = prepare(engine, clips=(short,), media=object())
+    assert (result.prepared, result.cached, result.skipped) == (0, 0, 1)
+    assert result.skip_reasons == (("reference", "short"),)
+    empty = prepare(engine, clips=(), media=object())
+    assert (empty.prepared, empty.cached, empty.skipped) == (0, 0, 0)
+    assert not (engine.manager.data_root / "speaker-jobs").exists()
+
+
+def test_preparation_deduplicates_identical_ranges(engine):
+    duplicate = replace(engine.clips[1], segment_id="duplicate", characters=("Bob",))
+    result = prepare(engine, clips=(*engine.clips, duplicate))
+    assert result.prepared == 3 and result.cached == 0
+    assert len(engine.calls[0]) == 2
+    assert prepare(engine, clips=(*engine.clips, duplicate)).cached == 3
+    assert len(engine.calls) == 1
+
+
 @pytest.mark.parametrize("short_index", [0, 1])
 def test_known_short_reference_or_target_needs_no_model_or_inference(engine, short_index):
     engine.manager.model_path.unlink()
@@ -182,6 +298,12 @@ def test_cache_identity_invalidates_stale_signatures(engine, monkeypatch, change
         monkeypatch.setattr(speaker, "MODEL_SHA256", "0" * 64)
         engine.manager.model_path.parent.mkdir(parents=True)
         engine.manager.model_path.write_bytes(b"valid model fixture")
+    with pytest.raises(SpeakerPreparationRequired) as failure:
+        match_cached(engine, clips=clips)
+    assert failure.value.segment_ids == (
+        ("target",) if change == "range" else ("reference", "target")
+    )
+    assert len(engine.calls) == 1
     result = run(engine, clips=clips)
     assert len(engine.calls) == 2
     assert result.cached == (1 if change == "range" else 0)
@@ -209,6 +331,11 @@ def test_corrupt_cache_is_ignored_and_recomputed(engine, damage):
         else:
             value["record"]["embedding"][0] = float("nan")
         cache.write_text(json.dumps(value))
+    damaged = cache.read_bytes()
+    with pytest.raises(SpeakerPreparationRequired):
+        match_cached(engine)
+    assert cache.read_bytes() == damaged
+    assert len(engine.calls) == 1
     result = run(engine)
     assert result.cached == 1 and len(engine.calls) == 2
     assert result.matches[0].character == "Alice"
@@ -276,9 +403,10 @@ def test_real_model_verifier_checks_size_hash_and_cancellation(tmp_path, monkeyp
         speaker.verify_model(path, lambda: True)
 
 
-def test_cancelled_operation_and_worker_leave_no_partial_result(engine, monkeypatch):
+@pytest.mark.parametrize("operation", [run, prepare])
+def test_cancelled_operation_and_worker_leave_no_partial_result(engine, monkeypatch, operation):
     with pytest.raises(SpeakerMatchingCancelled):
-        run(engine, cancelled=lambda: True)
+        operation(engine, cancelled=lambda: True)
     assert not engine.calls
 
     def cancel(*args, **kwargs):
@@ -286,31 +414,128 @@ def test_cancelled_operation_and_worker_leave_no_partial_result(engine, monkeypa
 
     monkeypatch.setattr(speaker, "run_process_worker", cancel)
     with pytest.raises(SpeakerMatchingCancelled):
-        run(engine)
+        operation(engine)
     assert not list(engine.manager.cache_directory.glob("*.json"))
     assert not list((engine.manager.data_root / "speaker-jobs").iterdir())
 
 
-def test_nested_operation_cancellation_is_honored(engine):
+@pytest.mark.parametrize("operation", [run, prepare, match_cached])
+def test_nested_operation_cancellation_is_honored(engine, operation):
     stop = False
     with operation_scope(lambda: stop):
         stop = True
         with pytest.raises(SpeakerMatchingCancelled):
-            run(engine)
+            operation(engine)
 
 
+@pytest.mark.parametrize("operation", [run, prepare])
 @pytest.mark.parametrize("when", ["inference", "completion"])
-def test_source_changes_discard_results(engine, when):
+def test_source_changes_discard_results(engine, when, operation):
     def progress(message, fraction):
         if (when == "inference" and message == "Test inference") or (
-            when == "completion" and message.startswith("Voice matching finished")
+            when == "completion" and message.startswith("Voice ") and "finished:" in message
         ):
             engine.source.write_bytes(b"changed outside editor")
 
     with pytest.raises(SpeakerMatchingError, match="changed"):
-        run(engine, progress=progress)
+        operation(engine, progress=progress)
     if when == "inference":
         assert not list(engine.manager.cache_directory.glob("*.json"))
+
+
+@pytest.mark.parametrize("operation", [prepare, match_cached])
+@pytest.mark.parametrize("when", ["cache-read", "completion"])
+@pytest.mark.parametrize("change", ["source-edit", "cancel"])
+def test_preparation_and_cached_scoring_discard_stale_or_cancelled_results(
+    engine, monkeypatch, operation, when, change,
+):
+    prepare(engine)
+    stopped = False
+
+    def invalidate():
+        nonlocal stopped
+        if change == "source-edit":
+            engine.source.write_bytes(b"changed while accessing cached signatures")
+        else:
+            stopped = True
+
+    if when == "cache-read":
+        read = engine.manager._read_cache
+
+        def changed_cache(key):
+            record = read(key)
+            invalidate()
+            return record
+
+        monkeypatch.setattr(engine.manager, "_read_cache", changed_cache)
+
+    def progress(message, fraction):
+        if when == "completion" and message.startswith("Voice ") and "finished:" in message:
+            invalidate()
+
+    forbid_preparation(engine, monkeypatch)
+    error = SpeakerMatchingCancelled if change == "cancel" else SpeakerMatchingError
+    with pytest.raises(error) as failure:
+        operation(engine, progress=progress, cancelled=lambda: stopped)
+    assert not isinstance(failure.value, SpeakerPreparationRequired)
+    assert len(engine.calls) == 1
+    assert not list((engine.manager.data_root / "speaker-jobs").iterdir())
+
+
+@pytest.mark.parametrize("change", ["source-edit", "cancel", "write-error"])
+def test_preparation_cache_publication_rolls_back_only_new_records(engine, monkeypatch, change):
+    prepare(engine, clips=(engine.clips[0],))
+    previous = {path: path.read_bytes() for path in engine.manager.cache_directory.glob("*.json")}
+    extra = replace(engine.clips[1], segment_id="extra", start=8, end=11)
+    engine.signatures["extra"] = vector(1)
+    original = engine.manager._write_cache
+    stopped = False
+    writes = []
+
+    def interrupted_write(key, record, job):
+        nonlocal stopped
+        original(key, record, job)
+        writes.append(key)
+        if change == "source-edit":
+            engine.source.write_bytes(b"changed during cache publication")
+        elif change == "cancel":
+            stopped = True
+        else:
+            raise OSError("cache publication interrupted")
+
+    monkeypatch.setattr(engine.manager, "_write_cache", interrupted_write)
+    error = SpeakerMatchingCancelled if change == "cancel" else SpeakerMatchingError
+    with pytest.raises(error):
+        prepare(engine, clips=(*engine.clips, extra), cancelled=lambda: stopped)
+    assert writes
+    assert previous == {
+        path: path.read_bytes() for path in engine.manager.cache_directory.glob("*.json")
+    }
+    assert not list((engine.manager.data_root / "speaker-jobs").iterdir())
+
+
+@pytest.mark.parametrize("damage", ["incomplete", "invalid-record", "invalid-skip"])
+def test_preparation_rejects_invalid_worker_results_before_cache_publication(
+    engine, monkeypatch, damage,
+):
+    def invalid_result(target, args, **kwargs):
+        result = {
+            key: {"embedding": vector(1).tolist(), "reason": ""} for key, _ in args[-1]
+        }
+        last = next(reversed(result))
+        if damage == "incomplete":
+            del result[last]
+        elif damage == "invalid-record":
+            result[last]["embedding"] = [1, 0]
+        else:
+            result[last]["reason"] = "silence"
+        return result
+
+    monkeypatch.setattr(speaker, "run_process_worker", invalid_result)
+    with pytest.raises(SpeakerMatchingError, match="signature"):
+        prepare(engine)
+    assert not list(engine.manager.cache_directory.glob("*.json"))
+    assert not list((engine.manager.data_root / "speaker-jobs").iterdir())
 
 
 def test_no_targets_or_human_references_does_not_require_a_model(engine):
@@ -361,6 +586,34 @@ def test_skip_reasons_are_reported_and_cached(engine, monkeypatch):
         "multi": "multiple-characters", "reference": "short", "target": "silence",
     }
     assert run(engine, clips=clips).cached == 2
+
+
+def test_preparation_caches_skip_reasons_without_references_and_reuses_current_ids(
+    engine, monkeypatch,
+):
+    def infer(target, args, **kwargs):
+        return {
+            key: {
+                "embedding": None,
+                "reason": "silence" if item.segment_id == "target" else "no-audio",
+            }
+            for key, item in args[-1]
+        }
+
+    monkeypatch.setattr(speaker, "run_process_worker", infer)
+    unnamed = tuple(replace(item, characters=()) for item in engine.clips)
+    result = prepare(engine, clips=unnamed)
+    assert (result.prepared, result.cached, result.skipped) == (0, 0, 2)
+    assert result.skip_reasons == (("reference", "no-audio"), ("target", "silence"))
+    engine.manager.model_path.unlink()
+    forbid_preparation(engine, monkeypatch)
+    clips = tuple(replace(item, segment_id=f"actual-{item.segment_id}") for item in engine.clips)
+    cached = match_cached(engine, clips=clips, media=object())
+    assert cached.matches == () and cached.cached == 2 and cached.examined == 0
+    assert cached.skip_reasons == (("actual-reference", "no-audio"), ("actual-target", "silence"))
+    repeated = prepare(engine, clips=clips, media=object())
+    assert (repeated.prepared, repeated.cached, repeated.skipped) == (0, 2, 2)
+    assert repeated.skip_reasons == cached.skip_reasons
 
 
 @pytest.mark.parametrize(("samples", "reason"), [

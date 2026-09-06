@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import getpass
-import os
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -95,6 +94,11 @@ from choicer_voicer_pack_creator.ui.commands import action_button, command_icon,
 from choicer_voicer_pack_creator.ui.export_dialog import ExportProgressDialog
 from choicer_voicer_pack_creator.ui.export_options_dialog import ExportOptions, ExportOptionsDialog
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
+from choicer_voicer_pack_creator.ui.processing import (
+    PROCESSING_KINDS,
+    ProcessingModel,
+    ProcessingPanel,
+)
 from choicer_voicer_pack_creator.ui.readable_table import ReadableTableWidget
 from choicer_voicer_pack_creator.ui.setup_consent import SetupConsent
 from choicer_voicer_pack_creator.ui.speaker_matching import (
@@ -258,6 +262,7 @@ class ProjectEditor(QWidget):
         self._stopped_seek_debounce_timer.setInterval(35)
         self._stopped_seek_debounce_timer.timeout.connect(self._start_stopped_seek_decode)
 
+        self.processing = ProcessingModel(workspace.job_manager, session, self)
         self._build_actions()
         self._build_ui()
         self._connect_player()
@@ -419,6 +424,10 @@ class ProjectEditor(QWidget):
                 button.setAccessibleName(action.text().replace("&&", "&"))
         self.project_toolbar = toolbar
         self.addToolBar(toolbar)
+
+        self.processing_panel = ProcessingPanel(self.processing, self)
+        self.processing_panel.action_requested.connect(self._processing_action)
+        self._document_layout.addWidget(self.processing_panel)
 
         root = QWidget(self)
         root.setObjectName("projectEditorContent")
@@ -1110,16 +1119,48 @@ class ProjectEditor(QWidget):
         dialog.show()
 
     def _finish_new_import(self, project: PackProject) -> None:
-        if self.project is not project:
+        if self.project is not project or self.session.id in self.workspace._closed_ids:
             diagnostic_event("new_import_handoff_skipped", reason="project_changed")
             return
-        if self.project is project:
-            self.open_analysis_dialog(initial_scan=True, auto_start=True)
+        self.processing.set_status("analysis", "queued", "Preparing the transcript in the background.")
+        self.open_analysis_dialog(initial_scan=True, auto_start=True, background=True)
+        self.speaker_matching.prepare()
         if not project.backing_track_path:
+            self.processing.set_status("backing", "queued", "Backing will use spare processing capacity.")
             self.generate_backing_track(background=True)
 
+    def _processing_action(self, group: str, action: str) -> None:
+        if group == "transcript":
+            if action == "cancel":
+                if self._analysis_dialog is not None:
+                    self._analysis_dialog.cancel_scan()
+                return
+            self.open_analysis_dialog(background=action == "retry")
+            if action == "retry" and self._analysis_dialog is not None:
+                self._analysis_dialog.start_scan()
+                if self._analysis_dialog.source_captions and not self._analysis_dialog.refined_table.rowCount():
+                    self._analysis_dialog.start_refinement()
+        elif group == "voices":
+            if action == "cancel":
+                self.speaker_matching.cancel()
+            elif action == "retry":
+                self.speaker_matching.retry()
+            else:
+                self.segments_section.set_collapsed(False)
+                self.speaker_matching.setFocus()
+        elif group == "backing":
+            if action == "cancel":
+                if self._backing_dialog is not None:
+                    self._backing_dialog.cancel_generation()
+            elif self._backing_dialog is not None and action == "retry":
+                self._backing_dialog.start()
+            elif action == "open" and self.project.backing_track_path and self._backing_dialog is None:
+                self.workspace.tasks_window.show_tasks()
+            else:
+                self.generate_backing_track(background=action == "retry")
+
     def open_analysis_dialog(
-        self, *, initial_scan: bool = False, auto_start: bool = False
+        self, *, initial_scan: bool = False, auto_start: bool = False, background: bool = False,
     ) -> None:
         diagnostic_event(
             "analysis_dialog_requested", initial_scan=initial_scan, auto_start=auto_start,
@@ -1133,26 +1174,35 @@ class ProjectEditor(QWidget):
             )
             return
         if self._analysis_dialog is not None:
-            self._analysis_dialog.show()
-            self._analysis_dialog.raise_()
+            if not background:
+                self._analysis_dialog.show()
+                self._analysis_dialog.raise_()
             return
         token = self.session.source_token()
-        dialog = AnalysisDialog(
-            self.media,
-            Path(self.project.video_path),
-            self.project.video_duration,
-            self.analysis_data_root,
-            len(self.project.segments),
-            self,
-            initial_scan=initial_scan,
-            source_captions=self.project.source_captions,
-            caption_language=self.project.caption_language,
-            auto_start=auto_start,
-            youtube_import=bool(self.project.source_url),
-            review=self.project.analysis_review,
-            job_manager=self.workspace.job_manager, project_id=self.session.id,
-            source_snapshot={"source_revision": self.session.source_revision},
-        )
+        try:
+            dialog = AnalysisDialog(
+                self.media,
+                Path(self.project.video_path),
+                self.project.video_duration,
+                self.analysis_data_root,
+                len(self.project.segments),
+                self,
+                initial_scan=initial_scan,
+                source_captions=self.project.source_captions,
+                caption_language=self.project.caption_language,
+                auto_start=auto_start,
+                youtube_import=bool(self.project.source_url),
+                review=self.project.analysis_review,
+                job_manager=self.workspace.job_manager, project_id=self.session.id,
+                source_snapshot={"source_revision": self.session.source_revision},
+                background=background,
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            diagnostic_exception("analysis_setup_failed", error)
+            self.processing.set_status("analysis", "failed", f"Analysis could not start: {error}")
+            if not background:
+                self.workspace.notice("Analysis could not start", str(error))
+            return
         self._analysis_dialog = dialog
         dialog.suggestions_accepted.connect(
             lambda value: self._add_analysis_suggestions(value)
@@ -1167,7 +1217,8 @@ class ProjectEditor(QWidget):
             if token == self.session.source_token() and self._analysis_dialog is dialog else None
         )
         dialog.setWindowModality(Qt.WindowModality.NonModal)
-        dialog.show()
+        if not background:
+            dialog.show()
 
     @Slot(object)
     def _save_analysis_review(self, value: object) -> None:
@@ -1178,6 +1229,7 @@ class ProjectEditor(QWidget):
             self.project.analysis_review = value
             self.session.draft_revision += 1
             self._set_dirty(True)
+            self.speaker_matching.prepare_if_enabled()
 
     @Slot(float, float)
     def _preview_analysis_range(self, start: float, end: float) -> None:
@@ -1310,6 +1362,9 @@ class ProjectEditor(QWidget):
             self._source_request += 1
             self.session.source_revision += 1
             self.workspace.cancel_source_jobs(self.session.id)
+            if self._backing_dialog is not None:
+                self._backing_dialog.hide()
+                self._backing_dialog = None
             if self._analysis_dialog is not None:
                 self._analysis_dialog.hide()
                 self._analysis_dialog = None
@@ -1362,6 +1417,9 @@ class ProjectEditor(QWidget):
                 self.player.setSource(QUrl())
         self.video_widget.set_position(self.current_position())
         self.speaker_matching.project_replaced(preserve_view=preserve_view)
+        if not preserve_view:
+            self.processing.reset()
+        self.processing_panel.setVisible(bool(project.video_path or project.segments))
         self._set_dirty(mark_dirty)
         self._refresh_validation_label()
 
@@ -1376,6 +1434,7 @@ class ProjectEditor(QWidget):
             self.workspace.job_manager, self.session.id, "waveform", "Reading waveform",
             read_paths=(Path(path),),
             source_snapshot={"source_revision": self.session.source_revision, "path": path},
+            priority=30,
         )
         self._waveform_workers.append(worker)
         worker.completed.connect(self._waveform_ready)
@@ -2320,6 +2379,9 @@ class ProjectEditor(QWidget):
             self._analysis_dialog.hide()
             self._analysis_dialog = None
         self.workspace.cancel_source_jobs(self.session.id)
+        if self._backing_dialog is not None:
+            self._backing_dialog.hide()
+            self._backing_dialog = None
         self._reset_transport_state()
         self.player.stop()
         self.prompt_player.stop()
@@ -2355,6 +2417,9 @@ class ProjectEditor(QWidget):
         self.timeline.set_waveform([])
         self.player.setSource(QUrl.fromLocalFile(str(source)))
         self._start_waveform(str(source), info.duration)
+        self.speaker_matching.project_replaced(preserve_view=False)
+        self.processing.reset()
+        self.processing_panel.show()
         self._set_dirty(True)
         self._refresh_validation_label()
         invalid = [item for item in self.project.segments if item.end > info.duration + 0.05]
@@ -2378,6 +2443,9 @@ class ProjectEditor(QWidget):
         self._source_request += 1
         self.session.source_revision += 1
         self.workspace.cancel_source_jobs(self.session.id)
+        if self._backing_dialog is not None:
+            self._backing_dialog.hide()
+            self._backing_dialog = None
         if self._analysis_dialog is not None:
             self._analysis_dialog.hide()
             self._analysis_dialog = None
@@ -2392,6 +2460,9 @@ class ProjectEditor(QWidget):
         self.project.analysis_review = None
         self.project.video_duration = 0.0
         self.project.preserve_source_video = False
+        self.speaker_matching.project_replaced(preserve_view=False)
+        self.processing.reset()
+        self.processing_panel.setVisible(bool(self.project.segments))
         self.video_path_label.setText("No video loaded")
         self.video_path_label.setToolTip("")
         self.timeline.set_waveform([])
@@ -2412,12 +2483,14 @@ class ProjectEditor(QWidget):
             self.session.backing_revision += 1
             self.project.backing_track_path = str(Path(path).resolve())
             self._refresh_backing_controls()
+            self.processing.set_status("backing", "ready", "Using the project's selected backing track.")
             self._set_dirty(True)
 
     def clear_backing_track(self) -> None:
         self.session.backing_revision += 1
         self.project.backing_track_path = ""
         self._refresh_backing_controls()
+        self.processing.set_status("backing", "idle", "No backing track selected.")
         self._set_dirty(True)
 
     def _refresh_backing_controls(self) -> None:
@@ -2457,11 +2530,18 @@ class ProjectEditor(QWidget):
             if answer != QMessageBox.StandardButton.Yes:
                 return False
         token = (self.session.source_token(), self.session.backing_revision, project.backing_track_path)
-        dialog = BackingDialog(
-            self.media, source.resolve(), self.analysis_data_root.parent / "backing", self,
-            job_manager=self.workspace.job_manager, project_id=self.session.id,
-            source_snapshot={"source_revision": self.session.source_revision},
-        )
+        try:
+            dialog = BackingDialog(
+                self.media, source.resolve(), self.analysis_data_root.parent / "backing", self,
+                job_manager=self.workspace.job_manager, project_id=self.session.id,
+                source_snapshot={"source_revision": self.session.source_revision},
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            diagnostic_exception("backing_setup_failed", error)
+            self.processing.set_status("backing", "failed", f"Backing could not start: {error}")
+            if not background:
+                self.workspace.notice("Backing could not start", str(error))
+            return False
         self._backing_dialog = dialog
 
         def apply_result() -> None:
@@ -2488,7 +2568,10 @@ class ProjectEditor(QWidget):
                 QTimer.singleShot(0, after_success)
 
         dialog.accepted.connect(apply_result)
-        dialog.finished.connect(lambda _result: setattr(self, "_backing_dialog", None))
+        dialog.finished.connect(
+            lambda _result: setattr(self, "_backing_dialog", None)
+            if self._backing_dialog is dialog else None
+        )
         dialog.setWindowModality(Qt.WindowModality.NonModal)
         if not background:
             dialog.show()
@@ -2776,6 +2859,7 @@ class ProjectEditor(QWidget):
     def _set_loading(self, loading: bool) -> None:
         self.session.loading = loading
         self.editor_splitter.setEnabled(not loading)
+        self.processing_panel.setEnabled(not loading)
         for action in (
             self.action_save, self.action_save_as, self.action_restore_previous,
             self.action_analyze, self.action_backing, self.action_add,
@@ -2911,9 +2995,7 @@ class MainWindow(QMainWindow):
             )) / "analysis"
         )
         self.editors: dict[str, ProjectEditor] = {}
-        self.job_manager = JobManager(self, limits={
-            "cpu": 2 if (os.cpu_count() or 1) >= 4 else 1, "io": 2, "network": 2,
-        })
+        self.job_manager = JobManager(self)
         self._opening_paths: dict[str, str] = {}
         self._save_targets: dict[str, str] = {}
         self._save_jobs: dict[str, set[str]] = {}
@@ -3424,8 +3506,9 @@ class MainWindow(QMainWindow):
                 editor.prompt_player.stop()
 
     def cancel_source_jobs(self, project_id: str) -> None:
+        self.setup_consent.cancel_project(project_id)
         for job in self.job_manager.active_jobs(project_id):
-            if job.kind in {"waveform", "analysis", "refinement", "backing", "speakers"}:
+            if job.kind in PROCESSING_KINDS | {"waveform"}:
                 self.job_manager.cancel(job.id)
 
     def notice(self, title: str, message: str) -> None:

@@ -39,6 +39,7 @@ class JobRecord:
     title: str
     resource_class: str
     source_snapshot: Mapping[str, Any]
+    priority: int = 0
     state: str = "queued"
     message: str = "Queued"
     fraction: float | None = None
@@ -191,6 +192,7 @@ class JobManager(QObject):
         write_paths: Iterable[str | Path] = (),
         source_snapshot: Mapping[str, Any] | None = None,
         depends_on: Iterable[str | JobHandle] = (),
+        priority: int = 0,
     ) -> JobHandle:
         self._assert_thread()
         if self._closed:
@@ -199,12 +201,14 @@ class JobManager(QObject):
             raise ValueError(f"Unknown resource class: {resource_class}")
         if not callable(operation):
             raise TypeError("Job operation must be callable")
+        if not isinstance(priority, int) or isinstance(priority, bool):
+            raise ValueError("Job priority must be an integer")
         dependencies = tuple(item.id if isinstance(item, JobHandle) else item for item in depends_on)
         if any(item not in self._tasks for item in dependencies):
             raise ValueError("Job dependencies must already belong to this manager")
         record = JobRecord(
             uuid.uuid4().hex, project_id, kind, title, resource_class,
-            freeze_metadata(source_snapshot or {}), created_at=time.time(),
+            freeze_metadata(source_snapshot or {}), priority=priority, created_at=time.time(),
         )
         handle = JobHandle(self, record)
         self._tasks[record.id] = _Task(
@@ -259,7 +263,8 @@ class JobManager(QObject):
         if self._closed:
             self._timer.stop()
             return
-        for task in tuple(self._tasks.values()):
+        # Stable ordering keeps equal-priority work FIFO. Running jobs are never preempted.
+        for task in sorted(self._tasks.values(), key=lambda task: -task.handle.record.priority):
             handle = task.handle
             if handle.record.state not in {"queued", "waiting"}:
                 continue

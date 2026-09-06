@@ -203,6 +203,7 @@ def test_project_loading_disables_matching_menu_and_toolbar_actions(workspace):
     ready = workspace.add_project(PackProject(title="Ready"), dirty=False)
     loading = workspace.add_project(PackProject(title="Loading"), dirty=False)
     loading._set_loading(True)
+    assert not loading.processing_panel.isEnabled()
     for action in loading.file_actions + loading.project_actions + loading.segment_actions:
         assert not action.isEnabled()
         button = loading.project_toolbar.widgetForAction(action)
@@ -216,6 +217,7 @@ def test_project_loading_disables_matching_menu_and_toolbar_actions(workspace):
     assert ready.action_save in workspace.file_menu.actions()
     assert ready.action_backing in workspace.project_menu.actions()
     loading._set_loading(False)
+    assert loading.processing_panel.isEnabled()
     workspace.tabs.setCurrentWidget(loading)
     assert loading.action_save.isEnabled()
     assert loading.action_backing.isEnabled()
@@ -768,6 +770,8 @@ def test_fresh_native_layout_keeps_task_and_segment_rows_clickable(workspace, qt
     qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
     QApplication.processEvents()
     assert workspace.height() <= available.height()
+    assert not editor.editor_scroll.isAncestorOf(editor.processing_panel)
+    assert editor.processing_panel.visibleRegion().boundingRect().height() == editor.processing_panel.height()
     scrollbar = editor.editor_scroll.verticalScrollBar()
     assert scrollbar.objectName() == "projectEditorScrollbar"
     if scrollbar.isVisible():

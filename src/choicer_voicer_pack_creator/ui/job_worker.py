@@ -37,6 +37,7 @@ class JobWorker(QThread):
         resource_class: str = "cpu", read_paths: Sequence[Path] = (),
         write_paths: Sequence[Path] = (), resource_keys: Sequence[str] = (),
         source_snapshot: Mapping | None = None,
+        priority: int = 0,
     ) -> None:
         self._job_manager = manager
         self._job_options = {
@@ -44,6 +45,7 @@ class JobWorker(QThread):
             "resource_class": resource_class, "read_paths": tuple(read_paths),
             "write_paths": tuple(write_paths), "resource_keys": tuple(resource_keys),
             "source_snapshot": source_snapshot,
+            "priority": priority,
         }
         if hasattr(self, "progress"):
             self.progress.connect(self._report_job_progress, Qt.ConnectionType.DirectConnection)
@@ -55,6 +57,10 @@ class JobWorker(QThread):
             self.canceled.connect(self._capture_cancelled, Qt.ConnectionType.DirectConnection)
         if hasattr(self, "download_required"):
             self.download_required.connect(
+                self._capture_setup_required, Qt.ConnectionType.DirectConnection,
+            )
+        if hasattr(self, "preparation_required"):
+            self.preparation_required.connect(
                 self._capture_setup_required, Qt.ConnectionType.DirectConnection,
             )
 

@@ -361,7 +361,12 @@ class UIAutomation:
                         ancestor = target.parentWidget()
                         while ancestor is not None:
                             if isinstance(ancestor, QScrollArea):
-                                ancestor.ensureWidgetVisible(target, 10, 10)
+                                # Text editors expose their caret, not their full input area.
+                                center = target.mapTo(ancestor.widget(), target.rect().center())
+                                ancestor.ensureVisible(
+                                    center.x(), center.y(),
+                                    target.width() // 2 + 10, target.height() // 2 + 10,
+                                )
                             ancestor = ancestor.parentWidget()
                         self._hit(target, self._input_point(target))
                     elif isinstance(target, QAction):
