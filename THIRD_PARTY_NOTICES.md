@@ -1,5 +1,13 @@
 # Third-party notices
 
+## Buy Me a Coffee button
+
+The support link uses Buy Me a Coffee's
+[official yellow button image](https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png).
+An unmodified copy is bundled at `resources/buy-me-a-coffee.png` so the app can display it
+without contacting the image host. Clicking the button opens the support page in the user's browser.
+The Buy Me a Coffee name and artwork belong to their respective owner.
+
 ## FFmpeg
 
 Windows application bundles include an unmodified **FFmpeg 9.0.1 LGPL shared build** supplied by the [BtbN FFmpeg-Builds project](https://github.com/BtbN/FFmpeg-Builds). FFmpeg is a separate command-line program invoked by Choicer Voicer Pack Creator; the application does not link to FFmpeg libraries.

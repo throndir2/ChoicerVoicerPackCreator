@@ -2,6 +2,10 @@
 
 A visual desktop editor for creating and modifying dub packs for *The Choicer Voicer*.
 
+<a href="https://www.buymeacoffee.com/throndir" target="_blank" rel="noopener noreferrer">
+  <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="40">
+</a>
+
 > **Unofficial community project.** This project is not affiliated with, endorsed by, or sponsored by the creators of *The Choicer Voicer*. Do not redistribute video, audio, or artwork unless you have permission to do so.
 
 ## What it does

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QEvent, QPoint, QSettings, Qt, QThread, QUrl, Slot
-from PySide6.QtGui import QColor, QKeyEvent
+from PySide6.QtGui import QColor, QDesktopServices, QKeyEvent
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QMessageBox, QPushButton
 from shiboken6 import isValid
@@ -62,6 +62,69 @@ def test_main_window_starts_with_empty_editor(qtbot) -> None:
     assert window.updater.check_action in help_actions
     assert window.action_logs in help_actions
     window.dirty = False
+    window.close()
+
+
+@pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
+def test_support_button_opens_browser_only_when_activated(
+    qtbot, tmp_path: Path, monkeypatch, stylesheet: str
+) -> None:
+    urls: list[str] = []
+
+    def open_url(url: QUrl) -> bool:
+        urls.append(url.toString())
+        return True
+
+    monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(open_url))
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(UnusedMedia(), settings=settings)  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    window.setStyleSheet(stylesheet)
+    window.resize(window.minimumSize())
+    window.show()
+    button = window.support_button
+    assert window.tabs.cornerWidget(Qt.Corner.TopRightCorner) is button
+    assert button.isVisible() and button.isEnabled()
+    assert button.accessibleName() == "Buy Me a Coffee"
+    assert not button.icon().pixmap(button.iconSize()).isNull()
+    assert button.iconSize().height() == 40
+    assert urls == []
+    original = window.active_editor
+    assert button.mapTo(window, QPoint(0, button.height())).y() <= original.mapTo(
+        window, QPoint(0, 0)
+    ).y()
+    original._set_project(PackProject(title="First pack"), None, mark_dirty=False)
+    before = original.project.to_dict()
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    assert urls == ["https://www.buymeacoffee.com/throndir"]
+    assert original.project.to_dict() == before
+    assert not original.dirty
+
+    window.add_project(PackProject(title="Another pack"), dirty=False)
+    assert button.isVisible() and button.isEnabled()
+    button.setFocus()
+    qtbot.keyClick(button, Qt.Key.Key_Space)
+    assert urls == ["https://www.buymeacoffee.com/throndir"] * 2
+    assert not window.dirty
+    assert window.tabs.count() == 2
+    assert len(window.findChildren(QPushButton, "coffeeSupport")) == 1
+    window.close()
+
+
+def test_support_button_reports_browser_failure(qtbot, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(lambda _url: False))
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    window = MainWindow(UnusedMedia(), settings=settings)  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.mouseClick(window.support_button, Qt.MouseButton.LeftButton)
+    assert len(window._decisions) == 1
+    message = window._decisions[0]
+    assert message.windowTitle() == "Could not open browser"
+    assert "https://www.buymeacoffee.com/throndir" in message.text()
+    assert message.windowModality() == Qt.WindowModality.NonModal
+    message.accept()
+    assert not window.dirty
     window.close()
 
 
