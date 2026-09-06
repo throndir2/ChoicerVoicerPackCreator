@@ -11,7 +11,9 @@ import tomllib
 import uuid
 import zipfile
 from datetime import UTC, datetime
+from importlib import metadata
 from pathlib import Path
+from textwrap import dedent
 
 import deno
 from ffmpeg_bundle import prepare_bundle
@@ -24,6 +26,7 @@ with (ROOT / "pyproject.toml").open("rb") as project_file:
 DIST = ROOT / "dist" / f"v{APP_VERSION}"
 BUILD = ROOT / "build" / f"pyinstaller-v{APP_VERSION}"
 APP_NAME = "Choicer Voicer Pack Creator"
+MCP_NAME = "Choicer Voicer MCP"
 FFMPEG_STAGE = ROOT / "build" / "ffmpeg-windows-x64-562ea50b4f2d213e"
 LATEST_BUILD_MANIFEST = DIST / "latest-portable.json"
 PENDING_BUILD_MANIFEST = DIST / "pending-portable.json"
@@ -118,6 +121,167 @@ def _dist_path(value: str) -> Path:
     return path
 
 
+def _mcp_distribution_names() -> list[str]:
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
+    pending = [Requirement("mcp")]
+    visited: set[tuple[str, str]] = set()
+    names: set[str] = set()
+    while pending:
+        requirement = pending.pop()
+        name = canonicalize_name(requirement.name)
+        extras = {
+            extra for extra in {"", *requirement.extras} if (name, extra) not in visited
+        }
+        if not extras:
+            continue
+        visited.update((name, extra) for extra in extras)
+        names.add(name)
+        for dependency in metadata.distribution(name).requires or []:
+            child = Requirement(dependency)
+            if child.marker is None or any(
+                child.marker.evaluate({"extra": extra}) for extra in extras
+            ):
+                pending.append(child)
+    return sorted(names)
+
+
+def _write_spec() -> Path:
+    BUILD.mkdir(parents=True, exist_ok=True)
+    spec = BUILD / f"{APP_NAME}.spec"
+    spec.write_text(
+        dedent(
+            f"""\
+            from pathlib import Path
+            from PyInstaller.utils.hooks import (
+                collect_all, collect_data_files, collect_submodules, copy_metadata,
+            )
+
+            root = Path({str(ROOT)!r})
+            source = root / "src" / "choicer_voicer_pack_creator"
+            entrypoints = [source / "__main__.py", source / "mcp_entry.py"]
+            data = [
+                (str(root / "assets"), "assets"),
+                (str(source / "resources"), "choicer_voicer_pack_creator/resources"),
+            ]
+            data += collect_data_files("mcp")
+            data += collect_data_files("yt_dlp_ejs")
+            binaries = [({str(deno.find_deno_bin())!r}, "runtime/deno")]
+            hiddenimports = [
+                "PySide6.QtMultimedia",
+                "PySide6.QtMultimediaWidgets",
+                "yt_dlp_ejs.yt.solver",
+                "anyio._backends._asyncio",
+                *collect_submodules(
+                    "mcp",
+                    filter=lambda name: name != "mcp.cli" and not name.startswith("mcp.cli."),
+                ),
+            ]
+            for package in ("onnxruntime", "_soundfile_data"):
+                package_data, package_binaries, package_imports = collect_all(package)
+                data += package_data
+                binaries += package_binaries
+                hiddenimports += package_imports
+            # Include activated dependency extras too (e.g. PyJWT's crypto extra).
+            for package in {_mcp_distribution_names()!r}:
+                data += copy_metadata(package)
+            analysis = Analysis(
+                [str(path) for path in entrypoints],
+                pathex=[str(root / "src")],
+                binaries=binaries,
+                datas=data,
+                hiddenimports=hiddenimports,
+                hookspath=[],
+                hooksconfig={{}},
+                runtime_hooks=[str(root / "scripts" / "separation_runtime_hook.py")],
+                excludes=[],
+                noarchive=False,
+            )
+            pyz = PYZ(analysis.pure)
+
+            def scripts_for(entrypoint):
+                # Keep shared runtime hooks, but never execute the other application entrypoint.
+                return [
+                    script for script in analysis.scripts
+                    if Path(script[1]) not in entrypoints or Path(script[1]) == entrypoint
+                ]
+
+            editor = EXE(
+                pyz, scripts_for(entrypoints[0]), [],
+                exclude_binaries=True,
+                name={APP_NAME!r},
+                console=False,
+                debug=False,
+                strip=False,
+                upx=False,
+            )
+            mcp = EXE(
+                pyz, scripts_for(entrypoints[1]), [],
+                exclude_binaries=True,
+                name={MCP_NAME!r},
+                console=True,
+                debug=False,
+                strip=False,
+                upx=False,
+            )
+            collection = COLLECT(
+                editor, mcp, analysis.binaries, analysis.datas,
+                strip=False,
+                upx=False,
+                name={APP_NAME!r},
+            )
+            """
+        ),
+        encoding="utf-8",
+    )
+    return spec
+
+
+def _copy_mcp_licenses(app_dir: Path) -> None:
+    notices = [
+        "\n## MCP SDK and Python dependencies\n",
+        "The local stdio server uses the official MCP Python SDK. The installed SDK and its "
+        "runtime dependencies are listed below. Their supplied license/notice files and full "
+        "package metadata (including author and source information) are bundled under "
+        "`licenses/python/`.\n",
+        "| Distribution | Version | Bundled notices |",
+        "| --- | --- | --- |",
+    ]
+    for name in _mcp_distribution_names():
+        distribution = metadata.distribution(name)
+        destination = app_dir / "licenses" / "python" / name
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "METADATA.txt").write_text(
+            distribution.read_text("METADATA") or str(distribution.metadata),
+            encoding="utf-8",
+        )
+        copied = 0
+        for file in distribution.files or []:
+            relative = Path(str(file))
+            if relative.is_absolute() or ".." in relative.parts:
+                continue
+            if not (
+                relative.name.casefold().startswith(("license", "licence", "copying", "notice"))
+                or any(part.casefold() == "licenses" for part in relative.parts[:-1])
+            ):
+                continue
+            source = Path(distribution.locate_file(file))
+            if source.is_file():
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                copied += 1
+        if name == "mcp" and not copied:
+            raise RuntimeError("The installed MCP SDK does not provide its license file")
+        notices.append(
+            f"| {distribution.metadata['Name']} | {distribution.version} | "
+            f"[License files and metadata](licenses/python/{name}/) |"
+        )
+    with (app_dir / "THIRD_PARTY_NOTICES.md").open("a", encoding="utf-8") as stream:
+        stream.write("\n".join(notices) + "\n")
+
+
 def build_candidate() -> int:
     if BUILD.exists():
         shutil.rmtree(BUILD)
@@ -130,57 +294,35 @@ def build_candidate() -> int:
     portable_root = DIST / f"portable-{build_id}"
     print("Preparing pinned LGPL FFmpeg runtime…", flush=True)
     prepare_bundle(FFMPEG_STAGE)
+    spec = _write_spec()
     command = [
         sys.executable,
         "-m",
         "PyInstaller",
-        "--name",
-        APP_NAME,
-        "--windowed",
-        "--onedir",
         "--clean",
         "--noconfirm",
-        "--runtime-hook",
-        str(ROOT / "scripts" / "separation_runtime_hook.py"),
         "--distpath",
         str(portable_root),
         "--workpath",
         str(BUILD),
-        "--specpath",
-        str(BUILD),
-        "--paths",
-        str(ROOT / "src"),
-        "--hidden-import",
-        "PySide6.QtMultimedia",
-        "--hidden-import",
-        "PySide6.QtMultimediaWidgets",
-        "--hidden-import",
-        "yt_dlp_ejs.yt.solver",
-        "--collect-data",
-        "yt_dlp_ejs",
-        "--collect-all",
-        "onnxruntime",
-        "--collect-all",
-        "_soundfile_data",
-        "--add-binary",
-        f"{deno.find_deno_bin()}{os.pathsep}runtime/deno",
-        "--add-data",
-        f"{ROOT / 'assets'}{os.pathsep}assets",
-        "--add-data",
-        f"{ROOT / 'src' / 'choicer_voicer_pack_creator' / 'resources'}"
-        f"{os.pathsep}choicer_voicer_pack_creator/resources",
-        str(ROOT / "src" / "choicer_voicer_pack_creator" / "__main__.py"),
+        str(spec),
     ]
     completed = subprocess.run(command, cwd=ROOT, check=False)
     if completed.returncode != 0:
         return completed.returncode
 
     app_dir = portable_root / APP_NAME
+    for name in (APP_NAME, MCP_NAME):
+        if not (app_dir / f"{name}.exe").is_file():
+            raise RuntimeError(f"PyInstaller did not produce {name}.exe")
     _copy_tree_streamed(FFMPEG_STAGE / "bin", app_dir / "bin")
     shutil.copytree(FFMPEG_STAGE / "licenses", app_dir / "licenses", dirs_exist_ok=True)
     shutil.copy2(FFMPEG_STAGE / "THIRD_PARTY_NOTICES.md", app_dir / "THIRD_PARTY_NOTICES.md")
     shutil.copy2(ROOT / "LICENSE", app_dir / "LICENSE.txt")
     shutil.copy2(ROOT / "README.md", app_dir / "README.md")
+    (app_dir / "docs").mkdir(exist_ok=True)
+    shutil.copy2(ROOT / "docs" / "MCP.md", app_dir / "docs" / "MCP.md")
+    _copy_mcp_licenses(app_dir)
     shutil.copy2(
         FFMPEG_STAGE / "licenses" / "FFmpeg-LGPL-3.0.txt",
         app_dir / "licenses" / "LGPL-3.0.txt",
@@ -263,6 +405,7 @@ def build_candidate() -> int:
         "build_id": build_id,
         "application_directory": app_dir.relative_to(ROOT).as_posix(),
         "executable": (app_dir / f"{APP_NAME}.exe").relative_to(ROOT).as_posix(),
+        "mcp_executable": (app_dir / f"{MCP_NAME}.exe").relative_to(ROOT).as_posix(),
         "candidate_archive": candidate_archive.relative_to(ROOT).as_posix(),
         "archive": stable_archive.relative_to(ROOT).as_posix(),
     }
@@ -286,8 +429,15 @@ def promote_candidate(expected_build_id: str) -> int:
     candidate_archive = _dist_path(manifest["candidate_archive"])
     stable_archive = _dist_path(manifest["archive"])
     executable = _dist_path(manifest["executable"])
-    if not candidate_archive.is_file() or not executable.is_file():
+    mcp_executable = _dist_path(manifest["mcp_executable"])
+    if (
+        not candidate_archive.is_file()
+        or not executable.is_file()
+        or not mcp_executable.is_file()
+    ):
         raise RuntimeError("Pending portable build is incomplete")
+    if mcp_executable != executable.with_name(f"{MCP_NAME}.exe"):
+        raise RuntimeError("The MCP executable must share the editor's application folder")
 
     backup = DIST / f".{stable_archive.name}.previous-{expected_build_id}"
     stable_existed = stable_archive.is_file()

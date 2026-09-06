@@ -43,6 +43,8 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Saves a relocatable editable `.cvpack.json` project (media beside the project is stored by relative path).
 - Atomically exports a game-ready folder and sharing ZIP.
 - Validates metadata, references, inventory, PNG signatures, timestamps, codecs, complete media decoding, and ZIP CRC before publishing.
+- Lets an MCP-compatible assistant work with a live visible editor, or an explicitly headless
+	project, using local stdio tools for media review, editing, saving, and validated export.
 - Checks public GitHub releases and offers verified, in-place Windows updates without replacing
   projects, media, or unrelated files.
 
@@ -95,7 +97,8 @@ The build computer needs **64-bit Python 3.12** and an internet connection for t
 script creates an isolated environment under the current user's local application data, installs
 the pinned Python packaging dependencies, securely
 downloads and verifies the pinned LGPL FFmpeg runtime, builds the application, and smoke-tests the
-finished executable. It does not require a system FFmpeg installation. Use
+finished editor and console MCP executables, including an official-SDK stdio handshake.
+It does not require a system FFmpeg installation. Use
 `-ResetBuildEnvironment` if the isolated environment ever needs to be recreated.
 
 The finished outputs are:
@@ -112,8 +115,13 @@ older `portable-*` generation folders can be deleted when no copy of the app is 
 This is a **portable application folder**, not an installer. To use or share it:
 
 1. Extract the complete ZIP; do not run the executable from inside the ZIP viewer.
-2. Keep the extracted directory together, including its `bin` and `_internal` directories.
+2. Keep the extracted directory together, including both EXEs and its `bin` and `_internal`
+	directories.
 3. Run `Choicer Voicer Pack Creator.exe`.
+
+`Choicer Voicer MCP.exe` is the separate **console** entry point for assistant clients; the normal
+editor EXE stays windowed. Both share one bundled runtime. Let an MCP client launch the console
+executable rather than double-clicking it.
 
 The receiving computer does not need Python, FFmpeg, FFprobe, Godot, administrator access, or an
 installation step. The folder can be moved or deleted as a unit. The app stores recent-directory and
@@ -174,6 +182,30 @@ py -3.12 -m venv .venv
 ```
 
 If `py` is unavailable, invoke your installed Python executable directly.
+
+## Use an LLM / MCP assistant
+
+Open **Help → LLM / MCP Help** for a copyable client configuration and an offline safety guide.
+See [docs/MCP.md](docs/MCP.md) for portable/source configuration, VS Code's configuration shape,
+tool examples, and troubleshooting.
+
+- The client starts/stops a **local stdio** server; there is no HTTP port or separate daemon.
+- **Live editor is the default.** The server opens a visible editor automatically. Save and close
+	an already-running editor before connecting: it does not attach to that window, and the
+	single-instance lock rejects a second visible editor.
+- Opt into `--headless` for an independent in-memory project with no QApplication/window.
+	Save explicitly before disconnecting, and never edit the same project file concurrently.
+- Source entry points are `python -m choicer_voicer_pack_creator --mcp` and
+	`choicer-voicer-mcp`; packaged clients use the sibling `Choicer Voicer MCP.exe`.
+- **Preview audio/images and other tool results may be sent to your client's model provider.**
+	Local stdio is not a local-only AI guarantee. Unlike optional local ASR, assistant previews
+	can leave the machine.
+
+Assistant output is review evidence, not authoritative captions, speaker identity, or timing.
+Review against the source and respect media permissions and author credits. The editor supports
+YouTube import and local backing-track separation, but these MCP tools do not expose those
+workflows yet. Use the editor for those operations, then save and open the project through MCP,
+or reference prepared local assets. The MCP tools also do not provide OCR or wiki/dialogue search.
 
 ## Create a pack
 
@@ -598,6 +630,8 @@ archive is cached under `.cache/ffmpeg/` for later builds.
 
 The selected upstream variant is **LGPL shared**, not GPL or nonfree. The output includes the exact
 upstream LGPL text, build-provenance manifest, and [third-party notices](THIRD_PARTY_NOTICES.md).
+Portable builds also include the MCP SDK and its Python runtime dependency licenses/metadata under
+`licenses/python/`, indexed in the bundle's third-party notices.
 The application invokes FFmpeg as a separate program and lets users replace the `bin` directory
 with another compatible pair.
 
