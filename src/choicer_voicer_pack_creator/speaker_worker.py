@@ -56,15 +56,18 @@ def usable_audio(samples: Any) -> tuple[Any | None, str]:
     if len(samples) < round(SAMPLE_RATE * MIN_ACTIVE_SECONDS):
         return None, "short"
     width = round(SAMPLE_RATE * ACTIVITY_WINDOW_SECONDS)
-    windows = samples[:len(samples) // width * width].reshape(-1, width)
-    rms = np.sqrt(np.mean(windows.astype(np.float64) ** 2, axis=1))
-    active = np.flatnonzero(rms >= MIN_RMS)
+    starts = np.arange(0, len(samples), width)
+    lengths = np.minimum(width, len(samples) - starts)
+    energy = np.add.reduceat(samples.astype(np.float64) ** 2, starts)
+    active = np.flatnonzero(energy >= MIN_RMS**2 * lengths)
     if not len(active):
         return None, "silence"
-    if len(active) * ACTIVITY_WINDOW_SECONDS < MIN_ACTIVE_SECONDS:
+    # Count the final partial window by its actual length, not a full or missing 20 ms.
+    if int(lengths[active].sum()) < round(SAMPLE_RATE * MIN_ACTIVE_SECONDS):
         return None, "short"
-    first, last = max(0, int(active[0]) - 1), min(len(windows), int(active[-1]) + 2)
-    return samples[first * width:last * width], ""
+    first = max(0, int(active[0]) - 1) * width
+    last = min(len(samples), (int(active[-1]) + 2) * width)
+    return samples[first:last], ""
 
 
 def load_session(model: Path) -> Any:

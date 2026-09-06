@@ -34,13 +34,16 @@ ProgressCallback = Callable[[str, float | None], None]
 CancelCallback = Callable[[], bool]
 SAMPLE_RATE = 16000
 EMBEDDING_DIMENSIONS = 256
-PREPROCESSING_VERSION = "wespeaker-knf-1"
-MIN_ACTIVE_SECONDS = 1.5
+PREPROCESSING_VERSION = "wespeaker-knf-2"
+MIN_ACTIVE_SECONDS = 0.75
 MAX_CLIP_SECONDS = 12.0
 ACTIVITY_WINDOW_SECONDS = 0.02
 MIN_RMS = 0.005
-MIN_COSINE = 0.72
-SINGLE_CHARACTER_MIN_COSINE = 0.78
+# Training-matched WeSpeaker scores are not probabilities; keep stricter open-set evidence.
+MIN_COSINE = 0.40
+SHORT_REFERENCE_MIN_COSINE = 0.45
+SINGLE_CHARACTER_MIN_COSINE = 0.50
+LONG_REFERENCE_SECONDS = 2.0
 MIN_RUNNER_UP_MARGIN = 0.12
 MODEL_SHA256 = "e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012"
 MODEL_BYTES = 26530550
@@ -147,12 +150,17 @@ def choose_matches(
     import numpy as np
 
     references: dict[str, list[Any]] = {}
+    reference_thresholds: dict[str, float] = {}
     for clip in clips:
         check_cancelled()
         if len(clip.characters) == 1 and clip.segment_id in signatures:
             references.setdefault(clip.characters[0], []).append(
                 normalized_embedding(signatures[clip.segment_id]),
             )
+            character = clip.characters[0]
+            reference_thresholds.setdefault(character, SHORT_REFERENCE_MIN_COSINE)
+            if clip.end is not None and clip.end - clip.start >= LONG_REFERENCE_SECONDS:
+                reference_thresholds[character] = MIN_COSINE
     prototypes = {}
     for character, seeds in references.items():
         mean = np.mean(seeds, axis=0)
@@ -170,7 +178,10 @@ def choose_matches(
             reverse=True,
         )
         score, character = scores[0]
-        threshold = SINGLE_CHARACTER_MIN_COSINE if len(prototypes) == 1 else MIN_COSINE
+        threshold = (
+            SINGLE_CHARACTER_MIN_COSINE if len(prototypes) == 1
+            else reference_thresholds[character]
+        )
         # A centroid alone can overstate evidence from mutually inconsistent references.
         best_seed = max(float(np.dot(target, seed)) for seed in references[character])
         if score < threshold or best_seed < threshold:

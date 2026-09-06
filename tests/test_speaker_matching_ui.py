@@ -34,6 +34,7 @@ def matching(qtbot, tmp_path, monkeypatch):
         needs_download=False, thread_ids=[],
         preparations=[],
         cache_misses=0,
+        matches_enabled=True,
     )
     video = tmp_path / "source.mp4"
     video.write_bytes(b"fake media; worker is mocked")
@@ -70,7 +71,7 @@ def matching(qtbot, tmp_path, monkeypatch):
             name = next(clip.characters[0] for clip in clips if clip.characters)
             matches = tuple(
                 SpeakerMatch(clip.segment_id, name, 0.95) for clip in clips if not clip.characters
-            )
+            ) if state.matches_enabled else ()
             return SpeakerResult(matches, sources, len(clips), 0, 0)
 
     monkeypatch.setattr(speaker_matching, "SpeakerMatchingManager", FakeManager)
@@ -253,14 +254,39 @@ def test_only_manual_single_speaker_references_and_eligible_targets_are_submitte
     excluded = Segment(1, 3, speaker_assignment="excluded")
     multi = Segment(1, 3, characters=["Alice", "Bob"])
     grunt = Segment(1, 3, caption="[grunting]")
-    for segment in (excluded, multi, grunt):
+    reaction = Segment(1, 2, caption="Ugh...")
+    dialogue = Segment(1, 2, caption="Yes, my lady!")
+    for segment in (excluded, multi, grunt, reaction, dialogue):
         matching.editor.project.add_segment(segment)
     matching.editor._set_dirty(True)
     start(matching, qtbot)
     assert {clip.segment_id for clip in matching.state.calls[0][0]} == {
-        matching.reference.id, matching.target.id,
+        matching.reference.id, matching.target.id, dialogue.id,
     }
     finish(matching, qtbot)
+
+
+@pytest.mark.parametrize("caption", [
+    "[grunting]", "(sighing)", "[gasp]...", "Ugh...", "Huh?", "Hmm.", "Ah!", "Uh...",
+])
+def test_nonverbal_reactions_are_not_voice_evidence(caption):
+    assert speaker_matching._nonverbal(caption)
+
+
+@pytest.mark.parametrize("caption", [
+    "Sorry...", "Yes, my lady!", "Ugh... another annoying one", "Ah, there you are!",
+])
+def test_spoken_dialogue_is_not_filtered_as_a_reaction(caption):
+    assert not speaker_matching._nonverbal(caption)
+
+
+def test_no_matches_explains_how_to_improve_the_reference(matching, qtbot):
+    matching.state.matches_enabled = False
+    start(matching, qtbot)
+    finish(matching, qtbot)
+    assert "Filled 0" in matching.controls.status.text()
+    assert "longer, clean dialogue line" in matching.controls.status.text()
+    assert matching.target.characters == []
 
 
 def test_typing_does_not_start_model_until_name_is_committed(matching, qtbot):
@@ -282,7 +308,7 @@ def test_typing_does_not_start_model_until_name_is_committed(matching, qtbot):
 def test_short_reference_prepares_targets_but_does_not_match(matching, qtbot):
     matching.reference.end = 0.5
     matching.controls.retry()
-    qtbot.waitUntil(lambda: "1.5 seconds" in matching.controls.status.text())
+    qtbot.waitUntil(lambda: "0.75 seconds" in matching.controls.status.text())
     assert not matching.state.started.is_set()
     assert matching.state.calls == []
     assert {(clip.start, clip.end) for clip in matching.state.preparations[0][0]} == {
