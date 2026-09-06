@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from array import array
@@ -60,6 +61,30 @@ class DecodedAudioStats:
     leading_quiet: float
     trailing_quiet: float
     has_activity: bool
+
+
+@dataclass(frozen=True, slots=True)
+class VideoEncodingProgress:
+    frames: int | None
+    fps: float | None
+    speed: float | None
+
+    @classmethod
+    def from_fields(cls, fields: dict[str, str]) -> VideoEncodingProgress:
+        def number(name: str) -> float | None:
+            raw = fields.get(name, "").strip().removesuffix("x")
+            if raw in {"", "N/A"}:
+                return None
+            try:
+                value = float(raw)
+            except ValueError as error:
+                raise MediaError(f"Invalid FFmpeg progress field {name}: {raw}") from error
+            if not math.isfinite(value) or value < 0:
+                raise MediaError(f"Invalid FFmpeg progress field {name}: {raw}")
+            return value
+
+        frames = number("frame")
+        return cls(int(frames) if frames is not None else None, number("fps"), number("speed"))
 
 
 class MediaTools:
@@ -474,6 +499,8 @@ class MediaTools:
         height: int,
         fps: int,
         progress: ProgressCallback | None = None,
+        *,
+        encoding_progress: Callable[[VideoEncodingProgress], None] | None = None,
     ) -> None:
         if progress:
             progress("Converting video to Ogg Theora/Vorbis…")
@@ -483,13 +510,19 @@ class MediaTools:
             "force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,"
             f"fps={fps}"
         )
-        self.run(
+        self._run_video_conversion(
             [
                 self.ffmpeg,
                 "-hide_banner",
                 "-loglevel",
                 "error",
                 "-y",
+                "-nostdin",
+                "-nostats",
+                "-stats_period",
+                "0.5",
+                "-progress",
+                "pipe:1",
                 "-i",
                 str(source),
                 "-vf",
@@ -504,8 +537,58 @@ class MediaTools:
                 "5",
                 str(destination),
             ],
-            "Video conversion",
+            encoding_progress,
         )
+
+    def _run_video_conversion(
+        self,
+        command: Sequence[str],
+        progress: Callable[[VideoEncodingProgress], None] | None,
+    ) -> None:
+        description = "Video conversion"
+        started = self._command_started(command, description)
+        # Keep stderr off the progress pipe so verbose failures cannot deadlock FFmpeg.
+        with tempfile.TemporaryFile() as errors:
+            try:
+                process = subprocess.Popen(
+                    list(command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=errors, text=True, encoding="utf-8", errors="replace",
+                    startupinfo=self._startup_info(),
+                )
+            except OSError as error:
+                diagnostic_exception(
+                    "media_command_launch_failed", error, command=list(command),
+                    duration_seconds=round(time.monotonic() - started[0], 3),
+                    command_id=started[1],
+                )
+                raise
+            try:
+                assert process.stdout is not None
+                fields: dict[str, str] = {}
+                for line in process.stdout:
+                    key, separator, value = line.strip().partition("=")
+                    if separator:
+                        fields[key] = value
+                        if key == "progress":
+                            if progress is not None:
+                                progress(VideoEncodingProgress.from_fields(fields))
+                            fields.clear()
+                process.wait()
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+                if process.stdout is not None:
+                    process.stdout.close()
+                errors.seek(0, os.SEEK_END)
+                errors.seek(max(0, errors.tell() - 16384))
+                detail = errors.read().decode("utf-8", "replace").strip()
+                self._command_finished(process.returncode, detail, started)
+            if process.returncode != 0:
+                raise MediaError(
+                    f"{description} failed: {detail or 'Unknown FFmpeg error'} "
+                    f"(exit code {process.returncode})"
+                )
 
     def convert_audio(
         self,

@@ -44,6 +44,8 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Reopens the last 10 saved or opened projects from **File > Open Recent**, even after restarting.
 - Atomically exports a game-ready folder and sharing ZIP.
 - Validates metadata, references, inventory, PNG signatures, timestamps, codecs, complete media decoding, and ZIP CRC before publishing.
+- Lets an MCP-compatible assistant work with a live visible editor, or an explicitly headless
+	project, using local stdio tools for media review, editing, saving, and validated export.
 - Checks public GitHub releases and offers verified, in-place Windows updates without replacing
   projects, media, or unrelated files.
 
@@ -96,7 +98,8 @@ The build computer needs **64-bit Python 3.12** and an internet connection for t
 script creates an isolated environment under the current user's local application data, installs
 the pinned Python packaging dependencies, securely
 downloads and verifies the pinned LGPL FFmpeg runtime, builds the application, and smoke-tests the
-finished executable. It does not require a system FFmpeg installation. Use
+finished editor and console MCP executables, including an official-SDK stdio handshake.
+It does not require a system FFmpeg installation. Use
 `-ResetBuildEnvironment` if the isolated environment ever needs to be recreated.
 
 The finished outputs are:
@@ -113,8 +116,13 @@ older `portable-*` generation folders can be deleted when no copy of the app is 
 This is a **portable application folder**, not an installer. To use or share it:
 
 1. Extract the complete ZIP; do not run the executable from inside the ZIP viewer.
-2. Keep the extracted directory together, including its `bin` and `_internal` directories.
+2. Keep the extracted directory together, including both EXEs and its `bin` and `_internal`
+	directories.
 3. Run `Choicer Voicer Pack Creator.exe`.
+
+`Choicer Voicer MCP.exe` is the separate **console** entry point for assistant clients; the normal
+editor EXE stays windowed. Both share one bundled runtime. Let an MCP client launch the console
+executable rather than double-clicking it.
 
 The receiving computer does not need Python, FFmpeg, FFprobe, Godot, administrator access, or an
 installation step. The folder can be moved or deleted as a unit. The app stores recent-project,
@@ -176,6 +184,30 @@ py -3.12 -m venv .venv
 
 If `py` is unavailable, invoke your installed Python executable directly.
 
+## Use an LLM / MCP assistant
+
+Open **Help → LLM / MCP Help** for a copyable client configuration and an offline safety guide.
+See [docs/MCP.md](docs/MCP.md) for portable/source configuration, VS Code's configuration shape,
+tool examples, and troubleshooting.
+
+- The client starts/stops a **local stdio** server; there is no HTTP port or separate daemon.
+- **Live editor is the default.** The server opens a visible editor automatically. Save and close
+	an already-running editor before connecting: it does not attach to that window, and the
+	single-instance lock rejects a second visible editor.
+- Opt into `--headless` for an independent in-memory project with no QApplication/window.
+	Save explicitly before disconnecting, and never edit the same project file concurrently.
+- Source entry points are `python -m choicer_voicer_pack_creator --mcp` and
+	`choicer-voicer-mcp`; packaged clients use the sibling `Choicer Voicer MCP.exe`.
+- **Preview audio/images and other tool results may be sent to your client's model provider.**
+	Local stdio is not a local-only AI guarantee. Unlike optional local ASR, assistant previews
+	can leave the machine.
+
+Assistant output is review evidence, not authoritative captions, speaker identity, or timing.
+Review against the source and respect media permissions and author credits. The editor supports
+YouTube import and local backing-track separation, but these MCP tools do not expose those
+workflows yet. Use the editor for those operations, then save and open the project through MCP,
+or reference prepared local assets. The MCP tools also do not provide OCR or wiki/dialogue search.
+
 ## Create a pack
 
 1. Choose **File → New from Video**.
@@ -202,10 +234,24 @@ If a project has moved or is unavailable, reopening it reports the usual error; 
 to find its new location. Switching projects still prompts you to save or discard unsaved edits.
 
 Export opens a progress dialog with the current operation, total and current-step elapsed
-time, and a scrollable activity history. It reports video conversion, each prompt's audio
-and image preparation, staged and published media validation, ZIP creation, and publication.
-The activity bar stays indeterminate because these operations do not have a reliable overall
-percentage. Keep the dialog open while export runs; **Close** becomes available only after
+time, and a scrollable activity history without repetitive timestamp prefixes. Video conversion
+processes the **full video before extracting prompts**. Its live status shows encoded video
+position, frame count, percentage, and encoding speed when FFmpeg supplies those measurements.
+It identifies the prompt at that position (number, speaker,
+source range, and caption), or the gap between prompts. If no newer frame is reported for 15
+seconds, the dialog says it is waiting for a newer frame report rather than implying progress.
+Live updates replace the current history entry instead of filling the log.
+
+Each prompt's audio, image, and metadata steps show its identity and source range. The dialog
+also reports staged and published media validation, ZIP creation, and publication.
+The **current-step time remaining** and **whole-export time remaining** start with rough workload
+estimates, then adapt to measured video throughput and completed prompt/validation timings.
+The separate **estimated overall progress** bar includes all remaining steps, including ZIP
+creation (when requested), final validation, and cleanup. Estimates can move backward as timings
+change; an unmeasured step that outlasts its estimate shows **re-estimating** instead of a false
+zero-second countdown. Only a successful export reaches 100%. The current-step bar shows measured
+video progress separately and stays indeterminate for operations without measurable progress.
+Keep the dialog open while export runs; **Close** becomes available only after
 the worker finishes. The dialog then keeps the output locations, cleanup notes, or failure
 details visible until dismissed.
 
@@ -593,6 +639,8 @@ archive is cached under `.cache/ffmpeg/` for later builds.
 
 The selected upstream variant is **LGPL shared**, not GPL or nonfree. The output includes the exact
 upstream LGPL text, build-provenance manifest, and [third-party notices](THIRD_PARTY_NOTICES.md).
+Portable builds also include the MCP SDK and its Python runtime dependency licenses/metadata under
+`licenses/python/`, indexed in the bundle's third-party notices.
 The application invokes FFmpeg as a separate program and lets users replace the `bin` directory
 with another compatible pair.
 

@@ -49,10 +49,12 @@ from PySide6.QtWidgets import (
 from choicer_voicer_pack_creator import __version__
 from choicer_voicer_pack_creator.analysis import AnalysisSuggestion
 from choicer_voicer_pack_creator.diagnostics import diagnostic_event, diagnostic_exception
+from choicer_voicer_pack_creator.export_progress import ExportProgress, format_time
 from choicer_voicer_pack_creator.exporter import (
     ExportResult,
     PackExporter,
     safe_name,
+    sha256,
 )
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import AnalysisReview, PackProject, Segment
@@ -112,7 +114,7 @@ class WaveformWorker(QThread):
 
 
 class ExportWorker(QThread):
-    progress = Signal(str)
+    progress = Signal(object)
     completed = Signal(object)
     failed = Signal(str)
 
@@ -134,13 +136,6 @@ class ExportWorker(QThread):
         except Exception as error:
             diagnostic_exception("export_worker_failed", error)
             self.failed.emit(str(error))
-
-
-def format_time(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    minutes = int(seconds // 60)
-    remainder = seconds - minutes * 60
-    return f"{minutes:02d}:{remainder:06.3f}"
 
 
 class MainWindow(QMainWindow):
@@ -173,6 +168,9 @@ class MainWindow(QMainWindow):
         )
         self.project = PackProject(authors=[getpass.getuser()])
         self.project_path: Path | None = None
+        self._saved_project_hash: str | None = None
+        self._automation_active = False
+        self._automation_disconnected = False
         self.selected_segment_id = ""
         self.dirty = False
         self._syncing = False
@@ -304,6 +302,8 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.action_analyze)
         tools_menu.addAction(self.action_backing)
         help_menu = self.menuBar().addMenu("&Help")
+        self.action_mcp_help = help_menu.addAction("LLM / MCP Help")
+        self.action_mcp_help.triggered.connect(self.show_mcp_help)
         self.updater = UpdateController(self, help_menu)
         self.action_logs = help_menu.addAction("Open Diagnostic Logs...")
         self.action_logs.triggered.connect(
@@ -958,6 +958,8 @@ class MainWindow(QMainWindow):
                 else QMessageBox.StandardButton.Yes
             ),
         )
+        if self._automation_disconnected:
+            return
         if answer == QMessageBox.StandardButton.No:
             self._clear_recovery_snapshot()
             return
@@ -1320,6 +1322,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Could not save project", str(error))
             return False
         self.project_path = destination.resolve()
+        self._saved_project_hash = sha256(self.project_path)
         self.settings.setValue("lastProjectDir", str(self.project_path.parent))
         self._clear_recovery_snapshot()
         self._set_dirty(False)
@@ -1347,17 +1350,28 @@ class MainWindow(QMainWindow):
         project: PackProject,
         project_path: Path | None,
         mark_dirty: bool,
+        *,
+        preserve_view: bool = False,
     ) -> None:
         if self._discard_recovery_on_transition:
             self._clear_recovery_snapshot()
-        self._cancel_waveform_workers()
-        if hasattr(self, "player"):
-            self._reset_transport_state()
-        self.player.stop() if hasattr(self, "player") else None
+        preserve_view = preserve_view and (
+            self.project.video_path == project.video_path
+            and self.project.video_duration == project.video_duration
+        )
+        if not preserve_view:
+            self._cancel_waveform_workers()
+            if hasattr(self, "player"):
+                self._reset_transport_state()
+                self.player.stop()
         self.project = project
         self.project.sort_segments()
         self.project_path = project_path
-        self.selected_segment_id = ""
+        self._saved_project_hash = (
+            sha256(project_path) if project_path and project_path.is_file() else None
+        )
+        if not preserve_view or project.segment_by_id(self.selected_segment_id) is None:
+            self.selected_segment_id = ""
         self._syncing = True
         try:
             self.title_edit.setText(project.title)
@@ -1376,21 +1390,24 @@ class MainWindow(QMainWindow):
             duration = max(0.1, project.video_duration)
             self.mark_in_spin.setMaximum(duration)
             self.mark_out_spin.setMaximum(duration)
-            self.mark_in_spin.setValue(0.0)
-            self.mark_out_spin.setValue(min(3.0, duration))
+            if not preserve_view:
+                self.mark_in_spin.setValue(0.0)
+                self.mark_out_spin.setValue(min(3.0, duration))
             self.timeline.set_duration(duration)
-            self.timeline.set_waveform([])
+            if not preserve_view:
+                self.timeline.set_waveform([])
             self.timeline.set_segments(project.segments)
             self.timeline.set_marks(self.mark_in_spin.value(), self.mark_out_spin.value())
-            self._refresh_table("")
+            self._refresh_table(self.selected_segment_id)
             self._sync_selected_editor()
         finally:
             self._syncing = False
-        if project.video_path and Path(project.video_path).is_file():
-            self.player.setSource(QUrl.fromLocalFile(project.video_path))
-            self._start_waveform(project.video_path, project.video_duration)
-        else:
-            self.player.setSource(QUrl())
+        if not preserve_view:
+            if project.video_path and Path(project.video_path).is_file():
+                self.player.setSource(QUrl.fromLocalFile(project.video_path))
+                self._start_waveform(project.video_path, project.video_duration)
+            else:
+                self.player.setSource(QUrl())
         self.video_widget.set_position(self.current_position())
         self._set_dirty(mark_dirty)
         self._refresh_validation_label()
@@ -2142,16 +2159,17 @@ class MainWindow(QMainWindow):
         segment = self.selected_segment()
         if not segment:
             return
-        names = [item.strip() for item in self.speakers_edit.text().split(",") if item.strip()]
-        segment.characters = list(dict.fromkeys(names))
-        self._set_dirty(True)
+        if self.speakers_edit.text() != ", ".join(segment.characters):
+            names = [item.strip() for item in self.speakers_edit.text().split(",") if item.strip()]
+            segment.characters = list(dict.fromkeys(names))
+            self._set_dirty(True)
         self._refresh_table(segment.id)
 
     def _selected_speakers_typed(self) -> None:
         if self._syncing:
             return
         segment = self.selected_segment()
-        if not segment:
+        if not segment or self.speakers_edit.text() == ", ".join(segment.characters):
             return
         segment.characters = list(
             dict.fromkeys(
@@ -2209,17 +2227,7 @@ class MainWindow(QMainWindow):
     def _pack_details_changed(self) -> None:
         if self._syncing:
             return
-        self.project.title = self.title_edit.text().strip()
-        self.project.authors = [
-            item.strip() for item in self.authors_edit.text().split(",") if item.strip()
-        ]
-        self.project.readme = self.readme_edit.toPlainText()
-        self.project.head_padding = self.head_pad_spin.value()
-        self.project.tail_padding = self.tail_pad_spin.value()
-        self.project.video_height = self.height_spin.value()
-        self.project.video_fps = self.fps_spin.value()
-        self.project.preserve_source_video = self.preserve_video_check.isChecked()
-        self._set_dirty(True)
+        self._commit_editors()
         self._refresh_validation_label()
 
     def _video_profile_changed(self) -> None:
@@ -2234,25 +2242,30 @@ class MainWindow(QMainWindow):
         if self._syncing:
             return
         before = self.project.to_dict()
-        self.project.title = self.title_edit.text().strip()
-        self.project.authors = [
-            item.strip() for item in self.authors_edit.text().split(",") if item.strip()
-        ]
+        if self.title_edit.text() != self.project.title:
+            self.project.title = self.title_edit.text().strip()
+        if self.authors_edit.text() != ", ".join(self.project.authors):
+            self.project.authors = [
+                item.strip() for item in self.authors_edit.text().split(",") if item.strip()
+            ]
         self.project.readme = self.readme_edit.toPlainText()
-        self.project.head_padding = self.head_pad_spin.value()
-        self.project.tail_padding = self.tail_pad_spin.value()
+        if self.head_pad_spin.value() != round(self.project.head_padding, 3):
+            self.project.head_padding = self.head_pad_spin.value()
+        if self.tail_pad_spin.value() != round(self.project.tail_padding, 3):
+            self.project.tail_padding = self.tail_pad_spin.value()
         self.project.video_height = self.height_spin.value()
         self.project.video_fps = self.fps_spin.value()
         self.project.preserve_source_video = self.preserve_video_check.isChecked()
         segment = self.selected_segment()
         if segment:
-            segment.characters = list(
-                dict.fromkeys(
-                    item.strip()
-                    for item in self.speakers_edit.text().split(",")
-                    if item.strip()
+            if self.speakers_edit.text() != ", ".join(segment.characters):
+                segment.characters = list(
+                    dict.fromkeys(
+                        item.strip()
+                        for item in self.speakers_edit.text().split(",")
+                        if item.strip()
+                    )
                 )
-            )
             segment.caption = self.caption_edit.toPlainText()
         if self.project.to_dict() != before:
             self.video_widget.set_segments(self.project.segments)
@@ -2574,7 +2587,7 @@ class MainWindow(QMainWindow):
         self._export_dialog = dialog
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.finished.connect(self._export_dialog_closed)
-        worker.progress.connect(self.progress_label.setText)
+        worker.progress.connect(self._export_progress)
         worker.progress.connect(dialog.report_progress)
         worker.completed.connect(self._export_completed)
         worker.failed.connect(self._export_failed)
@@ -2582,6 +2595,10 @@ class MainWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         dialog.show()
         worker.start()
+
+    @Slot(object)
+    def _export_progress(self, update: ExportProgress) -> None:
+        self.progress_label.setText(update.message.splitlines()[0])
 
     def _confirm_backing_export(self) -> bool:
         if self.project.backing_track_path:
@@ -2698,6 +2715,8 @@ class MainWindow(QMainWindow):
         )
 
     def _maybe_save(self) -> bool:
+        if self._automation_disconnected:
+            return False
         self._discard_recovery_on_transition = False
         self._commit_editors()
         if not self.dirty:
@@ -2711,7 +2730,7 @@ class MainWindow(QMainWindow):
             | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Save,
         )
-        if answer == QMessageBox.StandardButton.Cancel:
+        if self._automation_disconnected or answer == QMessageBox.StandardButton.Cancel:
             return False
         if answer == QMessageBox.StandardButton.Save:
             return self.save_project()
@@ -2746,8 +2765,17 @@ class MainWindow(QMainWindow):
             "<p>Project files store paths and edit decisions only. Source media remains yours.</p>",
         )
 
+    def show_mcp_help(self) -> None:
+        from choicer_voicer_pack_creator.ui.mcp_help_dialog import McpHelpDialog
+
+        McpHelpDialog(self).exec()
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         diagnostic_event("window_close_requested", dirty=self.dirty)
+        if self._automation_active:
+            self.statusBar().showMessage("Wait for the current MCP operation to finish before closing.")
+            event.ignore()
+            return
         if not self.updater.can_close():
             event.ignore()
             return
@@ -2759,9 +2787,11 @@ class MainWindow(QMainWindow):
             self._backing_dialog.reject()
             event.ignore()
             return
-        if not self._maybe_save():
+        if not self._automation_disconnected and not self._maybe_save():
             event.ignore()
             return
+        if self._automation_disconnected and self.dirty:
+            self._write_recovery_snapshot()
         self._save_layout_state()
         self._reset_transport_state()
         self.player.stop()
