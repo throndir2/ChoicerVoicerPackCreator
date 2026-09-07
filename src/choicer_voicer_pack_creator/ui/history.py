@@ -209,10 +209,10 @@ class EditHistoryController(QObject):
         editor.prompt_player.stop()
         editor._preview_end = None
         self.busy = True
-        editor._set_loading(True)
+        editor.statusBar().clear_issue("history")
+        editor._set_loading(True, message="Restoring edit history...")
         editor._validation_timer.stop()
         editor._recovery_timer.stop()
-        editor.statusBar().showMessage("Restoring edit history...")
         self.refresh()
 
         def build(context):
@@ -251,6 +251,7 @@ class EditHistoryController(QObject):
             self._row_timer.start()
 
         def failed(message: str) -> None:
+            editor.statusBar().set_issue("history", "Could not restore edit history", details=message)
             editor.workspace.notice("Could not restore edit history", message)
 
         def finished() -> None:

@@ -45,13 +45,11 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
-    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSlider,
     QSplitter,
-    QStatusBar,
     QTabBar,
     QTableWidget,
     QTableWidgetItem,
@@ -114,6 +112,7 @@ from choicer_voicer_pack_creator.ui.speaker_matching import (
     SpeakerMatchingControls,
     update_speaker_item,
 )
+from choicer_voicer_pack_creator.ui.status_bar import ProjectStatusBar
 from choicer_voicer_pack_creator.ui.subtitles import SubtitleVideoWidget
 from choicer_voicer_pack_creator.ui.tasks_window import TasksWindow
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
@@ -212,7 +211,7 @@ class ProjectEditor(QWidget):
         self._document_layout = QVBoxLayout(self)
         self._document_layout.setContentsMargins(0, 0, 0, 0)
         self._document_layout.setSpacing(0)
-        self._status_bar = QStatusBar(self)
+        self._status_bar = ProjectStatusBar(self)
         self.media = media
         self.importer = PackImporter(media)
         self.settings = settings or QSettings(
@@ -292,7 +291,7 @@ class ProjectEditor(QWidget):
         super().showEvent(event)
         QTimer.singleShot(0, self._restore_layout_state)
 
-    def statusBar(self) -> QStatusBar:  # noqa: N802
+    def statusBar(self) -> ProjectStatusBar:  # noqa: N802
         return self._status_bar
 
     def setCentralWidget(self, widget: QWidget) -> None:  # noqa: N802
@@ -446,7 +445,7 @@ class ProjectEditor(QWidget):
             (self.action_backing, "backing", "Backing", "Generate music/effects backing for this project without changing the source."),
             (self.action_cut_video, "split", None, "Remove an In/Out range from the video and close the gap, keeping later dialogue and backing in sync. Original media is preserved."),
             (self.action_extract_scene, "new", None, "Copy the In/Out range and its dialogue into a separate scene project. Select a segment first to use its range."),
-            (self.action_processing, "tasks", None, "View transcript, voice, and backing progress or manage processing for this project."),
+            (self.action_processing, "tasks", None, "View project readiness, waveform, transcript, voice, and backing status, or manage processing and notices."),
             (self.action_clear_speaker_autofill, "restore", None, "Clear unchanged names from the last automatic batch in this tab and keep those segments unassigned. Subsequent manual edits are preserved."),
             (self.action_add, "add", "Add", "Create a new segment using the current In/Out times. Existing segments are not changed."),
             (self.action_split, "split", "Split", "Cut the selected segment into two at the white playback line (playhead). Move the playhead inside the segment first."),
@@ -480,8 +479,14 @@ class ProjectEditor(QWidget):
 
         self.processing_dialog = ProcessingDialog(self.processing, self)
         self.processing_dialog.action_requested.connect(self._processing_action)
-        self.processing_status = ProcessingStatus(self.processing, self.action_processing, self)
-        self.statusBar().addPermanentWidget(self.processing_status)
+        self.processing_dialog.acknowledge_requested.connect(self.statusBar().acknowledge_issues)
+        self.processing_status = ProcessingStatus(
+            self.processing, self.action_processing, self.statusBar(),
+        )
+        self.statusBar().set_readiness_widget(self.processing_status)
+        self._validation_details = ""
+        self.statusBar().details_changed.connect(self._refresh_status_details)
+        self.processing.changed.connect(self._refresh_processing_activity)
 
         root = QWidget(self)
         root.setObjectName("projectEditorContent")
@@ -815,30 +820,12 @@ class ProjectEditor(QWidget):
             self.inspector_splitter.setStretchFactor(index, 1 if index == 1 else 0)
         self.inspector_splitter.splitterMoved.connect(self._schedule_layout_save)
 
-        self.validation_label = QLabel()
-        self.validation_label.setWordWrap(True)
-        self.validation_label.setObjectName("muted")
-        right_layout.addWidget(self.validation_label)
-
         splitter.addWidget(left)
         splitter.addWidget(right)
         splitter.setCollapsible(0, True)
         splitter.setStretchFactor(0, 7)
         splitter.setStretchFactor(1, 3)
         splitter.splitterMoved.connect(self._schedule_layout_save)
-
-        progress_row = QHBoxLayout()
-        self.progress_label = QLabel("Ready")
-        self.progress_label.setObjectName("muted")
-        progress_row.addWidget(self.progress_label)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 1)
-        self.progress_bar.setValue(1)
-        self.progress_bar.setMaximumWidth(280)
-        self.progress_bar.hide()
-        progress_row.addWidget(self.progress_bar)
-        root_layout.addLayout(progress_row)
-        self.statusBar().showMessage("Ready")
 
     def _time_spin(self) -> QDoubleSpinBox:
         spin = QDoubleSpinBox()
@@ -1024,8 +1011,9 @@ class ProjectEditor(QWidget):
             read_paths=(path,) if path else (),
             source_snapshot={"revision": self.session.revision},
         )
-        job.failed.connect(lambda message: self.statusBar().showMessage(
-            f"Could not update recovery snapshot: {message}"
+        job.completed.connect(lambda _value: self.statusBar().clear_issue("recovery"))
+        job.failed.connect(lambda message: self.statusBar().set_issue(
+            "recovery", "Could not update recovery snapshot", details=message,
         ))
 
     def _clear_recovery_snapshot(self) -> None:
@@ -1040,8 +1028,9 @@ class ProjectEditor(QWidget):
             resource_keys=(f"document-save:{self.session.id}",),
             write_paths=(store.path, store.previous_path),
         )
-        job.failed.connect(lambda message: self.statusBar().showMessage(
-            f"Could not remove recovery snapshot: {message}"
+        job.completed.connect(lambda _value: self.statusBar().clear_issue("recovery"))
+        job.failed.connect(lambda message: self.statusBar().set_issue(
+            "recovery", "Could not remove recovery snapshot", details=message,
         ))
 
     def restore_previous_save(self) -> None:
@@ -1384,6 +1373,11 @@ class ProjectEditor(QWidget):
         if self.project_path != project_path:
             self._saved_project_hash = None
         self.project_path = project_path
+        if not preserve_view:
+            self.statusBar().clearMessage()
+            self.statusBar().set_detail(
+                "save", f"Project file: {project_path}" if project_path else "Project: Not saved yet.",
+            )
         if not preserve_view or project.segment_by_id(self.selected_segment_id) is None:
             self.selected_segment_id = ""
         self._syncing = True
@@ -1523,9 +1517,10 @@ class ProjectEditor(QWidget):
         )
         self._scene_job = job
         self._refresh_scene_actions()
-        self.statusBar().showMessage("Video edit queued.")
+        self.statusBar().clear_issue("scene")
+        self.statusBar().set_activity("scene", "Video edit queued.")
         job.progress.connect(
-            lambda message, _fraction: self.statusBar().showMessage(message)
+            lambda message, _fraction: self.statusBar().set_activity("scene", message)
         )
 
         def completed(project: PackProject) -> None:
@@ -1556,11 +1551,14 @@ class ProjectEditor(QWidget):
                 self.statusBar().showMessage(f"Scene project saved: {path}")
 
         def failed(message: str) -> None:
-            self.statusBar().showMessage("Video edit failed; the original project was not changed.")
+            self.statusBar().set_issue(
+                "scene", "Video edit failed; the original project was not changed.", details=message,
+            )
             self.workspace.notice("Could not edit video", message)
 
         def finished() -> None:
             self._scene_job = None
+            self.statusBar().clear_activity("scene")
             self._refresh_scene_actions()
             if job.record.state == "cancelled":
                 self.statusBar().showMessage("Video edit cancelled; the original project was not changed.")
@@ -1586,11 +1584,16 @@ class ProjectEditor(QWidget):
         worker.completed.connect(self._waveform_ready)
         worker.failed.connect(self._waveform_failed)
         worker.finished.connect(self._retire_waveform_worker)
-        self.progress_label.setText("Reading waveform…")
+        self.statusBar().set_detail("waveform", "Waveform: Reading source audio.")
+        self.statusBar().set_activity("waveform", "Reading waveform…")
         worker.start()
 
     def _cancel_waveform_workers(self) -> None:
         self._waveform_request_id += 1
+        self.statusBar().clear_activity("waveform")
+        self.statusBar().clear_issue("waveform")
+        self.statusBar().clear_issue("preview")
+        self.statusBar().set_detail("waveform", "Waveform: No source waveform loaded.")
         for worker in tuple(self._waveform_workers):
             worker.requestInterruption()
 
@@ -1613,13 +1616,17 @@ class ProjectEditor(QWidget):
             self.mark_in_spin.setMaximum(duration)
             self.mark_out_spin.setMaximum(duration)
             self.timeline.set_waveform(peaks)
-            self.progress_label.setText(f"Waveform ready · {len(peaks):,} peaks")
+            self.statusBar().clear_activity("waveform")
+            self.statusBar().clear_issue("waveform")
+            self.statusBar().set_detail("waveform", f"Waveform: Ready · {len(peaks):,} peaks")
+            self.statusBar().showMessage("Waveform ready")
 
     @Slot(int, str, str)
     def _waveform_failed(self, request_id: int, path: str, message: str) -> None:
         if request_id == self._waveform_request_id and path == self.project.video_path:
-            self.progress_label.setText("Waveform unavailable")
-            self.statusBar().showMessage(message)
+            self.statusBar().clear_activity("waveform")
+            self.statusBar().set_detail("waveform", "Waveform: Unavailable")
+            self.statusBar().set_issue("waveform", "Waveform unavailable", details=message)
 
     def toggle_playback(self) -> None:
         self.workspace.pause_other_previews(self)
@@ -1692,6 +1699,7 @@ class ProjectEditor(QWidget):
         self.audio_output.setMuted(self._stopped_seek_audio_was_muted)
         self.timeline.set_playhead(target_ms / 1000.0)
         self.video_widget.set_position(target_ms / 1000.0)
+        self.statusBar().clear_issue("preview")
         self._playback_state_changed(self.player.playbackState())
 
     @Slot()
@@ -1701,7 +1709,8 @@ class ProjectEditor(QWidget):
         target_ms = self._stopped_seek_target_ms
         self.player.pause()
         self._cancel_stopped_seek(restore_audio=True)
-        self.statusBar().showMessage(
+        self.statusBar().set_issue(
+            "preview",
             f"Could not decode the preview frame at {target_ms / 1000:.3f}s. Try seeking nearby."
         )
 
@@ -1779,7 +1788,7 @@ class ProjectEditor(QWidget):
         diagnostic_event("video_player_error", error_code=_error.name, message=message)
         self._reset_transport_state()
         if message:
-            self.statusBar().showMessage(f"Video preview error: {message}")
+            self.statusBar().set_issue("preview", f"Video preview error: {message}")
 
     def _seek_slider_moved(self, value: int) -> None:
         if self.project.video_duration > 0:
@@ -2939,7 +2948,7 @@ class ProjectEditor(QWidget):
 
     @Slot(object)
     def _export_progress(self, update: ExportProgress) -> None:
-        self.progress_label.setText(update.message.splitlines()[0])
+        self.statusBar().set_activity("export", update.message.splitlines()[0])
 
     def _confirm_backing_export(self) -> bool:
         if self.project.backing_track_path:
@@ -2969,25 +2978,28 @@ class ProjectEditor(QWidget):
             return
         if self._export_dialog is not None:
             self._export_dialog.show_result(result)
+        self.statusBar().clear_activity("export")
         self.statusBar().showMessage(f"Exported {result.pack_path.name}")
 
     @Slot(str)
     def _export_failed(self, message: str) -> None:
         if self._export_dialog is not None:
             self._export_dialog.show_error(message)
-        self.statusBar().showMessage("Export failed")
+        self.statusBar().clear_activity("export")
+        self.statusBar().set_issue("export", "Export failed", details=message)
 
     @Slot()
     def _export_cancelled(self) -> None:
         if self._export_dialog is not None:
             self._export_dialog.show_cancelled()
+        self.statusBar().clear_activity("export")
         self.statusBar().showMessage("Export cancelled")
 
     @Slot()
     def _export_finished(self) -> None:
         if self._export_dialog is not None:
             self._export_dialog.worker_finished()
-            self._set_busy(False, self._export_dialog.progress_label.text())
+        self._set_busy(False)
         self._export_worker = None
 
     @Slot(int)
@@ -2995,16 +3007,21 @@ class ProjectEditor(QWidget):
         if self._export_worker is None:
             self._export_dialog = None
 
-    def _set_busy(self, busy: bool, message: str) -> None:
-        self.progress_label.setText(message)
-        self.progress_bar.setRange(0, 0 if busy else 1)
-        self.progress_bar.setValue(0 if busy else 1)
-        self.progress_bar.setVisible(busy)
+    def _set_busy(self, busy: bool, message: str = "") -> None:
+        if busy:
+            self.statusBar().clear_issue("export")
+            self.statusBar().set_activity("export", message)
+        else:
+            self.statusBar().clear_activity("export")
         self.action_export.setEnabled(not busy and not self.session.loading)
         self._update_combine_action()
 
-    def _set_loading(self, loading: bool) -> None:
+    def _set_loading(self, loading: bool, *, message: str = "Opening project…") -> None:
         self.session.loading = loading
+        if loading:
+            self.statusBar().set_activity("loading", message)
+        else:
+            self.statusBar().clear_activity("loading")
         self.editor_splitter.setEnabled(not loading)
         self.processing_dialog.setEnabled(not loading)
         self.processing_status.setEnabled(not loading)
@@ -3042,37 +3059,65 @@ class ProjectEditor(QWidget):
             errors = self.project.validate()
             if timeline_warnings is None:
                 timeline_warnings = audit_timeline_overlaps(self.project.segments)
-            warning_details = self._timeline_review_details(timeline_warnings)
+            warning_details = None
         else:
             errors, timeline_warnings, warning_details = prepared
+        self._present_validation(
+            errors, timeline_warnings, refresh_highlights=refresh_highlights,
+            warning_details=warning_details,
+        )
+
+    def _present_validation(
+        self, errors: list[str], timeline_warnings: list[TimelineOverlap], *,
+        refresh_highlights: bool = False, warning_details: list[str] | None = None,
+    ) -> None:
         if refresh_highlights:
             self._apply_timeline_review_highlights(timeline_warnings)
-        self.validation_label.setToolTip("\n".join(warning_details))
+        if warning_details is None:
+            warning_details = self._timeline_review_details(timeline_warnings)
+        self._validation_details = "\n".join([
+            f"Export requirements: {'Needs attention' if errors else 'Ready to export'}",
+            f"{len(self.project.segments)} segments · {len(self.project.speakers)} speakers",
+            *errors, *warning_details,
+        ])
         if not self.project.segments:
-            self.validation_label.setText("No segments yet. Set In/Out points, then add a segment.")
-            self.validation_label.setStyleSheet("color: #7f91a8;")
+            summary, color = "No segments", "#7f91a8"
         elif errors:
-            self.validation_label.setText(
-                f"{len(self.project.segments)} segments · {len(errors)} item(s) need attention"
+            summary = (
+                f"{len(self.project.segments)} segments · {len(errors)} issues"
                 + (
                     f" · {len(timeline_warnings)} overlap(s) to review"
                     if timeline_warnings
                     else ""
                 )
             )
-            self.validation_label.setStyleSheet("color: #ffad7a;")
+            color = "#ffad7a"
         elif timeline_warnings:
-            self.validation_label.setText(
+            summary = (
                 f"Ready to export · {len(self.project.segments)} segments · "
                 f"{len(timeline_warnings)} potential overlap(s) to review"
             )
-            self.validation_label.setStyleSheet("color: #ffbf69;")
+            color = "#ffbf69"
         else:
-            self.validation_label.setText(
-                f"Ready to export · {len(self.project.segments)} segments · "
-                f"{len(self.project.speakers)} speakers"
-            )
-            self.validation_label.setStyleSheet("color: #66ddb0;")
+            summary = f"Ready to export · {len(self.project.segments)} segments"
+            color = "#66ddb0"
+        self.processing_status.set_validation(summary, self._validation_details, color)
+        self._refresh_status_details()
+
+    def _refresh_processing_activity(self) -> None:
+        summary = self.processing.status_summary()
+        if self.processing.has_active_work():
+            self.statusBar().set_activity("processing", summary)
+        else:
+            self.statusBar().clear_activity("processing")
+
+    def _refresh_status_details(self) -> None:
+        bar = self.statusBar()
+        self.processing_status.set_issue_count(bar.issue_count)
+        self.processing_dialog.set_project_details(
+            bar.details_text() + "\n\n" + self._validation_details,
+            has_notices=bool(bar.issue_count),
+        )
 
     def _set_dirty(
         self, dirty: bool, *, segment: Segment | None = None,
@@ -3278,7 +3323,7 @@ class MainWindow(QMainWindow):
     def editor_for_project(self, project_id: str) -> ProjectEditor:
         return self.editors[project_id]
 
-    def statusBar(self) -> QStatusBar:  # noqa: N802
+    def statusBar(self) -> ProjectStatusBar:  # noqa: N802
         return self.active_editor.statusBar()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -3726,10 +3771,13 @@ class MainWindow(QMainWindow):
             self.settings.setValue("lastProjectDir", str(path.parent))
             if warnings:
                 editor.session.attention = "\n".join(warnings)
-                editor.statusBar().showMessage(editor.session.attention)
+                editor.statusBar().set_issue(
+                    "import", "Imported pack needs attention", details=editor.session.attention,
+                )
 
         def failed(message: str) -> None:
             editor.session.attention = message
+            editor.statusBar().set_issue("open", "Could not open project", details=message)
             self.notice("Could not open project", message)
             if path.suffix.casefold() == ".json":
                 self.offer_previous_save(editor, path, message)
@@ -3862,6 +3910,7 @@ class MainWindow(QMainWindow):
         def failed(message):
             self._closing = False
             self.updater.cancel_close_update()
+            editor.statusBar().set_issue("save", "Could not save project", details=message)
             self.notice("Could not save project", message)
 
         def finished():
@@ -3929,7 +3978,13 @@ class MainWindow(QMainWindow):
             editor._clear_recovery_snapshot()
         else:
             editor._write_recovery_snapshot()
-        editor.statusBar().showMessage(f"Saved revision {revision} to {destination}")
+        save_details = f"Saved revision {revision} to {destination}"
+        editor.statusBar().clear_issue("save")
+        editor.statusBar().set_detail("save", save_details)
+        editor.statusBar().showMessage(
+            "Project saved" if not editor.dirty else "Project snapshot saved; newer edits are unsaved",
+            details=save_details,
+        )
         self.refresh_tabs()
 
     def offer_previous_save(self, editor: ProjectEditor, path: Path, message: str = "") -> None:
@@ -3952,8 +4007,8 @@ class MainWindow(QMainWindow):
             )
             self._show_decision(box)
         job.completed.connect(offer)
-        job.failed.connect(lambda error: editor.statusBar().showMessage(
-            f"No readable previous save: {error}"
+        job.failed.connect(lambda error: editor.statusBar().set_issue(
+            "previous-save", "No readable previous save", details=error,
         ))
 
     def _view_state(self, editor: ProjectEditor) -> dict:

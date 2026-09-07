@@ -172,6 +172,7 @@ class UpdateController(QObject):
         self.manual = manual
         if manual:
             self.startup_timer.stop()
+        self.window.statusBar().clear_issue("update")
         self.window.statusBar().showMessage("Checking GitHub for updates...")
         self._start_worker(UpdateWorker(include_prereleases=self.prerelease_action.isChecked()))
 
@@ -222,7 +223,9 @@ class UpdateController(QObject):
                 self._discard(worker.result.directory)
             self.window.statusBar().showMessage("Update canceled; application files were not changed.")
         elif worker.error:
-            self.window.statusBar().showMessage(f"Update check/download failed: {worker.error}")
+            self.window.statusBar().set_issue(
+                "update", f"Update check/download failed: {worker.error}",
+            )
             if self.manual or worker.release is not None:
                 self._show_error(worker.error, worker.release)
         elif isinstance(worker.result, PreparedUpdate):
@@ -401,10 +404,12 @@ class UpdateController(QObject):
         diagnostic_event(
             "update_result", success=success, message=message, directory=directory, target=target,
         )
-        self.window.statusBar().showMessage(message)
         if success:
+            self.window.statusBar().clear_issue("update-result")
+            self.window.statusBar().showMessage(message)
             QTimer.singleShot(1500, lambda: self._discard(directory, retries=10))
         else:
+            self.window.statusBar().set_issue("update-result", message)
             QMessageBox.warning(
                 self.window, "Application update failed",
                 f"{message}\n\nUpdate files and any rollback backups were retained at:\n{directory}",
@@ -420,8 +425,10 @@ class UpdateController(QObject):
             if retries:
                 QTimer.singleShot(1000, lambda: self._discard(directory, retries=retries - 1))
             else:
-                self.window.statusBar().showMessage(
-                    f"Could not clean temporary update files at {directory}: {error}"
+                self.window.statusBar().set_issue(
+                    f"update-cleanup:{directory}", "Could not clean temporary update files",
+                    details=f"{directory}: {error}",
                 )
         else:
+            self.window.statusBar().clear_issue(f"update-cleanup:{directory}")
             diagnostic_event("update_cleanup_completed", directory=directory)

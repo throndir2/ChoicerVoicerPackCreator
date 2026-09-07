@@ -284,7 +284,7 @@ def test_failure_or_cancellation_keeps_original(editor, qtbot, monkeypatch, tmp_
     assert editor.project.to_dict() == before
     assert not editor.dirty
     assert editor.action_cut_video.isEnabled()
-    assert "original project was not changed" in editor.statusBar().currentMessage()
+    assert "original project was not changed" in editor.statusBar().details_text()
     assert not (tmp_path / "result").exists()
 
 
