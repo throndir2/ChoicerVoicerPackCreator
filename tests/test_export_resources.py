@@ -17,7 +17,11 @@ from choicer_voicer_pack_creator.export_resources import (
     current_ffmpeg_threads,
     estimate_media_work,
 )
-from choicer_voicer_pack_creator.operations import OperationCancelled, operation_scope
+from choicer_voicer_pack_creator.operations import (
+    OperationCancelled,
+    critical_stage,
+    operation_scope,
+)
 
 MIB = 1024**2
 GIB = 1024**3
@@ -395,6 +399,16 @@ def test_cancellation_before_context_entry_releases_claim():
         cancelled = True
         with pytest.raises(OperationCancelled), admission:
             pytest.fail("Cancelled admission activated")
+    assert not budget._held and current_ffmpeg_threads() is None
+
+
+def test_publication_deferral_carries_through_resource_admission():
+    cancelled = False
+    budget = budget_for()
+    with operation_scope(cancelled=lambda: cancelled), critical_stage("Publishing"):
+        cancelled = True
+        with budget.acquire(WORK):
+            assert current_ffmpeg_threads() == 2
     assert not budget._held and current_ffmpeg_threads() is None
 
 

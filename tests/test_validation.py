@@ -101,6 +101,21 @@ def test_folder_validation_remains_sequential_and_repeats_every_complete_pass(fo
     )
 
 
+def test_complete_folder_validation_defers_cancellation_during_publication(folder_validation):
+    validator, folder, state = folder_validation
+    stopped = False
+
+    def progress(message):
+        nonlocal stopped
+        stopped = True
+
+    with operation_scope(lambda: stopped), critical_stage("Publishing"):
+        result = validator.validate_folder(folder, progress=progress)
+    assert result["status"] == "passed"
+    assert state.statistics == ["001.mp3", "002.mp3"]
+    assert len(state.decoded) == 5 and state.active == 0
+
+
 @pytest.mark.parametrize("outcome", ["silent", "decode-error"])
 def test_folder_audio_failure_stops_in_order_and_releases_admission(folder_validation, outcome):
     validator, folder, state = folder_validation
