@@ -126,6 +126,7 @@ def test_multiselection_survives_refresh_and_busy_state_without_editing(window, 
     assert set(window._selected_table_ids()) == {first.id, last.id}
     assert window.selected_segment() is None
     assert window.timeline.selected_id == ""
+    assert window.timeline.selected_ids == {first.id, last.id}
     assert window.timeline.mark_segment_id == ""
     assert not window.speakers_edit.isEnabled()
     assert "2 segments selected" in window.segment_audio_help.text()
@@ -145,6 +146,7 @@ def test_multiselection_survives_refresh_and_busy_state_without_editing(window, 
     window.timeline.segment_selected.emit(middle.id)
     assert window._selected_table_ids() == [middle.id]
     assert window.selected_segment() is middle
+    assert window.timeline.selected_ids == {middle.id}
     assert not window.combine_button.isEnabled()
     window.segment_table.clearSelection()
     assert window.selected_segment() is None
@@ -159,6 +161,7 @@ def test_loading_project_clears_multiselection(window, qtbot) -> None:
     project = PackProject.from_dict(window.project.to_dict())
     window._set_project(project, None, mark_dirty=False)
     assert window._selected_table_ids() == []
+    assert window.timeline.selected_ids == set()
     assert not window.action_combine.isEnabled()
     assert not window.combine_button.isEnabled()
     assert window.selected_segment() is None
