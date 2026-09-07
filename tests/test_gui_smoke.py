@@ -458,11 +458,11 @@ def test_delete_shortcuts_use_existing_segment_confirmation(
     window._refresh_table()
     questions: list[str] = []
 
-    def confirm(_parent, _title, message):
-        questions.append(message)
+    def confirm(box):
+        questions.append(box.text())
         return QMessageBox.StandardButton.Yes if confirmed else QMessageBox.StandardButton.No
 
-    monkeypatch.setattr(QMessageBox, "question", confirm)
+    monkeypatch.setattr(QMessageBox, "exec", confirm)
     widget = getattr(window, widget_name)
     widget.setFocus()
     qtbot.waitUntil(widget.hasFocus)
@@ -491,7 +491,7 @@ def test_backspace_remains_available_in_editors(
     window, _calls = playback_window
     selected = window.selected_segment()
     monkeypatch.setattr(
-        QMessageBox, "question", lambda *_args: pytest.fail("Editing must not delete a segment")
+        QMessageBox, "exec", lambda *_args: pytest.fail("Editing must not delete a segment")
     )
     editor = getattr(window, widget_name)
     editor.setFocus()
@@ -513,7 +513,7 @@ def test_backspace_does_not_delete_without_an_available_action(
     window, _calls = playback_window
     segments = list(window.project.segments)
     monkeypatch.setattr(
-        QMessageBox, "question", lambda *_args: pytest.fail("Deletion should be unavailable")
+        QMessageBox, "exec", lambda *_args: pytest.fail("Deletion should be unavailable")
     )
     if blocked == "no-selection":
         window.selected_segment_id = ""
@@ -536,11 +536,11 @@ def test_holding_backspace_does_not_repeat_confirmation(
     window, _calls = playback_window
     questions: list[str] = []
 
-    def decline(_parent, _title, message):
-        questions.append(message)
+    def decline(box):
+        questions.append(box.text())
         return QMessageBox.StandardButton.No
 
-    monkeypatch.setattr(QMessageBox, "question", decline)
+    monkeypatch.setattr(QMessageBox, "exec", decline)
     window.timeline.setFocus()
     qtbot.waitUntil(window.timeline.hasFocus)
 
@@ -567,7 +567,7 @@ def test_backspace_in_a_dialog_does_not_delete_a_segment(
     window, _calls = playback_window
     selected = window.selected_segment()
     monkeypatch.setattr(
-        QMessageBox, "question", lambda *_args: pytest.fail("Dialogs must not delete a segment")
+        QMessageBox, "exec", lambda *_args: pytest.fail("Dialogs must not delete a segment")
     )
     dialog = QDialog(window)
     qtbot.addWidget(dialog)

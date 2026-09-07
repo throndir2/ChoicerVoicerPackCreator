@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from heapq import heappop, heappush
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QKeyEvent, QMouseEvent, QPainter, QPen, QWheelEvent
@@ -8,6 +9,26 @@ from PySide6.QtWidgets import QApplication, QToolTip, QWidget
 
 from choicer_voicer_pack_creator.models import Segment
 from choicer_voicer_pack_creator.ui.theme import SEGMENT_COLORS
+
+
+def segment_lanes(segments: list[Segment]) -> dict[str, int]:
+    """Assign the first available lane without quadratic scans of overlapping clips."""
+    occupied: list[tuple[float, int]] = []
+    available: list[int] = []
+    lanes: dict[str, int] = {}
+    count = 0
+    for segment in sorted(segments, key=lambda item: (item.start, item.end)):
+        while occupied and occupied[0][0] <= segment.start + 0.001:
+            _, lane = heappop(occupied)
+            heappush(available, lane)
+        if available:
+            lane = heappop(available)
+        else:
+            lane = count
+            count += 1
+        lanes[segment.id] = lane
+        heappush(occupied, (segment.end, lane))
+    return lanes
 
 
 class TimelineWidget(QWidget):
@@ -62,30 +83,17 @@ class TimelineWidget(QWidget):
         self.peaks = list(peaks)
         self.update()
 
-    def set_segments(self, segments: list[Segment]) -> None:
+    def set_segments(
+        self, segments: list[Segment], *, lanes: dict[str, int] | None = None,
+    ) -> None:
         self.segments = segments
-        self._layout_segment_lanes()
+        self._segment_lanes = segment_lanes(segments) if lanes is None else lanes
+        visible_lanes = max(1, min(5, max(self._segment_lanes.values(), default=0) + 1))
+        self.setMinimumHeight(max(176, 126 + visible_lanes * 31))
         self.update()
 
     def _layout_segment_lanes(self) -> None:
-        lane_ends: list[float] = []
-        self._segment_lanes = {}
-        for segment in sorted(self.segments, key=lambda item: (item.start, item.end)):
-            lane = next(
-                (
-                    index
-                    for index, lane_end in enumerate(lane_ends)
-                    if segment.start >= lane_end - 0.001
-                ),
-                len(lane_ends),
-            )
-            if lane == len(lane_ends):
-                lane_ends.append(segment.end)
-            else:
-                lane_ends[lane] = segment.end
-            self._segment_lanes[segment.id] = lane
-        visible_lanes = max(1, min(5, len(lane_ends)))
-        self.setMinimumHeight(max(176, 126 + visible_lanes * 31))
+        self.set_segments(self.segments)
 
     def set_selected(self, segment_id: str) -> None:
         changed = self.selected_id != segment_id

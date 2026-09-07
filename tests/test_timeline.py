@@ -4,11 +4,25 @@ import pytest
 from PySide6.QtCore import QPoint, Qt
 
 from choicer_voicer_pack_creator.models import Segment
-from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
+from choicer_voicer_pack_creator.ui.timeline import TimelineWidget, segment_lanes
 
 
 def _point(widget: TimelineWidget, timestamp: float, y: int) -> QPoint:
     return QPoint(round(widget._time_to_x(timestamp)), y)
+
+
+def test_lane_layout_reuses_lowest_available_lane_and_accepts_prepared_layout(qtbot):
+    segments = [
+        Segment(0, 5), Segment(1, 2), Segment(2, 3),
+        Segment(5 - 0.0009, 6), Segment(5, 7),
+    ]
+    lanes = segment_lanes(list(reversed(segments)))
+    assert [lanes[segment.id] for segment in segments] == [0, 1, 1, 0, 1]
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.set_segments(segments, lanes=lanes)
+    assert timeline._segment_lanes is lanes
+    assert timeline.minimumHeight() == 188
 
 
 @pytest.mark.parametrize("y", [4, 65, 210])
