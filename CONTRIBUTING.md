@@ -18,6 +18,12 @@ completion. Never modify another active session's checkout or work directly on `
 
 ## Design rules
 
+- Keep the main editing workspace focused on editing. Do not add persistent banners, panels,
+  toolbars, or control rows for new or rarely used features. Put secondary controls, settings,
+  progress breakdowns, and diagnostics in on-demand, preferably nonmodal dialogs opened from
+  existing menus. If background work needs a visible indicator, use short text in the existing
+  status bar and open details from there; hide it when no work or attention is pending. Do not
+  automatically open detail dialogs or take space away from the video, timeline, or segment editor.
 - Preserve imported media unless a user explicitly replaces or regenerates it.
 - Stage exports completely before replacing an existing destination.
 - Keep the project JSON as the editable source of truth; generated pack files are outputs.

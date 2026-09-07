@@ -1,13 +1,14 @@
-"""Per-source processing state, shared by the inline overview and job detail surfaces."""
+"""Per-source processing state, compact status text, and on-demand details."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QGridLayout,
-    QGroupBox,
+    QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QLabel,
     QProgressBar,
@@ -110,6 +111,42 @@ class ProcessingModel(QObject):
             primary.state, "\n".join(value.message for value in states), primary.fraction,
         )
 
+    def status_summary(self) -> str:
+        active = attention = 0
+        for kinds in GROUPS.values():
+            states = {self._states[kind].state for kind in kinds if kind in self._states}
+            active += bool(states & (ACTIVE_STATES - {"consent"}))
+            attention += bool(states & {"consent", "failed"})
+        parts = []
+        if active:
+            parts.append(f"{active} active")
+        if attention:
+            parts.append(f"{attention} {'needs' if attention == 1 else 'need'} attention")
+        return "Background: " + ", ".join(parts) if parts else ""
+
+
+class ProcessingStatus(QLabel):
+    def __init__(self, model: ProcessingModel, action: QAction, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("processingStatus")
+        self.model = model
+        self.setTextFormat(Qt.TextFormat.RichText)
+        self.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+            | Qt.TextInteractionFlag.LinksAccessibleByKeyboard
+        )
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setToolTip("Open background processing details for this project.")
+        self.linkActivated.connect(lambda _link: action.trigger())
+        model.changed.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self) -> None:
+        summary = self.model.status_summary()
+        self.setText(f'<a href="details" style="color: #9eb0c6;">{summary}</a>')
+        self.setAccessibleName(summary)
+        self.setVisible(bool(summary))
+
 
 class _StatusLabel(QLabel):
     def __init__(self) -> None:
@@ -132,22 +169,23 @@ class _StatusLabel(QLabel):
         self._elide()
 
 
-class ProcessingPanel(QGroupBox):
+class ProcessingDialog(QDialog):
     action_requested = Signal(str, str)
 
     def __init__(self, model: ProcessingModel, parent: QWidget) -> None:
-        super().__init__("Background processing", parent)
-        self.setObjectName("videoProcessing")
+        super().__init__(parent)
+        self.setObjectName("processingDialog")
+        self.setModal(False)
+        self.setSizeGripEnabled(True)
+        self.resize(740, 330)
         self.model = model
-        layout = QGridLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setHorizontalSpacing(18)
+        layout = QVBoxLayout(self)
         self.rows: dict[str, tuple[QLabel, _StatusLabel, QProgressBar, QPushButton]] = {}
-        for column, (group, title, action) in enumerate((
+        for group, title, action in (
             ("transcript", "Transcript", "Review"),
             ("voices", "Voice fingerprints", "Speakers"),
             ("backing", "Backing track", "Details"),
-        )):
+        ):
             card = QWidget(self)
             content = QVBoxLayout(card)
             content.setContentsMargins(0, 0, 0, 0)
@@ -159,11 +197,13 @@ class ProcessingPanel(QGroupBox):
             state.setObjectName(f"{group}ProcessingState")
             header.addWidget(state)
             open_button = QPushButton(action)
+            open_button.setAutoDefault(False)
             open_button.setObjectName(f"{group}ProcessingOpen")
             open_button.clicked.connect(
                 lambda _checked=False, group=group: self.action_requested.emit(group, "open")
             )
             control = QPushButton("Start")
+            control.setAutoDefault(False)
             control.setObjectName(f"{group}ProcessingControl")
             control.clicked.connect(
                 lambda _checked=False, group=group: self.action_requested.emit(
@@ -183,9 +223,11 @@ class ProcessingPanel(QGroupBox):
             progress.setFixedHeight(4)
             progress.setObjectName(f"{group}ProcessingProgress")
             content.addWidget(progress)
-            layout.addWidget(card, 0, column)
-            layout.setColumnStretch(column, 1)
+            layout.addWidget(card)
             self.rows[group] = state, message, progress, control
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
         self.setToolTip(
             "Transcript and voice preparation take priority over queued backing generation. "
             "One CPU-heavy task runs at a time; cached voice comparisons can overlap it. "
@@ -193,6 +235,12 @@ class ProcessingPanel(QGroupBox):
         )
         model.changed.connect(self.refresh)
         self.refresh()
+
+    def show_processing(self) -> None:
+        self.setWindowTitle(f"Background processing - {self.model.session.project.title}")
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def refresh(self) -> None:
         for group, (label, message, progress, control) in self.rows.items():
