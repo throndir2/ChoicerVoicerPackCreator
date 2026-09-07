@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget
 
@@ -7,6 +8,39 @@ from choicer_voicer_pack_creator.jobs import JobManager
 from choicer_voicer_pack_creator.models import PackProject
 from choicer_voicer_pack_creator.project_session import ProjectSession
 from choicer_voicer_pack_creator.ui.processing import ProcessingDialog, ProcessingModel
+
+
+@pytest.mark.parametrize(("state", "label", "action", "enabled"), [
+    ("idle", "Start", "retry", True),
+    ("off", "Start", "retry", True),
+    ("ready", "Start", "retry", True),
+    ("failed", "Retry", "retry", True),
+    ("cancelled", "Resume", "retry", True),
+    ("queued", "Cancel", "cancel", True),
+    ("waiting", "Cancel", "cancel", True),
+    ("running", "Cancel", "cancel", True),
+    ("consent", "Cancel", "cancel", True),
+    ("cancelling", "Cancel", "cancel", False),
+])
+def test_speaker_processing_retains_manual_controls(qtbot, state, label, action, enabled):
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    manager = JobManager(parent)
+    model = ProcessingModel(manager, ProjectSession(PackProject()), parent)
+    panel = ProcessingDialog(model, parent)
+    actions = []
+    panel.action_requested.connect(lambda *args: actions.append(args))
+    model.set_status("speakers", state, "Speaker matching.")
+    control = panel.rows["voices"][3]
+    assert control.text() == label
+    assert control.isEnabled() == enabled
+    control.click()
+    assert actions == ([("voices", action)] if enabled else [])
+    for kind, group in (("analysis", "transcript"), ("backing", "backing")):
+        model.set_status(kind, "ready", "Ready.")
+        assert not panel.rows[group][3].isEnabled()
+    assert not panel.isVisible()
+    manager.shutdown(wait=True)
 
 
 def test_popup_shares_job_states_and_actions_without_opening_automatically(qtbot):
