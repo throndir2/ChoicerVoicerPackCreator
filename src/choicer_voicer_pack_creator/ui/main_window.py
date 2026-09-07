@@ -71,13 +71,14 @@ from choicer_voicer_pack_creator.exporter import (
     safe_name,
     sha256,
 )
-from choicer_voicer_pack_creator.jobs import JobManager
+from choicer_voicer_pack_creator.jobs import JobHandle, JobManager
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import AnalysisReview, PackProject, Segment
 from choicer_voicer_pack_creator.operations import OperationCancelled
 from choicer_voicer_pack_creator.pack_io import PackImporter
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore, WorkspaceStore
 from choicer_voicer_pack_creator.project_session import ProjectSession, canonical_project_path
+from choicer_voicer_pack_creator.scene_editing import SceneEditMode, execute_scene_edit
 from choicer_voicer_pack_creator.timeline_audit import (
     TimelineOverlap,
     audit_timeline_overlaps,
@@ -105,6 +106,7 @@ from choicer_voicer_pack_creator.ui.processing import (
     ProcessingStatus,
 )
 from choicer_voicer_pack_creator.ui.readable_table import ReadableTableWidget
+from choicer_voicer_pack_creator.ui.scene_dialog import SceneEditDialog
 from choicer_voicer_pack_creator.ui.setup_consent import SetupConsent
 from choicer_voicer_pack_creator.ui.speaker_matching import (
     SpeakerMatchingControls,
@@ -246,6 +248,8 @@ class ProjectEditor(QWidget):
         self._export_options_dialog: ExportOptionsDialog | None = None
         self._backing_dialog: BackingDialog | None = None
         self._analysis_dialog: AnalysisDialog | None = None
+        self._scene_dialog: SceneEditDialog | None = None
+        self._scene_job: JobHandle | None = None
         self._source_request = 0
         self._restoring_layout = False
         self._layout_restored = False
@@ -369,6 +373,12 @@ class ProjectEditor(QWidget):
         self.action_analyze.triggered.connect(lambda: self.open_analysis_dialog())
         self.action_backing = QAction("Generate Backing Track...", self)
         self.action_backing.triggered.connect(lambda: self.generate_backing_track())
+        self.action_cut_video = QAction("Cut Out Video Range...", self)
+        self.action_cut_video.setObjectName("cutVideoRange")
+        self.action_cut_video.triggered.connect(lambda: self.open_scene_dialog("cut"))
+        self.action_extract_scene = QAction("New Project from Scene...", self)
+        self.action_extract_scene.setObjectName("extractSceneProject")
+        self.action_extract_scene.triggered.connect(lambda: self.open_scene_dialog("extract"))
         self.action_processing = QAction("Background Processing...", self)
         self.action_processing.setObjectName("showProcessing")
         self.action_processing.triggered.connect(lambda: self.processing_dialog.show_processing())
@@ -404,7 +414,10 @@ class ProjectEditor(QWidget):
         self.file_actions = [
             self.action_save, self.action_save_as, self.action_restore_previous, self.action_export,
         ]
-        self.project_actions = [self.action_analyze, self.action_backing]
+        self.project_actions = [
+            self.action_analyze, self.action_backing,
+            self.action_cut_video, self.action_extract_scene,
+        ]
         self.tool_actions = [self.action_processing]
         self.segment_actions = [
             self.action_add, self.action_split, self.action_combine,
@@ -419,6 +432,8 @@ class ProjectEditor(QWidget):
             (self.action_export, "export", "Export", "Review export quality and options, then export the active project as a game-ready pack and ZIP."),
             (self.action_analyze, "analyze", "Analyze", "Analyze this video's dialogue and review suggested segments."),
             (self.action_backing, "backing", "Backing", "Generate music/effects backing for this project without changing the source."),
+            (self.action_cut_video, "split", None, "Remove an In/Out range from the video and close the gap, keeping later dialogue and backing in sync. Original media is preserved."),
+            (self.action_extract_scene, "new", None, "Copy the In/Out range and its dialogue into a separate scene project. Select a segment first to use its range."),
             (self.action_processing, "tasks", None, "View transcript, voice, and backing progress or manage processing for this project."),
             (self.action_add, "add", "Add", "Create a new segment using the current In/Out times. Existing segments are not changed."),
             (self.action_split, "split", "Split", "Cut the selected segment into two at the white playback line (playhead). Move the playhead inside the segment first."),
@@ -1320,6 +1335,8 @@ class ProjectEditor(QWidget):
                 self._analysis_dialog.hide()
                 self._analysis_dialog = None
         if not preserve_view:
+            if self._scene_dialog is not None:
+                self._scene_dialog.reject()
             self._source_request += 1
             self.session.source_revision += 1
             self.workspace.cancel_source_jobs(self.session.id)
@@ -1376,7 +1393,144 @@ class ProjectEditor(QWidget):
         if not preserve_view:
             self.processing.reset()
         self._set_dirty(mark_dirty)
+        self._refresh_scene_actions()
         self._refresh_validation_label()
+
+    # ---------- Video cuts and scene projects ----------
+
+    def _refresh_scene_actions(self) -> None:
+        enabled = (
+            bool(self.project.video_path) and self.project.video_duration > 0
+            and not self.session.loading and self._scene_job is None
+        )
+        self.action_cut_video.setEnabled(enabled)
+        self.action_extract_scene.setEnabled(enabled)
+
+    def open_scene_dialog(self, mode: SceneEditMode) -> None:
+        if self._scene_dialog is not None and self._scene_dialog.mode != mode:
+            self._scene_dialog.reject()
+        if self._scene_dialog is not None:
+            self._scene_dialog.show()
+            self._scene_dialog.raise_()
+            self._scene_dialog.activateWindow()
+            return
+        if self.session.loading or self._scene_job is not None:
+            self.workspace.notice("Video edit unavailable", "Wait for the current operation to finish.")
+            return
+        self._commit_editors()
+        revision = self.session.revision
+        dialog = SceneEditDialog(
+            self.session.snapshot(), self.mark_in_spin.value(), self.mark_out_spin.value(),
+            mode, self,
+        )
+        self._scene_dialog = dialog
+        dialog.preview_requested.connect(self._preview_analysis_range)
+
+        def apply() -> None:
+            nonlocal revision
+            self._commit_editors()
+            if self.session.revision != revision:
+                revision = self.session.revision
+                dialog.project = self.session.snapshot()
+                dialog.refresh_plan()
+                dialog.show_error("The project changed. Review the updated range and apply again.")
+                return
+            destination = QFileDialog.getExistingDirectory(
+                dialog, "Choose a folder for the new scene media",
+                str(self.settings.value(
+                    "lastSceneDir",
+                    str(self.project_path.parent if self.project_path else Path.home()),
+                )),
+            )
+            if not destination:
+                return
+            if (
+                self.session.revision != revision or self._scene_dialog is not dialog
+                or self.session.id in self.workspace._closed_ids
+            ):
+                self.workspace.notice(
+                    "Video edit not started",
+                    "The project changed while choosing a folder. Review the range and try again.",
+                )
+                return
+            self.settings.setValue("lastSceneDir", destination)
+            self._start_scene_edit(
+                dialog.start_spin.value(), dialog.end_spin.value(), mode, Path(destination),
+                title=dialog.title_edit.text().strip() if mode == "extract" else None,
+            )
+            dialog.accept()
+
+        def finished() -> None:
+            if self._scene_dialog is dialog:
+                self._scene_dialog = None
+            dialog.deleteLater()
+
+        dialog.apply_requested.connect(apply)
+        dialog.finished.connect(finished)
+        dialog.show()
+
+    def _start_scene_edit(
+        self, start: float, end: float, mode: SceneEditMode, output_parent: Path,
+        *, title: str | None = None,
+    ) -> None:
+        snapshot = self.session.snapshot()
+        revision, token = self.session.revision, self.session.source_token()
+        media = self.media
+        job = self.workspace.job_manager.submit(
+            self.session.id, "scene-edit",
+            "Cutting video range" if mode == "cut" else "Creating scene project",
+            lambda _ctx: execute_scene_edit(
+                snapshot, start, end, mode, output_parent, media, title=title,
+            ),
+            source_snapshot={"revision": revision, "start": start, "end": end, "mode": mode},
+        )
+        self._scene_job = job
+        self._refresh_scene_actions()
+        self.statusBar().showMessage("Video edit queued. Manage or cancel it in Tools > Tasks.")
+        job.progress.connect(
+            lambda message, _fraction: self.statusBar().showMessage(
+                f"{message}  (Tools > Tasks)"
+            )
+        )
+
+        def completed(project: PackProject) -> None:
+            if not isinstance(project, PackProject):
+                raise TypeError("Scene editor returned an unexpected result")
+            self._commit_editors()
+            path = Path(project.video_path).parent / "project.cvpack.json"
+            unchanged = (
+                self.session.revision == revision and self.session.source_token() == token
+                and self.session.id not in self.workspace._closed_ids
+            )
+            if mode == "cut" and unchanged:
+                self._set_project(project, self.project_path, mark_dirty=True)
+                self.seek(min(start, project.video_duration))
+                self.statusBar().showMessage("Video range removed. Save Project to keep this edit.")
+            else:
+                # A finished snapshot must never overwrite edits made while media was processing.
+                self.workspace.add_project(project, path, dirty=False, focus=not self.session.hidden)
+                self.workspace._remember_recent_project(path)
+                if mode == "cut":
+                    self.workspace.notice(
+                        "Edited video opened separately",
+                        "The original project changed or closed during processing. "
+                        "Your edits were kept, and the cut version was saved as a separate project.",
+                    )
+                self.statusBar().showMessage(f"Scene project saved: {path}")
+
+        def failed(message: str) -> None:
+            self.statusBar().showMessage("Video edit failed; the original project was not changed.")
+            self.workspace.notice("Could not edit video", message)
+
+        def finished() -> None:
+            self._scene_job = None
+            self._refresh_scene_actions()
+            if job.record.state == "cancelled":
+                self.statusBar().showMessage("Video edit cancelled; the original project was not changed.")
+
+        job.completed.connect(completed)
+        job.failed.connect(failed)
+        job.finished.connect(finished)
 
     # ---------- Media and timeline ----------
 
@@ -1565,11 +1719,11 @@ class ProjectEditor(QWidget):
             self._show_selected_segment(segment)
 
     def _player_duration_changed(self, milliseconds: int) -> None:
-        if milliseconds <= 0:
+        # Player/container durations can include a rounded final video frame.
+        # Keep the probed or edited timeline authoritative, especially after a cut.
+        if milliseconds <= 0 or self.project.video_duration > 0:
             return
         decoded_duration = milliseconds / 1000.0
-        if abs(decoded_duration - self.project.video_duration) <= 0.001:
-            return
         self.project.video_duration = decoded_duration
         self.timeline.set_duration(self.project.video_duration)
         self.mark_in_spin.setMaximum(self.project.video_duration)
@@ -2804,6 +2958,7 @@ class ProjectEditor(QWidget):
         ):
             action.setEnabled(not loading)
         self._sync_selected_editor()
+        self._refresh_scene_actions()
         self.action_export.setEnabled(not loading and self._export_worker is None)
         self._update_combine_action()
         if loading:
@@ -3833,6 +3988,8 @@ class MainWindow(QMainWindow):
 
     def _hide_editor(self, editor: ProjectEditor, *, retain: bool) -> None:
         editor.processing_dialog.hide()
+        if editor._scene_dialog is not None:
+            editor._scene_dialog.reject()
         editor._commit_editors()
         editor._recovery_timer.stop()
         editor._save_layout_state()
