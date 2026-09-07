@@ -209,7 +209,7 @@ class SpeakerMatchingControls(QWidget):
             buttons.addWidget(button)
         buttons.addStretch()
         layout.addLayout(buttons)
-        self.status = QLabel("Finish naming a dialogue segment to match its voice.")
+        self.status = QLabel("Waiting for a named dialogue segment.")
         self.status.setObjectName("speakerMatchingStatus")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -452,8 +452,7 @@ class SpeakerMatchingControls(QWidget):
             return
         if not preparing and (not references or not targets):
             self.status.setText(
-                f"Name a dialogue segment with at least {MIN_ACTIVE_SECONDS:g} seconds of speech; "
-                "automatic names are not used as references."
+                f"Name a dialogue segment with at least {MIN_ACTIVE_SECONDS:g} seconds of speech."
                 if not references else "No eligible unassigned segments to match."
             )
             if self._preprocess:
@@ -501,8 +500,7 @@ class SpeakerMatchingControls(QWidget):
         worker.finished.connect(self._finished)
         worker.finished.connect(worker.deleteLater)
         self.status.setText(
-            "Voice preparation queued. Names are not needed; you can keep editing."
-            if preparing else "Comparing cached voices. You can keep editing."
+            "Voice preparation queued." if preparing else "Comparing cached voices."
         )
         worker.start()
         tasks = self.editor.workspace.tasks_window
@@ -554,7 +552,7 @@ class SpeakerMatchingControls(QWidget):
             self._pending = resume
             self.status.setText(
                 "Restarting speaker matching with the current edits." if resume else
-                "Speaker matching paused. Use Match now to resume."
+                "Speaker matching paused."
             )
         elif self._outcome == "download":
             self._request_download(worker.manager)
@@ -569,7 +567,7 @@ class SpeakerMatchingControls(QWidget):
         ):
             if request.preparing and isinstance(self._result, SpeakerPreparationResult):
                 self._prepared_ranges.update(_audio_range(clip) for clip in request.clips)
-                self.status.setText("Voice fingerprints ready. Name a dialogue segment to match its voice.")
+                self.status.setText("Voice fingerprints ready.")
                 self.editor.processing.set_status(
                     "speaker-preparation", "ready", self.status.text(),
                 )
@@ -578,7 +576,7 @@ class SpeakerMatchingControls(QWidget):
                 self._apply(self._result, request)
         elif self._outcome == "canceled" or worker.job_handle.record.state == "cancelled":
             self._paused = True
-            self.status.setText("Speaker matching paused. Use Match now to resume.")
+            self.status.setText("Speaker matching paused.")
             self.editor.processing.set_status("speaker-preparation", "cancelled", self.status.text())
         elif self._outcome != "failed":
             self._failed("The task stopped without returning a result.")
@@ -671,15 +669,7 @@ class SpeakerMatchingControls(QWidget):
                 }
         finally:
             self._applying = False
-        self.status.setText(
-            f"Filled {len(applied)} speaker name(s). Uncertain/short clips stay unassigned. "
-            "Automatic names are not used as voice references."
-            + (
-                " For a stronger reference, name a longer, clean dialogue line "
-                "(about 2 seconds or more)."
-                if not applied else ""
-            )
-        )
+        self.status.setText(f"Filled {len(applied)} speaker name(s).")
         diagnostic_event("speaker_matching_applied", count=len(applied), examined=result.examined)
 
     @Slot()
@@ -743,10 +733,7 @@ class SpeakerMatchingControls(QWidget):
                 self._refresh_names(restored)
         finally:
             self._applying = False
-        self.status.setText(
-            f"Undid {len(restored)} automatic name(s); later edits were preserved. "
-            "Uncheck Keep unassigned on a segment to include it again."
-        )
+        self.status.setText(f"Undid {len(restored)} automatic name(s).")
         self._update_buttons()
 
     @Slot()
@@ -762,7 +749,7 @@ class SpeakerMatchingControls(QWidget):
             self.worker.requestInterruption()
         if self._consent_callback is not None:
             self.editor.workspace.setup_consent.cancel_request(self._consent_callback)
-        self.status.setText("Speaker matching paused. Use Match now to resume.")
+        self.status.setText("Speaker matching paused.")
         if self._document_available():
             for kind in ("speaker-preparation", "speakers"):
                 self.editor.processing.set_status(kind, "cancelled", self.status.text())

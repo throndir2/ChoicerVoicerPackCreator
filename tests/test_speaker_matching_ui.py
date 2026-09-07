@@ -209,6 +209,7 @@ def test_cancel_keeps_names_and_requires_explicit_resume(matching, qtbot):
     assert matching.controls._paused
     assert not matching.controls._timer.isActive()
     assert matching.editor.caption_edit.isEnabled()
+    assert matching.controls.status.text() == "Speaker matching paused."
 
 
 def test_ready_names_wait_for_modal_edit_decisions(matching, qtbot):
@@ -246,6 +247,7 @@ def test_undo_preserves_manual_correction_and_excludes_restored_blanks(matching,
     assert matching.other.characters == []
     assert matching.other.speaker_assignment == "excluded"
     assert not matching.controls.undo_button.isEnabled()
+    assert matching.controls.status.text() == "Undid 1 automatic name(s)."
 
 
 def test_only_manual_single_speaker_references_and_eligible_targets_are_submitted(matching, qtbot):
@@ -280,13 +282,16 @@ def test_spoken_dialogue_is_not_filtered_as_a_reaction(caption):
     assert not speaker_matching._nonverbal(caption)
 
 
-def test_no_matches_explains_how_to_improve_the_reference(matching, qtbot):
-    matching.state.matches_enabled = False
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_matching_completion_reports_only_the_applied_count(matching, qtbot, count):
+    matching.state.matches_enabled = count > 0
+    if count == 1:
+        matching.other.speaker_assignment = "excluded"
     start(matching, qtbot)
     finish(matching, qtbot)
-    assert "Filled 0" in matching.controls.status.text()
-    assert "longer, clean dialogue line" in matching.controls.status.text()
-    assert matching.target.characters == []
+    assert matching.controls.status.text() == f"Filled {count} speaker name(s)."
+    assert matching.target.characters == (["Alice"] if count else [])
+    assert matching.other.characters == (["Alice"] if count == 2 else [])
 
 
 def test_typing_does_not_start_model_until_name_is_committed(matching, qtbot):

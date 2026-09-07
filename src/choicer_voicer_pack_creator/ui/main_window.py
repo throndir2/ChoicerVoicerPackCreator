@@ -824,7 +824,7 @@ class ProjectEditor(QWidget):
         self.progress_bar.hide()
         progress_row.addWidget(self.progress_bar)
         root_layout.addLayout(progress_row)
-        self.statusBar().showMessage("Create a pack from a video or import an existing pack.")
+        self.statusBar().showMessage("Ready")
 
     def _time_spin(self) -> QDoubleSpinBox:
         spin = QDoubleSpinBox()
@@ -1264,9 +1264,7 @@ class ProjectEditor(QWidget):
         self._refresh_table(added[0].id)
         self.select_segment(added[0].id)
         self.speakers_edit.setFocus()
-        self.statusBar().showMessage(
-            f"Added {len(added)} review suggestion(s). Assign speakers and verify every caption/range."
-        )
+        self.statusBar().showMessage(f"Added {len(added)} review suggestion(s).")
 
     def open_project(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1306,8 +1304,7 @@ class ProjectEditor(QWidget):
 
     def _show_pack_recovery_hint(self) -> None:
         self.statusBar().showMessage(
-            f"Imported {len(self.project.segments)} segments with existing prompt media. "
-            "Missing music? Use Generate backing, then Save Project As and export to a new location."
+            f"Imported {len(self.project.segments)} segments with existing prompt media."
         )
 
     def save_project(self, save_as: bool = False) -> bool:
@@ -1486,11 +1483,9 @@ class ProjectEditor(QWidget):
         )
         self._scene_job = job
         self._refresh_scene_actions()
-        self.statusBar().showMessage("Video edit queued. Manage or cancel it in Tools > Tasks.")
+        self.statusBar().showMessage("Video edit queued.")
         job.progress.connect(
-            lambda message, _fraction: self.statusBar().showMessage(
-                f"{message}  (Tools > Tasks)"
-            )
+            lambda message, _fraction: self.statusBar().showMessage(message)
         )
 
         def completed(project: PackProject) -> None:
@@ -1789,7 +1784,7 @@ class ProjectEditor(QWidget):
         self._refresh_table(segment.id)
         self.select_segment(segment.id)
         self.caption_edit.setFocus()
-        self.statusBar().showMessage("Segment added. Enter its speaker and exact line.")
+        self.statusBar().showMessage("Segment added.")
 
     def apply_selected_range(self) -> None:
         segment = self.selected_segment()
@@ -1838,7 +1833,7 @@ class ProjectEditor(QWidget):
         self._set_dirty(True)
         self._refresh_table(second.id)
         self.select_segment(second.id)
-        self.statusBar().showMessage("Segment split. File audio was switched to source-video audio if needed.")
+        self.statusBar().showMessage("Segment split.")
 
     def duplicate_segment(self) -> None:
         segment = self.selected_segment()
@@ -1852,9 +1847,7 @@ class ProjectEditor(QWidget):
         self.select_segment(duplicate.id)
         self.speakers_edit.setFocus()
         self.speakers_edit.selectAll()
-        self.statusBar().showMessage(
-            "Segment duplicated at the same timestamp—useful for simultaneous speakers."
-        )
+        self.statusBar().showMessage("Segment duplicated at the same timestamp.")
 
     def combine_segments(self) -> None:
         identifiers = self._selected_table_ids()
@@ -1890,10 +1883,7 @@ class ProjectEditor(QWidget):
         self._set_dirty(True)
         self._refresh_table(combined.id)
         self.select_segment(combined.id)
-        self.statusBar().showMessage(
-            f"Combined {len(selected)} segments. Lines and speakers were joined in timeline order; "
-            "the source-video range includes any gaps."
-        )
+        self.statusBar().showMessage(f"Combined {len(selected)} segments.")
 
     def delete_segment(self) -> None:
         segment = self.selected_segment()
