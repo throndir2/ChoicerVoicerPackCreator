@@ -44,7 +44,8 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
   window size, position, and maximized state. **View > Reset UI Layout** restores the default
   window and panes for all tabs without changing projects or other preferences.
 - Defines, moves, and trims ranges directly on the waveform; segment blocks also support body and
-	edge dragging.
+	edge dragging. Project validation and new voice-processing jobs wait until the drag ends;
+	prompt audio from the source video is regenerated on export, not while dragging.
 - Highlights substantial, non-identical segment overlaps for deterministic human review.
 - Offers a one-time initial scan that proposes editable ranges from deterministic audio activity.
 - Optionally downloads a pinned local Whisper CPU runtime/model to draft captions and timestamps;

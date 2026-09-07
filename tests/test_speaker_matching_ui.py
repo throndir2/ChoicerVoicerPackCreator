@@ -15,6 +15,7 @@ from choicer_voicer_pack_creator.models import (
     Segment,
 )
 from choicer_voicer_pack_creator.operations import SourceSnapshot
+from choicer_voicer_pack_creator.project_io import RecoveryStore
 from choicer_voicer_pack_creator.speaker_matching import (
     SpeakerDownloadRequired,
     SpeakerMatch,
@@ -23,7 +24,7 @@ from choicer_voicer_pack_creator.speaker_matching import (
     SpeakerPreparationResult,
     SpeakerResult,
 )
-from choicer_voicer_pack_creator.ui import speaker_matching
+from choicer_voicer_pack_creator.ui import main_window, speaker_matching
 from choicer_voicer_pack_creator.ui.main_window import MainWindow
 
 
@@ -371,6 +372,134 @@ def test_typing_observes_only_the_edited_segment_and_defers_validation(
     editor._selected_speakers_changed()
     assert validations == [True, True]
     assert not editor._validation_timer.isActive()
+
+
+def test_new_segment_drag_observes_only_its_state_and_validates_once_on_release(
+    matching, qtbot, monkeypatch,
+):
+    editor = matching.editor
+    editor.mark_in_spin.setValue(3)
+    editor.mark_out_spin.setValue(4)
+    editor.add_segment()
+    segment = editor.selected_segment()
+    assert segment is not None
+    editor.dirty = False
+    observed, validations, audits = [], [], []
+    capture = speaker_matching._SegmentState.capture
+    validate = PackProject.validate
+    audit = main_window.audit_timeline_overlaps
+
+    def record_capture(cls, item):
+        observed.append(item.id)
+        return capture(item)
+
+    def record_validation(project):
+        if project is editor.project:
+            validations.append(True)
+        return validate(project)
+
+    def record_audit(segments):
+        audits.append(True)
+        return audit(segments)
+
+    monkeypatch.setattr(speaker_matching._SegmentState, "capture", classmethod(record_capture))
+    monkeypatch.setattr(PackProject, "validate", record_validation)
+    monkeypatch.setattr(main_window, "audit_timeline_overlaps", record_audit)
+    editor._timeline_range_edit_started(segment.id, 3, 4)
+    for index in range(1, 26):
+        editor._timeline_range_changed(segment.id, 3 + index / 10, 4 + index / 10)
+    assert observed == [segment.id] * 25
+    assert validations == audits == []
+    assert editor.dirty
+    assert (editor.mark_in_spin.value(), editor.mark_out_spin.value()) == (5.5, 6.5)
+    assert (editor.timeline.mark_in, editor.timeline.mark_out) == (5.5, 6.5)
+    assert editor.segment_table.item(editor._row_for_segment(segment.id), 1).text() == "00:05.500"
+
+    # Let the idle timer fire while the mouse would still be held down.
+    qtbot.wait(600)
+    assert validations == audits == []
+    assert editor._validation_timer.isActive()
+    editor._timeline_range_edit_finished(segment.id, 3, 4, 5.5, 6.5)
+    assert validations == audits == [True]
+    assert not editor._validation_timer.isActive()
+    assert segment.audio_mode == "video"
+    assert segment.audio_path == ""
+    assert segment.source_range_known
+    assert segment.characters == []
+    assert "overlap" in editor.validation_label.text()
+    row = editor._row_for_segment(segment.id)
+    assert editor.segment_table.item(row, 0).background().style() != Qt.BrushStyle.NoBrush
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_voice_jobs_wait_for_drag_release_even_when_the_mouse_pauses(matching, qtbot, cached):
+    editor, controls, target = matching.editor, matching.controls, matching.target
+    if cached:
+        controls._activated = True
+    else:
+        controls._preprocess = True
+    editor._timeline_range_edit_started(target.id, 4, 7)
+    editor._timeline_range_changed(target.id, 4.25, 7.25)
+    qtbot.wait(1100)
+    assert controls.worker is None
+    assert controls._timer.isActive()
+    assert matching.state.preparations == matching.state.calls == []
+    editor._timeline_range_changed(target.id, 4.5, 7.5)
+    editor._timeline_range_edit_finished(target.id, 4, 7, 4.5, 7.5)
+    if cached:
+        qtbot.waitUntil(matching.state.started.is_set)
+        clips = matching.state.calls[0][0]
+        finish(matching, qtbot)
+    else:
+        qtbot.waitUntil(lambda: bool(matching.state.preparations))
+        clips = matching.state.preparations[0][0]
+        qtbot.waitUntil(lambda: controls.worker is None)
+    assert (4.5, 7.5) in {(clip.start, clip.end) for clip in clips}
+    assert (4.25, 7.25) not in {(clip.start, clip.end) for clip in clips}
+
+
+@pytest.mark.parametrize("restore_range", [False, True])
+def test_inflight_matches_wait_for_drag_and_reject_moved_target(matching, qtbot, restore_range):
+    editor, controls, target = matching.editor, matching.controls, matching.target
+    start(matching, qtbot)
+    editor._timeline_range_edit_started(target.id, 4, 7)
+    editor._timeline_range_changed(target.id, 4.5, 7.5)
+    finish(matching, qtbot)
+    assert controls._publication is not None
+    assert target.characters == matching.other.characters == []
+    if restore_range:
+        editor._timeline_range_changed(target.id, 4, 7)
+    editor._timeline_range_edit_finished(target.id, 4, 7, target.start, target.end)
+    qtbot.waitUntil(lambda: controls._publication is None)
+    assert target.characters == []
+    assert matching.other.characters == ["Alice"]
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_recovery_snapshot_waits_for_final_range(matching, qtbot, tmp_path, cancel):
+    editor, target = matching.editor, matching.target
+    store = RecoveryStore(tmp_path / "drag-recovery.json")
+    editor.recovery_store = store
+    editor._timeline_range_edit_started(target.id, 4, 7)
+    editor._timeline_range_changed(target.id, 4.5, 7.5)
+    qtbot.wait(1000)
+    assert not store.path.exists()
+    assert editor._recovery_timer.isActive()
+    if cancel:
+        editor._timeline_range_changed(target.id, 4, 7)
+    editor._timeline_range_edit_finished(target.id, 4, 7, target.start, target.end)
+    if cancel:
+        assert not editor.dirty
+        assert not editor._recovery_timer.isActive()
+        qtbot.waitUntil(lambda: not matching.window.job_manager.active_jobs())
+        assert not store.path.exists()
+    else:
+        qtbot.waitUntil(store.path.exists)
+        snapshot = store.load()
+        assert snapshot is not None
+        recovered = snapshot.project.segment_by_id(target.id)
+        assert recovered is not None
+        assert (recovered.start, recovered.end) == (4.5, 7.5)
 
 
 def test_rapid_committed_names_are_coalesced_and_unchanged_focus_does_not_rematch(
