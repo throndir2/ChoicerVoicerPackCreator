@@ -29,6 +29,11 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
   previews keep their selection.
 - Extracts and displays a zoomable waveform.
 - Marks precise In/Out points in seconds.
+- Cuts unwanted video from the beginning, end, or middle via **Project > Cut Out Video Range**.
+  The remaining video closes the gap, with dialogue timings and backing audio kept in sync.
+- Creates a saved project for a specific scene via **Project > New Project from Scene**.
+  Select a segment or mark an In/Out range first, then repeat to make multiple scene packs
+  from the same video without changing the original project.
 - Adds, previews, splits, combines, duplicates, deletes, and re-times segments.
   Press **Backspace** (or **Ctrl+Delete**) to delete the selected segment after confirmation;
   Backspace still works normally when editing text or numbers.
@@ -85,6 +90,26 @@ dub_characters=["Speaker"]
 ```
 
 `dub_timestamps` values are seconds from the start of the video. Newly generated prompts receive physical head/tail silence, and their exported timestamp is moved earlier by the head-padding amount so synchronization remains exact.
+
+### Cutting video and creating scene projects
+
+Set the timeline's In/Out range (or select a segment), then open either video-range command
+from **Project**. Review or adjust the range, preview it, and choose a folder for the result.
+Cuts remove that time from the video, not just a dialogue entry; **Delete Segment** still
+only removes the prompt. A scene project starts at zero and opens in its own tab.
+
+Original media is never overwritten. Each operation saves its own project and lossless
+edited media in a new subfolder of the chosen location; allow enough disk space for the
+retained video, which can be substantially larger than the original. Keep this folder:
+the project references its media. Processing runs in the background and can be cancelled
+from **Tools > Tasks**.
+
+After a cut, use **Save Project** to keep the change in the current project file. If that
+project changes during processing, the cut version opens separately instead of overwriting
+your newer edits. Dialogue and transcript text crossing a cut boundary is kept for review:
+adjust the wording if the cut removes part of a line. A boundary through a preserved prompt
+recording is refused; move the boundary outside that prompt, or explicitly switch it to
+source-video audio before cutting.
 
 ## Requirements
 
