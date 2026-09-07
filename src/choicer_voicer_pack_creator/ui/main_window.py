@@ -291,9 +291,6 @@ class ProjectEditor(QWidget):
     def statusBar(self) -> QStatusBar:  # noqa: N802
         return self._status_bar
 
-    def addToolBar(self, toolbar: QToolBar) -> None:  # noqa: N802
-        self._document_layout.addWidget(toolbar)
-
     def setCentralWidget(self, widget: QWidget) -> None:  # noqa: N802
         scroll = QScrollArea(self)
         scroll.setObjectName("projectEditorScroll")
@@ -470,7 +467,6 @@ class ProjectEditor(QWidget):
             if button is not None:
                 button.setAccessibleName(action.text().replace("&&", "&"))
         self.project_toolbar = toolbar
-        self.addToolBar(toolbar)
 
         self.processing_dialog = ProcessingDialog(self.processing, self)
         self.processing_dialog.action_requested.connect(self._processing_action)
@@ -500,6 +496,7 @@ class ProjectEditor(QWidget):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(7, 7, 7, 7)
         left_layout.setSpacing(7)
+        left_layout.addWidget(toolbar)
 
         self.playback_splitter = QSplitter(Qt.Orientation.Vertical, left)
         self.playback_splitter.setObjectName("playbackSplitter")
@@ -659,8 +656,9 @@ class ProjectEditor(QWidget):
         right_layout.setSpacing(8)
 
         self.inspector_splitter = QSplitter(Qt.Orientation.Vertical, right)
+        self.inspector_splitter.setObjectName("inspectorSplitter")
         self.inspector_splitter.setChildrenCollapsible(False)
-        self.inspector_splitter.setHandleWidth(9)
+        self.inspector_splitter.setHandleWidth(1)
         right_layout.addWidget(self.inspector_splitter, 1)
 
         self.project_section = CollapsibleSection("PACK DETAILS", self.inspector_splitter)
