@@ -382,6 +382,10 @@ class ProjectEditor(QWidget):
         self.action_processing = QAction("Background Processing...", self)
         self.action_processing.setObjectName("showProcessing")
         self.action_processing.triggered.connect(lambda: self.processing_dialog.show_processing())
+        self.action_clear_speaker_autofill = QAction("Clear last auto-filled names", self)
+        self.action_clear_speaker_autofill.setObjectName("clearSpeakerAutofill")
+        self.action_clear_speaker_autofill.setEnabled(False)
+        self.action_clear_speaker_autofill.triggered.connect(lambda: self.speaker_matching.undo())
 
         self.action_add = QAction("Add Segment", self)
         self.action_add.setShortcut(QKeySequence("Ctrl+Shift+A"))
@@ -417,6 +421,7 @@ class ProjectEditor(QWidget):
         self.project_actions = [
             self.action_analyze, self.action_backing,
             self.action_cut_video, self.action_extract_scene,
+            self.action_clear_speaker_autofill,
         ]
         self.tool_actions = [self.action_processing]
         self.segment_actions = [
@@ -435,6 +440,7 @@ class ProjectEditor(QWidget):
             (self.action_cut_video, "split", None, "Remove an In/Out range from the video and close the gap, keeping later dialogue and backing in sync. Original media is preserved."),
             (self.action_extract_scene, "new", None, "Copy the In/Out range and its dialogue into a separate scene project. Select a segment first to use its range."),
             (self.action_processing, "tasks", None, "View transcript, voice, and backing progress or manage processing for this project."),
+            (self.action_clear_speaker_autofill, "restore", None, "Clear unchanged names from the last automatic batch in this tab and keep those segments unassigned. Subsequent manual edits are preserved."),
             (self.action_add, "add", "Add", "Create a new segment using the current In/Out times. Existing segments are not changed."),
             (self.action_split, "split", "Split", "Cut the selected segment into two at the white playback line (playhead). Move the playhead inside the segment first."),
             (self.action_combine, "combine", "Combine", "Select multiple rows with Ctrl or Shift, then combine their ranges and lines."),
@@ -2954,6 +2960,7 @@ class ProjectEditor(QWidget):
         self._refresh_scene_actions()
         self.action_export.setEnabled(not loading and self._export_worker is None)
         self._update_combine_action()
+        self.speaker_matching._update_actions()
         if loading:
             self.action_combine.setEnabled(False)
 

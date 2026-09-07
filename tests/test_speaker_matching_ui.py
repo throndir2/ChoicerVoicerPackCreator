@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QTextCursor
-from PySide6.QtWidgets import QDialog, QMessageBox
+from PySide6.QtWidgets import QDialog, QLabel, QMessageBox, QPushButton
 
 from choicer_voicer_pack_creator.models import (
     AnalysisDraftRow,
@@ -36,6 +36,7 @@ def matching(qtbot, tmp_path, monkeypatch):
         preparations=[],
         cache_misses=0,
         matches_enabled=True,
+        match_error="",
     )
     video = tmp_path / "source.mp4"
     video.write_bytes(b"fake media; worker is mocked")
@@ -56,6 +57,8 @@ def matching(qtbot, tmp_path, monkeypatch):
             )
 
         def match_cached(self, _media, clips, *, progress, cancelled):
+            if state.match_error:
+                raise ValueError(state.match_error)
             if state.cache_misses:
                 state.cache_misses -= 1
                 raise SpeakerPreparationRequired(tuple(clip.segment_id for clip in clips))
@@ -119,7 +122,9 @@ def matching(qtbot, tmp_path, monkeypatch):
 
 
 def start(matching, qtbot):
-    matching.controls.retry()
+    control = matching.editor.processing_dialog.rows["voices"][3]
+    assert control.isEnabled()
+    control.click()
     qtbot.waitUntil(matching.state.started.is_set)
     assert matching.controls.worker is not None
 
@@ -130,8 +135,77 @@ def finish(matching, qtbot):
     matching.controls._timer.stop()
 
 
-def test_background_matching_preserves_caption_cursor_selection_and_playhead(matching, qtbot):
+def test_matching_panel_contains_only_the_auto_fill_checkbox(matching):
     editor, controls = matching.editor, matching.controls
+    assert controls.enabled_check.text() == "Auto-fill speaker names"
+    assert controls.layout().count() == 1
+    assert controls.layout().itemAt(0).widget() is controls.enabled_check
+    assert not controls.findChildren(QPushButton)
+    assert not controls.findChildren(QLabel)
+    action = editor.action_clear_speaker_autofill
+    assert action.text() == "Clear last auto-filled names"
+    assert action in matching.window.project_menu.actions()
+    assert action not in editor.project_toolbar.actions()
+    assert not action.isEnabled()
+    assert not editor.processing_dialog.isVisible()
+
+
+def test_clear_auto_fill_menu_follows_active_project_and_loading_state(matching, qtbot):
+    editor, window = matching.editor, matching.window
+    start(matching, qtbot)
+    assert not editor.action_clear_speaker_autofill.isEnabled()
+    finish(matching, qtbot)
+    assert editor.action_clear_speaker_autofill.isEnabled()
+    editor._set_loading(True)
+    assert not editor.action_clear_speaker_autofill.isEnabled()
+    editor._set_loading(False)
+    assert editor.action_clear_speaker_autofill.isEnabled()
+    other = window.add_project(PackProject(title="Other tab"), dirty=False)
+    assert other.action_clear_speaker_autofill in window.project_menu.actions()
+    assert not other.action_clear_speaker_autofill.isEnabled()
+    assert editor.action_clear_speaker_autofill not in window.project_menu.actions()
+    window.tabs.setCurrentWidget(editor)
+    assert editor.action_clear_speaker_autofill in window.project_menu.actions()
+    editor.action_clear_speaker_autofill.trigger()
+    assert matching.target.characters == matching.other.characters == []
+    assert not editor.action_clear_speaker_autofill.isEnabled()
+
+
+def test_processing_dialog_can_restart_completed_matching(matching, qtbot):
+    matching.state.matches_enabled = False
+    start(matching, qtbot)
+    finish(matching, qtbot)
+    control = matching.editor.processing_dialog.rows["voices"][3]
+    assert control.text() == "Start"
+    assert control.isEnabled()
+    matching.state.matches_enabled = True
+    matching.state.started.clear()
+    control.click()
+    qtbot.waitUntil(lambda: matching.target.characters == ["Alice"])
+    assert len(matching.state.calls) == 2
+
+
+def test_matching_failure_remains_visible_and_can_be_retried_in_processing(matching, qtbot):
+    editor = matching.editor
+    matching.state.match_error = "Voice model unavailable"
+    control = editor.processing_dialog.rows["voices"][3]
+    control.click()
+    qtbot.waitUntil(lambda: editor.processing.group_state("voices").state == "failed")
+    qtbot.waitUntil(lambda: matching.controls.worker is None)
+    assert "Voice model unavailable" in editor.processing.group_state("voices").message
+    assert not editor.processing_status.isHidden()
+    assert "attention" in editor.processing_status.text()
+    assert not editor.processing_dialog.isVisible()
+    assert control.text() == "Retry"
+    matching.state.match_error = ""
+    start(matching, qtbot)
+    finish(matching, qtbot)
+    assert matching.target.characters == ["Alice"]
+    assert editor.processing_status.isHidden()
+
+
+def test_background_matching_preserves_caption_cursor_selection_and_playhead(matching, qtbot):
+    editor = matching.editor
     start(matching, qtbot)
     assert editor.editor_splitter.isEnabled()
     assert editor.caption_edit.isEnabled()
@@ -156,7 +230,7 @@ def test_background_matching_preserves_caption_cursor_selection_and_playhead(mat
         editor.selected_segment_id, editor.current_position(),
         cursor.position(), cursor.anchor(), editor.caption_edit.toPlainText(),
     ) == before
-    assert controls.undo_button.isEnabled()
+    assert editor.action_clear_speaker_autofill.isEnabled()
     assert editor.session.dirty
 
 
@@ -193,7 +267,7 @@ def test_reference_edit_rejects_entire_old_result_then_uses_latest_name(matching
     matching.editor._set_dirty(True)
     finish(matching, qtbot)
     assert matching.target.characters == []
-    assert "Reference speakers changed" in matching.controls.status.text()
+    assert "Reference speakers changed" in matching.editor.processing.group_state("voices").message
     matching.controls.retry()
     qtbot.waitUntil(lambda: matching.target.characters == ["Alicia"], timeout=10000)
     assert all(
@@ -204,13 +278,21 @@ def test_reference_edit_rejects_entire_old_result_then_uses_latest_name(matching
 
 def test_cancel_keeps_names_and_requires_explicit_resume(matching, qtbot):
     start(matching, qtbot)
-    matching.controls.cancel()
+    control = matching.editor.processing_dialog.rows["voices"][3]
+    assert control.text() == "Cancel"
+    control.click()
     qtbot.waitUntil(lambda: matching.controls.worker is None, timeout=10000)
     assert matching.target.characters == []
     assert matching.controls._paused
     assert not matching.controls._timer.isActive()
     assert matching.editor.caption_edit.isEnabled()
-    assert matching.controls.status.text() == "Speaker matching paused."
+    assert "Speaker matching paused." in matching.editor.processing.group_state("voices").message
+    assert control.text() == "Resume"
+    matching.state.started.clear()
+    control.click()
+    qtbot.waitUntil(matching.state.started.is_set)
+    finish(matching, qtbot)
+    assert matching.target.characters == ["Alice"]
 
 
 def test_ready_names_wait_for_modal_edit_decisions(matching, qtbot):
@@ -222,6 +304,9 @@ def test_ready_names_wait_for_modal_edit_decisions(matching, qtbot):
     finish(matching, qtbot)
     assert matching.controls._publication is not None
     assert matching.target.characters == []
+    assert not matching.editor.action_clear_speaker_autofill.isEnabled()
+    assert matching.editor.processing.group_state("voices").state == "waiting"
+    assert matching.editor.processing_dialog.rows["voices"][3].text() == "Cancel"
     matching.editor.dirty = False
     dialog.reject()
     qtbot.waitUntil(lambda: matching.target.characters == ["Alice"])
@@ -234,7 +319,10 @@ def test_source_replacement_discards_matching_result(matching, qtbot):
     finish(matching, qtbot)
     assert matching.target.characters == []
     assert matching.other.characters == []
-    assert "Source audio changed" in matching.controls.status.text()
+    assert "Source audio changed" in matching.editor.processing.group_state("voices").message
+    assert matching.editor.processing.group_state("voices").state == "failed"
+    assert not matching.editor.processing_status.isHidden()
+    assert matching.editor.processing_dialog.rows["voices"][3].text() == "Retry"
 
 
 def test_undo_preserves_manual_correction_and_excludes_restored_blanks(matching, qtbot):
@@ -242,13 +330,13 @@ def test_undo_preserves_manual_correction_and_excludes_restored_blanks(matching,
     finish(matching, qtbot)
     matching.editor.speakers_edit.setText("Bob")
     matching.editor._selected_speakers_typed()
-    matching.controls.undo()
+    matching.editor.action_clear_speaker_autofill.trigger()
     assert matching.target.characters == ["Bob"]
     assert matching.target.speaker_assignment == "manual"
     assert matching.other.characters == []
     assert matching.other.speaker_assignment == "excluded"
-    assert not matching.controls.undo_button.isEnabled()
-    assert matching.controls.status.text() == "Undid 1 automatic name(s)."
+    assert not matching.editor.action_clear_speaker_autofill.isEnabled()
+    assert matching.editor.statusBar().currentMessage() == "Cleared 1 auto-filled name(s)."
 
 
 def test_only_manual_single_speaker_references_and_eligible_targets_are_submitted(matching, qtbot):
@@ -290,7 +378,8 @@ def test_matching_completion_reports_only_the_applied_count(matching, qtbot, cou
         matching.other.speaker_assignment = "excluded"
     start(matching, qtbot)
     finish(matching, qtbot)
-    assert matching.controls.status.text() == f"Filled {count} speaker name(s)."
+    assert matching.editor.statusBar().currentMessage() == f"Filled {count} speaker name(s)."
+    assert f"Filled {count} speaker name(s)." in matching.editor.processing.group_state("voices").message
     assert matching.target.characters == (["Alice"] if count else [])
     assert matching.other.characters == (["Alice"] if count == 2 else [])
 
@@ -590,13 +679,13 @@ def test_changing_a_reference_name_back_still_invalidates_an_inflight_result(mat
         editor._selected_speakers_typed()
     finish(matching, qtbot)
     assert matching.target.characters == []
-    assert "Reference speakers changed" in matching.controls.status.text()
+    assert "Reference speakers changed" in matching.editor.processing.group_state("voices").message
 
 
 def test_short_reference_prepares_targets_but_does_not_match(matching, qtbot):
     matching.reference.end = 0.5
     matching.controls.retry()
-    qtbot.waitUntil(lambda: "0.75 seconds" in matching.controls.status.text())
+    qtbot.waitUntil(lambda: "0.75 seconds" in matching.editor.processing.group_state("voices").message)
     assert not matching.state.started.is_set()
     assert matching.state.calls == []
     assert {(clip.start, clip.end) for clip in matching.state.preparations[0][0]} == {
@@ -670,6 +759,8 @@ def test_disabling_auto_matching_is_persisted_and_cancels_current_pass(matching,
     assert not matching.editor.project.auto_speaker_matching
     assert matching.target.characters == []
     assert not PackProject.from_dict(matching.editor.project.to_dict()).auto_speaker_matching
+    assert matching.editor.processing.group_state("voices").state == "off"
+    assert matching.editor.processing_dialog.rows["voices"][3].text() == "Start"
 
 
 def test_canceling_exit_publishes_result_completed_during_exit_question(matching, qtbot):
