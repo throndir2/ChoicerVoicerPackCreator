@@ -58,8 +58,9 @@ QToolButton#sectionToggle {
     border-bottom: 1px solid #233246;
     border-top-left-radius: 7px;
     border-top-right-radius: 7px;
-    padding: 7px 9px;
-    font-weight: 700;
+    padding: 2px 7px;
+    font-size: 9pt;
+    font-weight: 600;
     text-align: left;
 }
 QToolButton#sectionToggle:hover { background: #192a3d; color: #d9e7f6; }
