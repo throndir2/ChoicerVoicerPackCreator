@@ -479,7 +479,9 @@ def test_parallel_prompt_interruption_stops_all_workers_before_cleaning_staging(
     started = []
     finished = []
 
-    def write(_project, _segment, index, _source, _stage, _duration, _width, _height, notify):
+    def write(
+        _project, _segment, index, _source, _stage, _duration, _width, _height, notify, *, reuse=None,
+    ):
         with lock:
             started.append(index)
         try:
@@ -513,7 +515,7 @@ def test_worker_cleanup_failure_is_not_hidden_by_cancellation(tmp_path: Path, mo
     exporter, project, parent = _fixture(tmp_path)
     stopped = threading.Event()
 
-    def write(*args):
+    def write(*args, **_kwargs):
         notify = args[-1]
         notify("Worker started")
         try:

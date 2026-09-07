@@ -414,9 +414,18 @@ Pack Details, which stays focused on the title, authors, notes, and media.
 
 Repeat exports to the same destination reuse the previous video conversion when source content,
 height, FPS, and encoding recipe still match and the exported video's checksum is intact.
+Unchanged generated prompt audio and stills can also be reused, even after caption edits, speaker
+renaming, or prompt reindexing. Audio reuse requires matching source content, range, effective
+padding, and audio recipe; still reuse requires matching source content, midpoint, output dimensions,
+and image recipe. These checks are independent: changing image dimensions does not regenerate
+unchanged prompt audio. Imported recordings and custom stills keep their existing copy/conversion
+behavior and are never replaced with a generated cache entry.
 Small reuse receipts live in the application's `export-cache` data directory, not in game packs;
-no duplicate video cache is kept. Deleting a receipt or the previous export simply causes the next
-export to encode again. Both desktop and MCP exports use this behavior.
+no duplicate media cache is kept. Receipts are bounded, and only refer to the previous successfully
+verified export at that destination. Missing receipts, deleted assets, or checksum mismatches cause
+the affected media to be generated again; cache capacity never limits the number of exported prompts.
+Both desktop and MCP exports use this behavior. Reused media is copied into staging and its checksum
+is checked again; prompt duration, padding, and audibility checks remain enabled.
 Prompt generation runs up to two prompts at a time, and generated stills use accurate seeking
 and resizing in one FFmpeg operation. ZIPs store already-compressed media without recompressing it
 and lightly compress metadata; they may be larger, but their contents and game compatibility are

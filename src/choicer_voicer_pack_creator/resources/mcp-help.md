@@ -97,9 +97,16 @@ New projects default to 480p at 30 FPS. For higher quality, set `update_project`
 `patch.video_height` and `patch.video_fps`; saved settings and compatible imported
 video profiles are preserved. Repeat exports to the same destination can reuse
 checksum-verified video conversions when source content and encoding settings match.
+Generated prompt audio and stills can also be reused independently, even after caption
+edits, speaker renaming, or reindexing. Audio reuse keys include source content, range,
+effective padding, and recipe; still keys include source content, midpoint, actual output
+dimensions, and recipe. Imported recordings and custom stills keep their existing
+copy/conversion behavior. Reuse only reads the previous verified export at the same
+destination; missing/corrupt assets or bounded receipt capacity cause regeneration.
 Small receipts are kept in the application's `export-cache` data directory, outside
-game packs. Up to two prompts are prepared concurrently and ZIPs avoid recompressing
-media. Full validation, overwrite consent, and rollback protection remain enabled.
+game packs, without duplicate media storage. Reused prompt audio still receives duration,
+padding, and audibility checks. Up to two prompts are prepared concurrently and ZIPs avoid
+recompressing media. Full validation, overwrite consent, and rollback protection remain enabled.
 
 The editor's Export action first opens options for Fast (480p30), Higher quality (720p30),
 Custom, compatible-OGV copying, and advanced prompt padding. Acceptance updates the project

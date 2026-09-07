@@ -11,11 +11,13 @@ import threading
 import unicodedata
 import uuid
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import suppress
 from contextvars import copy_context
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, BinaryIO
 
 from choicer_voicer_pack_creator.config_format import render_clip_metadata, render_pack_info
@@ -25,7 +27,15 @@ from choicer_voicer_pack_creator.diagnostics import (
     diagnostic_exception,
     diagnostic_operation,
 )
-from choicer_voicer_pack_creator.export_cache import ExportVideoCache
+from choicer_voicer_pack_creator.export_cache import (
+    ExportPromptCache,
+    ExportVideoCache,
+    PromptAssetKind,
+    PromptAssetReceipt,
+    prompt_audio_key,
+    prompt_image_key,
+    prompt_recipe,
+)
 from choicer_voicer_pack_creator.export_progress import (
     VIDEO_CONVERSION_STEP,
     ExportProgress,
@@ -181,6 +191,86 @@ class ExportResult:
     warnings: list[str]
 
 
+@dataclass(frozen=True, slots=True)
+class _PromptReuse:
+    target: Path
+    source_hash: str
+    assets: Mapping[tuple[PromptAssetKind, str], PromptAssetReceipt]
+    warnings: queue.Queue[str] = field(default_factory=lambda: queue.Queue(maxsize=1))
+
+
+def _prompt_base(segment: Segment, index: int) -> str:
+    return f"{index:03d}_{slug(segment.primary_character)}"
+
+
+def _prompt_keys(
+    project: PackProject, segment: Segment, source_hash: str,
+    duration: float, width: int, height: int,
+) -> dict[PromptAssetKind, str]:
+    keys: dict[PromptAssetKind, str] = {}
+    if segment.audio_mode == "video":
+        keys["audio"] = prompt_audio_key(
+            source_hash, segment.start, segment.end, min(segment.start, project.head_padding),
+            min(project.tail_padding, max(0.0, duration - segment.end)),
+        )
+    if not segment.image_path:
+        keys["image"] = prompt_image_key(
+            source_hash, segment.start + segment.duration / 2.0, width, height,
+        )
+    return keys
+
+
+def _prompt_receipts(
+    project: PackProject, segments: list[Segment], source_hash: str,
+    duration: float, width: int, height: int, file_hashes: Mapping[str, str],
+) -> Iterable[PromptAssetReceipt]:
+    for index, segment in enumerate(segments, start=1):
+        check_cancelled()
+        for kind, key in _prompt_keys(
+            project, segment, source_hash, duration, width, height,
+        ).items():
+            filename = f"{_prompt_base(segment, index)}.{'mp3' if kind == 'audio' else 'png'}"
+            yield PromptAssetReceipt(
+                kind, prompt_recipe(kind), key, filename, file_hashes[filename],
+            )
+
+
+def _reuse_prompt_asset(
+    reuse: _PromptReuse | None, kind: PromptAssetKind, key: str | None,
+    destination: Path, notify: Callable[[str], None],
+) -> bool:
+    if reuse is None or key is None:
+        return False
+    asset = reuse.assets.get((kind, key))
+    if asset is None:
+        return False
+    previous = reuse.target / asset.filename
+    try:
+        if previous.is_symlink() or previous.resolve().parent != reuse.target.resolve():
+            diagnostic_event("export_prompt_cache_unsafe_path", kind=kind, path=previous)
+            return False
+        if not previous.is_file():
+            diagnostic_event("export_prompt_cache_missing", kind=kind, path=previous)
+            return False
+        if sha256(previous) != asset.output_hash:
+            diagnostic_event("export_prompt_cache_mismatch", kind=kind, path=previous)
+            return False
+    except OSError as error:
+        diagnostic_exception("export_prompt_cache_asset_read_failed", error, path=previous)
+        warning = f"Prompt reuse was unavailable for one or more assets; they were regenerated: {error}"
+        # Keep a bounded summary; each individual failure is diagnosed above.
+        with suppress(queue.Full):
+            reuse.warnings.put_nowait(warning)
+        notify(f"Previous prompt {kind} could not be read; regenerating")
+        return False
+    notify(f"Reusing verified prompt {kind}")
+    _copy_file(previous, destination)
+    if sha256(destination) != asset.output_hash:
+        raise RuntimeError(f"Previous prompt {kind} changed while it was being reused")
+    diagnostic_event("pack_export_prompt_reused", kind=kind)
+    return True
+
+
 class PackExporter:
     def __init__(
         self, media: MediaTools, *, cache_root: Path | None = None,
@@ -191,6 +281,7 @@ class PackExporter:
         self.media = media
         self.validator = PackValidator(media)
         self.video_cache = ExportVideoCache(cache_root) if cache_root is not None else None
+        self.prompt_cache = ExportPromptCache(cache_root) if cache_root is not None else None
         self.prompt_workers = min(2, prompt_workers or os.cpu_count() or 1)
 
     @diagnostic_operation("pack_export")
@@ -234,6 +325,11 @@ class PackExporter:
                     "or write inside a source pack. Choose another export directory or change the "
                     "pack title. Endangered paths:\n" + preview
                 )
+            for cache in (self.video_cache, self.prompt_cache):
+                if cache is not None and any(
+                    is_same_or_within(cache.root, path) for path in [*protected_paths, *outputs]
+                ):
+                    raise ValueError("Export cache must be outside output and source pack folders")
             with path_leases(read_paths=protected_paths, write_paths=outputs):
                 snapshot = SourceSnapshot.capture(protected_paths)
                 return self._export(project, parent, create_zip, progress, snapshot)
@@ -305,9 +401,26 @@ class PackExporter:
             cache_warnings: list[str] = []
             source_hash = None
             reusable_video = None
-            if self.video_cache is not None and not preserve_video:
-                notify("Checking whether the previous video conversion can be reused...")
+            cache_video = self.video_cache is not None and not preserve_video
+            cache_prompts = self.prompt_cache is not None and any(
+                segment.audio_mode == "video" or not segment.image_path for segment in segments
+            )
+            if cache_video or cache_prompts:
+                notify("Checking source content for previous export reuse...")
                 source_hash = sha256(source_video)
+            prompt_reuse = None
+            if cache_prompts and self.prompt_cache is not None and source_hash is not None:
+                try:
+                    assets = self.prompt_cache.lookup(target)
+                except OSError as error:
+                    diagnostic_exception("export_prompt_cache_read_failed", error)
+                    cache_warnings.append(
+                        f"Prompt reuse was unavailable; prompts were generated again: {error}"
+                    )
+                    assets = MappingProxyType({})
+                prompt_reuse = _PromptReuse(target, source_hash, assets)
+            if cache_video and self.video_cache is not None and source_hash is not None:
+                notify("Checking whether the previous video conversion can be reused...")
                 try:
                     expected_hash = self.video_cache.lookup(
                         target, source_hash, project.video_height, project.video_fps,
@@ -444,7 +557,10 @@ class PackExporter:
             self._write_prompts(
                 project, segments, source_video, stage, source_info.duration,
                 output_video_info.width, output_video_info.height, notify_prompt,
+                reuse=prompt_reuse,
             )
+            if prompt_reuse is not None and not prompt_reuse.warnings.empty():
+                cache_warnings.append(prompt_reuse.warnings.get_nowait())
             diagnostic_event("pack_export_prompts_built", segment_count=total)
 
             notify("Validating staged pack…", step="staged-validation")
@@ -500,7 +616,7 @@ class PackExporter:
                     snapshot=snapshot,
                 )
                 publish_warnings.extend(cache_warnings)
-                if self.video_cache is not None and source_hash is not None:
+                if cache_video and self.video_cache is not None and source_hash is not None:
                     try:
                         self.video_cache.remember(
                             target, source_hash, project.video_height, project.video_fps,
@@ -510,6 +626,21 @@ class PackExporter:
                         diagnostic_exception("export_video_cache_write_failed", error)
                         publish_warnings.append(
                             f"Export succeeded, but its video reuse receipt could not be saved: {error}"
+                        )
+                if self.prompt_cache is not None:
+                    receipts = (
+                        _prompt_receipts(
+                            project, segments, source_hash, source_info.duration,
+                            output_video_info.width, output_video_info.height, file_hashes,
+                        )
+                        if source_hash is not None else ()
+                    )
+                    try:
+                        self.prompt_cache.remember(target, receipts)
+                    except OSError as error:
+                        diagnostic_exception("export_prompt_cache_write_failed", error)
+                        publish_warnings.append(
+                            f"Export succeeded, but its prompt reuse receipt could not be saved: {error}"
                         )
                 if backing_is_silent:
                     publish_warnings.append(
@@ -535,6 +666,7 @@ class PackExporter:
         self, project: PackProject, segments: list[Segment], source: Path, stage: Path,
         duration: float, width: int, height: int,
         progress: Callable[[int, str, float], None],
+        *, reuse: _PromptReuse | None = None,
     ) -> None:
         events: queue.SimpleQueue[tuple[int, str]] = queue.SimpleQueue()
         stop = threading.Event()
@@ -552,6 +684,7 @@ class PackExporter:
             ):
                 self._write_prompt(
                     project, segment, index, source, stage, duration, width, height, notify,
+                    reuse=reuse,
                 )
 
         executor = ThreadPoolExecutor(
@@ -598,12 +731,20 @@ class PackExporter:
     def _write_prompt(
         self, project: PackProject, segment: Segment, index: int, source: Path, stage: Path,
         duration: float, width: int, height: int, notify: Callable[[str], None],
+        *, reuse: _PromptReuse | None = None,
     ) -> None:
         notify("Preparing prompt audio")
-        base = f"{index:03d}_{slug(segment.primary_character)}"
+        base = _prompt_base(segment, index)
         audio_path = stage / f"{base}.mp3"
         image_path = stage / f"{base}.png"
-        timestamp = self._write_audio(project, segment, source, audio_path, duration)
+        keys = (
+            _prompt_keys(project, segment, reuse.source_hash, duration, width, height)
+            if reuse is not None else {}
+        )
+        if _reuse_prompt_asset(reuse, "audio", keys.get("audio"), audio_path, notify):
+            timestamp = segment.start - min(segment.start, project.head_padding)
+        else:
+            timestamp = self._write_audio(project, segment, source, audio_path, duration)
         if segment.audio_mode == "video":
             notify("Checking prompt audio duration, padding, and audibility")
             actual_head = min(segment.start, project.head_padding)
@@ -622,7 +763,8 @@ class PackExporter:
             if not stats.has_activity:
                 raise RuntimeError(f"{audio_path.name} contains no audible source content")
         notify("Preparing prompt still image")
-        self._write_image(segment, source, image_path, width, height)
+        if not _reuse_prompt_asset(reuse, "image", keys.get("image"), image_path, notify):
+            self._write_image(segment, source, image_path, width, height)
         notify("Writing prompt caption and character metadata")
         (stage / f"{base}.txt").write_bytes(render_clip_metadata(
             segment.caption.strip(), image_path.name, timestamp,

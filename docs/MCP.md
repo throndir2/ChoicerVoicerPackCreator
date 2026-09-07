@@ -117,6 +117,14 @@ New projects default to 480p at 30 FPS. Opt into higher quality with `update_pro
 profiles are preserved. Repeat exports to the same destination can reuse a checksum-verified
 video conversion when the source content and encoding settings are unchanged. Small reuse
 receipts are stored in the application's `export-cache` data directory outside game packs.
+Generated prompt audio and stills can also be reused independently after checksum verification,
+including after caption edits, speaker renaming, and reindexing. Audio keys cover original source
+content, range, effective padding, and recipe; still keys cover source content, midpoint, actual
+output dimensions, and recipe. Imported recordings and custom stills retain their existing
+copy/conversion behavior. Only the previous verified export at the same destination is used;
+missing/corrupt assets or bounded receipt capacity cause generation, not an export failure.
+No duplicate media cache is stored, and reused prompt audio still receives its duration,
+padding, and audibility checks.
 Up to two prompts are prepared concurrently, and ZIPs avoid recompressing media. These
 optimizations retain full media validation, overwrite consent, and rollback protection.
 
