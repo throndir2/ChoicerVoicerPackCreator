@@ -3,12 +3,18 @@ from __future__ import annotations
 import json
 import zipfile
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from choicer_voicer_pack_creator.config_format import read_config
+from choicer_voicer_pack_creator.export_resources import (
+    WorkEstimate,
+    estimate_media_work,
+    export_resources,
+)
 from choicer_voicer_pack_creator.media import MediaTools
-from choicer_voicer_pack_creator.operations import check_cancelled
+from choicer_voicer_pack_creator.operations import check_cancelled, operation_scope
 
 
 class PackValidationError(RuntimeError):
@@ -28,6 +34,13 @@ class PackValidator:
             if progress:
                 progress(message)
             check_cancelled()
+
+        @contextmanager
+        def admit(estimate: WorkEstimate):
+            with operation_scope(progress=lambda message, _fraction: notify(message)):
+                admission = export_resources.acquire(estimate)
+            with admission:
+                yield
 
         notify("checking required files and pack metadata")
         root = folder.resolve()
@@ -71,13 +84,15 @@ class PackValidator:
                 "and one- or two-channel 44.1/48 kHz Vorbis audio"
             )
         notify("fully decoding Ogg video and audio")
-        self.media.decode(root / "dub_video.ogv")
+        with admit(self._decode_estimate(video.width, video.height, frame_buffers=8)):
+            self.media.decode(root / "dub_video.ogv")
         notify("checking and decoding pack icon")
-        if (root / "icon.png").read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":
-            raise PackValidationError("icon.png does not have a valid PNG signature")
-        self.media.decode(root / "icon.png")
-        if self.media.probe_image_dimensions(root / "icon.png") != (660, 364):
+        self._require_png_signature(root / "icon.png")
+        icon_dimensions = self.media.probe_image_dimensions(root / "icon.png")
+        if icon_dimensions != (660, 364):
             raise PackValidationError("icon.png must be 660×364 pixels")
+        with admit(self._decode_estimate(*icon_dimensions, frame_buffers=4)):
+            self.media.decode(root / "icon.png")
 
         metadata_files = sorted(root.glob("*.txt"))
         if expected_clips is not None and len(metadata_files) != expected_clips:
@@ -100,7 +115,8 @@ class PackValidator:
             raise PackValidationError("_backing_track.mp3 must be 44.1 kHz stereo MP3 audio")
         if abs(backing_info.duration - video.duration) > 0.25:
             raise PackValidationError("_backing_track.mp3 duration does not match the video")
-        self.media.decode(root / "_backing_track.mp3")
+        with admit(self._decode_estimate()):
+            self.media.decode(root / "_backing_track.mp3")
 
         timestamps: list[float] = []
         for index, metadata_path in enumerate(metadata_files, start=1):
@@ -136,8 +152,7 @@ class PackValidator:
             image_path = root / image_name
             if not audio_path.is_file() or not image_path.is_file():
                 raise PackValidationError(f"{metadata_path.stem} is missing its MP3 or PNG")
-            if image_path.read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":
-                raise PackValidationError(f"{image_path.name} does not have a valid PNG signature")
+            self._require_png_signature(image_path)
             notify(f"{prompt_status}: checking and decoding audio")
             audio_info = self.media.probe_audio(audio_path)
             if (
@@ -155,15 +170,18 @@ class PackValidator:
                 raise PackValidationError(
                     f"{audio_path.name} extends beyond the end of dub_video.ogv"
                 )
-            if not self.media.decoded_audio_stats(audio_path).has_activity:
+            with admit(self._decode_estimate()):
+                stats = self.media.validated_audio_stats(audio_path)
+            if not stats.has_activity:
                 raise PackValidationError(f"{audio_path.name} contains no audible prompt content")
-            self.media.decode(audio_path)
             notify(f"{prompt_status}: checking and decoding still image")
-            self.media.decode(image_path)
-            if self.media.probe_image_dimensions(image_path) != (video.width, video.height):
+            image_dimensions = self.media.probe_image_dimensions(image_path)
+            if image_dimensions != (video.width, video.height):
                 raise PackValidationError(
                     f"{image_path.name} dimensions must match dub_video.ogv"
                 )
+            with admit(self._decode_estimate(*image_dimensions, frame_buffers=4)):
+                self.media.decode(image_path)
             expected_names.update({metadata_path.name, audio_path.name, image_path.name})
 
         notify("checking complete pack file inventory")
@@ -195,6 +213,23 @@ class PackValidator:
             "first_timestamp": min(timestamps) if timestamps else None,
             "last_timestamp": max(timestamps) if timestamps else None,
         }
+
+    @staticmethod
+    def _decode_estimate(
+        width: int = 0, height: int = 0, *, frame_buffers: int = 0,
+    ) -> WorkEstimate:
+        return estimate_media_work(
+            width, height, frame_buffers=frame_buffers,
+            cpu_threads=2 if frame_buffers else 1,
+        )
+
+    @staticmethod
+    def _require_png_signature(path: Path) -> None:
+        check_cancelled()
+        with path.open("rb") as stream:
+            signature = stream.read(8)
+        if signature != b"\x89PNG\r\n\x1a\n":
+            raise PackValidationError(f"{path.name} does not have a valid PNG signature")
 
     @staticmethod
     def _require_canonical_crlf(path: Path) -> None:

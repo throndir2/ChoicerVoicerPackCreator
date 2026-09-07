@@ -37,6 +37,23 @@ completion. Never modify another active session's checkout or work directly on `
 	refuse in-place conversion of the source pack.
 - Avoid placing diagnostic files in exported pack folders because the game may interpret them as clip metadata.
 
+## Export resource budgets
+
+Both the staged and published pack receive complete validation. Prompt audio statistics and
+all-stream decodeability share one FFmpeg command in each pass; PCM statistics are accumulated
+in bounded chunks rather than retaining a whole decoded prompt.
+
+Explicit export work units use the shared `export_resources` budget, not automatic admission in
+every media helper. On Windows, admission considers current available physical RAM, CPU affinity
+and sampled CPU load, reserves editor/OS headroom, and accounts for already admitted work.
+At most two units run together; constrained or unavailable telemetry selects a diagnosed,
+serial one-thread baseline. Known insufficient memory still prevents admission. Waiting is
+cancellable and bounded; impossible working sets and persistent pressure produce actionable
+errors. FFmpeg decoder/filter/output thread overrides apply only inside an admitted unit.
+Keep estimates tied to actual dimensions and buffers, release after process cleanup, and never
+nest admissions. The budget is process-local: other applications are reflected in live
+telemetry, but separate application processes do not share atomic reservations.
+
 ## MCP development
 
 See [docs/MCP.md](docs/MCP.md) and the bundled

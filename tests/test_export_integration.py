@@ -92,6 +92,14 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> Non
 
     updates = []
     cache_root = tmp_path / "receipts"
+    commands = []
+    command_started = media._command_started
+
+    def record_command(command, description):
+        commands.append(command)
+        return command_started(command, description)
+
+    monkeypatch.setattr(media, "_command_started", record_command)
     result = PackExporter(media, cache_root=cache_root).export(
         project, tmp_path / "output", progress=updates.append,
     )
@@ -143,6 +151,13 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> Non
     assert result.validation["status"] == "passed"
     assert result.validation["clip_count"] == 2
     assert result.validation["file_count"] == 10
+    decoded_inputs = [
+        Path(command[command.index("-i") + 1]).name
+        for command in commands if command[0] == media.ffmpeg and "-i" in command
+    ]
+    assert decoded_inputs.count("001_Alice.mp3") == 3
+    assert decoded_inputs.count("002_Bob.mp3") == 3
+    assert decoded_inputs.count("dub_video.ogv") == 2
     assert any("without backing music" in warning for warning in result.warnings)
     assert media.audio_peak_dbfs(result.pack_path / "_backing_track.mp3") == float("-inf")
     metadata = read_config(result.pack_path / "001_Alice.txt")["data"]
