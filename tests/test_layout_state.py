@@ -5,7 +5,7 @@ import sys
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtCore import QByteArray, QSettings
+from PySide6.QtCore import QByteArray, QSettings, Qt
 from PySide6.QtWidgets import QApplication
 
 from choicer_voicer_pack_creator.media import MediaTools
@@ -46,6 +46,32 @@ def assert_sizes(actual, expected):
     assert all(abs(a - b) <= 2 for a, b in zip(actual, expected, strict=True)), (
         actual, expected,
     )
+
+
+@pytest.mark.parametrize("width", [1050, 1500])
+def test_inspector_headers_are_compact_and_remain_operable(make_window, qtbot, width):
+    window = make_window()
+    window.resize(width, 950)
+    assert window.title_edit.font().pointSizeF() == 10
+    for section in window.inspector_sections:
+        header = section.toggle_button
+        assert header.font().pointSizeF() == 9
+        content_height = max(header.fontMetrics().height(), header.iconSize().height())
+        assert header.fontMetrics().height() <= header.height() <= content_height + 8
+        assert header.width() >= header.sizeHint().width()
+        qtbot.mouseClick(header, Qt.MouseButton.LeftButton)
+        qtbot.waitUntil(
+            lambda section=section, header=header:
+            section.height() == header.sizeHint().height() + 2
+        )
+        assert section.is_collapsed
+        assert section.body.isHidden()
+        assert header.arrowType() == Qt.ArrowType.RightArrow
+        qtbot.mouseClick(header, Qt.MouseButton.LeftButton)
+        qtbot.waitUntil(lambda section=section: section.body.isVisible())
+        assert not section.is_collapsed
+        assert header.arrowType() == Qt.ArrowType.DownArrow
+        assert header.height() <= content_height + 8
 
 
 def test_shared_layout_follows_existing_and_new_tabs_before_debounce(make_window, qtbot):
