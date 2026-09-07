@@ -389,6 +389,9 @@ class ProjectEditor(QWidget):
         self.action_duplicate = QAction("Duplicate Segment", self)
         self.action_duplicate.setShortcut(QKeySequence("Ctrl+D"))
         self.action_duplicate.triggered.connect(self.duplicate_segment)
+        self.action_next_unassigned = QAction("Next Line Without a Speaker", self)
+        self.action_next_unassigned.setObjectName("nextUnassignedSegment")
+        self.action_next_unassigned.triggered.connect(self.select_next_unassigned_segment)
 
         self.action_apply_range = QAction("Update Segment Timing", self)
         self.action_apply_range.triggered.connect(self.apply_selected_range)
@@ -403,6 +406,7 @@ class ProjectEditor(QWidget):
             self.action_add, self.action_split, self.action_combine,
             self.action_duplicate, self.action_delete,
             self.action_apply_range, self.action_preview,
+            self.action_next_unassigned,
         ]
         for action, icon, label, description in (
             (self.action_save, "save", "Save", "Save the active project's editable file."),
@@ -416,6 +420,7 @@ class ProjectEditor(QWidget):
             (self.action_split, "split", "Split", "Cut the selected segment into two at the white playback line (playhead). Move the playhead inside the segment first."),
             (self.action_combine, "combine", "Combine", "Select multiple rows with Ctrl or Shift, then combine their ranges and lines."),
             (self.action_duplicate, "duplicate", "Duplicate", "Duplicate the selected segment at the same timestamp."),
+            (self.action_next_unassigned, "next-unassigned", "Next Unassigned", "Select the next line without a speaker and seek to its start, wrapping to the beginning if needed."),
             (self.action_delete, "delete", "Delete", "Delete the selected segment after confirmation."),
             (self.action_apply_range, "apply", "Update Timing", "Update Segment Timing: replace the selected segment's start and end with the In/Out times. Does not create a new segment. Preserved audio is only regenerated with your approval."),
             (self.action_preview, "play", "Preview", "Play Selected Segment: play its saved range, then pause. For preserved audio, listen to the prompt recording instead of the video. Does not use pending changes in the In/Out fields."),
@@ -710,6 +715,8 @@ class ProjectEditor(QWidget):
         self.combine_button = action_button(self.action_combine, self, compact=True)
         row_buttons.addWidget(self.combine_button)
         row_buttons.addStretch()
+        self.next_unassigned_button = action_button(self.action_next_unassigned, self)
+        row_buttons.addWidget(self.next_unassigned_button)
         segment_layout.addLayout(row_buttons)
         self.speaker_matching = SpeakerMatchingControls(self)
         segment_layout.addWidget(self.speaker_matching)
@@ -1773,6 +1780,22 @@ class ProjectEditor(QWidget):
         self._preview_end = None
         self.seek(segment.start)
 
+    def select_next_unassigned_segment(self) -> None:
+        self._commit_editors()
+        segments = self.project.segments
+        current = next(
+            (index for index, segment in enumerate(segments)
+             if segment.id == self.selected_segment_id),
+            -1,
+        )
+        for segment in segments[current + 1:] + segments[:max(0, current)]:
+            if not any(name.strip() for name in segment.characters):
+                self.select_segment(segment.id)
+                self.speakers_edit.setFocus()
+                self.speakers_edit.selectAll()
+                return
+        self.statusBar().showMessage("No other lines without a speaker.", 5000)
+
     def _show_selected_segment(self, segment: Segment) -> None:
         self.selected_segment_id = segment.id
         self.timeline.set_selected(segment.id)
@@ -2772,6 +2795,7 @@ class ProjectEditor(QWidget):
             self.action_save, self.action_save_as, self.action_restore_previous,
             self.action_analyze, self.action_backing, self.action_processing, self.action_add,
             self.action_delete, self.action_duplicate,
+            self.action_next_unassigned,
         ):
             action.setEnabled(not loading)
         self._sync_selected_editor()

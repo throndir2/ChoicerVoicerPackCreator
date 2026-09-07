@@ -240,6 +240,13 @@ or reference prepared local assets. The MCP tools also do not provide OCR or wik
 10. Save the editable project.
 11. Choose **Export Pack + ZIP**, review export options, and select an output directory.
 
+Use **Next Unassigned** below the Segments list (or **Segments > Next Line Without a Speaker**)
+to select the next line without a speaker, seek to its start, and focus the speaker field.
+Navigation follows the list's timeline order and wraps to the beginning. With no single line
+selected, it starts at the first unassigned line. It also includes lines marked **Keep unassigned**;
+that setting only excludes automatic matching. If no other line is missing a speaker, a short
+status message appears without changing the selection.
+
 **File > Open Recent** remembers the last 10 successfully opened or saved projects, newest first.
 Opening or saving the same project moves it to the top without duplicates; **Save Project As**
 also remembers the new copy. Entries show the filename and folder so similarly named projects
