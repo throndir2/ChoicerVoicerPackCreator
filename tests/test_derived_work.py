@@ -120,6 +120,38 @@ def test_active_and_pending_remain_bounded_with_late_cancellation(scheduler):
     assert [record.id for record in scheduler.published] == [str(c)]
 
 
+@pytest.mark.parametrize("gate", ["blocked", "suspended", "paused", "debounce", "none"])
+def test_ready_dispatch_preserves_request_gates(scheduler, gate):
+    coordinator = scheduler.coordinator
+    if gate == "blocked":
+        scheduler.blocked = True
+    elif gate == "suspended":
+        coordinator.suspend()
+    elif gate == "paused":
+        coordinator.pause("checks")
+    generation = request(scheduler, delay=250 if gate == "debounce" else 0)
+    coordinator.dispatch_ready()
+    assert scheduler.started == ([generation] if gate == "none" else [])
+    coordinator.dispatch_ready()
+    assert len(scheduler.handles) == (1 if gate == "none" else 0)
+
+
+def test_ready_dispatch_does_not_reenter_a_start_factory(scheduler):
+    coordinator = scheduler.coordinator
+    starts = []
+
+    def start(generation):
+        starts.append(generation)
+        coordinator.dispatch_ready()
+        return scheduler.start(generation)
+
+    coordinator.request("checks", start, scheduler.published.append, delay_ms=0)
+    coordinator.dispatch_ready()
+    scheduler.pump()
+    assert starts == [0]
+    assert len(scheduler.handles) == 1
+
+
 def test_parent_destruction_disconnects_late_worker_completion(qapp):
     parent = QObject()
     coordinator = DerivedWorkCoordinator(parent)

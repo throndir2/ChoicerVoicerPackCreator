@@ -65,6 +65,7 @@ class DerivedWorkCoordinator(QObject):
         self._states: dict[str, _State] = {}
         self._closed = False
         self._suspended = False
+        self._pumping = False
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._pump)
@@ -162,6 +163,10 @@ class DerivedWorkCoordinator(QObject):
         """Finish a shared gesture and reconsider blocked work after a full debounce."""
         self.resume_suspended()
 
+    def dispatch_ready(self) -> None:
+        """Admit ready jobs before a finishing job yields its scheduler capacity."""
+        self._pump()
+
     @staticmethod
     def _reset_deadline(state: _State) -> None:
         if state.pending is not None:
@@ -231,6 +236,16 @@ class DerivedWorkCoordinator(QObject):
             state.publishing_deferred = previous
 
     def _pump(self) -> None:
+        if self._pumping:
+            self._wake()
+            return
+        self._pumping = True
+        try:
+            self._dispatch_ready()
+        finally:
+            self._pumping = False
+
+    def _dispatch_ready(self) -> None:
         if self._closed:
             return
         wait: float | None = None
