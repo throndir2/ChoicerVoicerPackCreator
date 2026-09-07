@@ -1,20 +1,21 @@
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget
 
 from choicer_voicer_pack_creator.jobs import JobManager
 from choicer_voicer_pack_creator.models import PackProject
 from choicer_voicer_pack_creator.project_session import ProjectSession
-from choicer_voicer_pack_creator.ui.processing import ProcessingModel, ProcessingPanel
+from choicer_voicer_pack_creator.ui.processing import ProcessingDialog, ProcessingModel
 
 
-def test_panel_shares_job_states_and_actions_without_opening_details(qtbot):
+def test_popup_shares_job_states_and_actions_without_opening_automatically(qtbot):
     parent = QWidget()
     qtbot.addWidget(parent)
     session = ProjectSession(PackProject(video_path="video.mp4"))
     manager = JobManager(parent)
     model = ProcessingModel(manager, session, parent)
-    panel = ProcessingPanel(model, parent)
+    panel = ProcessingDialog(model, parent)
     actions = []
     panel.action_requested.connect(lambda group, action: actions.append((group, action)))
     model.set_status("speaker-preparation", "consent", "Permission to download the voice model.")
@@ -40,6 +41,14 @@ def test_panel_shares_job_states_and_actions_without_opening_details(qtbot):
     assert control.text() == "Retry"
     control.click()
     assert actions[-1] == ("backing", "retry")
+    assert not panel.isVisible()
+    panel.show_processing()
+    assert panel.isVisible()
+    assert panel.windowModality() == Qt.WindowModality.NonModal
+    assert session.project.title in panel.windowTitle()
+    assert panel.rows["backing"][0].text() == "Failed"
+    panel.close()
+    assert not panel.isVisible()
     manager.shutdown(wait=True)
 
 
@@ -74,4 +83,27 @@ def test_transcript_group_keeps_independent_refinement_status(qtbot):
     assert "YouTube draft is ready" in state.message
     model.set_status("analysis", "running", "Transcribing.", 0.4)
     assert model.group_state("transcript").fraction == 0.4
+    manager.shutdown(wait=True)
+
+
+def test_summary_counts_groups_and_keeps_attention_during_parallel_work(qtbot):
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    manager = JobManager(parent)
+    model = ProcessingModel(manager, ProjectSession(PackProject()), parent)
+    assert model.status_summary() == ""
+    model.set_status("analysis", "running", "Transcribing.")
+    model.set_status("refinement", "queued", "Waiting.")
+    assert model.status_summary() == "Background: 1 active"
+    model.set_status("refinement", "consent", "Permission needed.")
+    model.set_status("speaker-preparation", "failed", "Model missing.")
+    model.set_status("speakers", "running", "Comparing cached voices.")
+    model.set_status("backing", "waiting", "Waiting for CPU.")
+    assert model.status_summary() == "Background: 3 active, 2 need attention"
+    model.set_status("analysis", "ready", "Ready.")
+    model.set_status("refinement", "ready", "Ready.")
+    model.set_status("speaker-preparation", "off", "Off.")
+    model.set_status("speakers", "cancelled", "Paused.")
+    model.set_status("backing", "ready", "Ready.")
+    assert model.status_summary() == ""
     manager.shutdown(wait=True)

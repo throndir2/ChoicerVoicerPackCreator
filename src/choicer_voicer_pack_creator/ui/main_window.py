@@ -100,8 +100,9 @@ from choicer_voicer_pack_creator.ui.layout_state import (
 )
 from choicer_voicer_pack_creator.ui.processing import (
     PROCESSING_KINDS,
+    ProcessingDialog,
     ProcessingModel,
-    ProcessingPanel,
+    ProcessingStatus,
 )
 from choicer_voicer_pack_creator.ui.readable_table import ReadableTableWidget
 from choicer_voicer_pack_creator.ui.setup_consent import SetupConsent
@@ -364,6 +365,9 @@ class ProjectEditor(QWidget):
         self.action_analyze.triggered.connect(lambda: self.open_analysis_dialog())
         self.action_backing = QAction("Generate Backing Track...", self)
         self.action_backing.triggered.connect(lambda: self.generate_backing_track())
+        self.action_processing = QAction("Background Processing...", self)
+        self.action_processing.setObjectName("showProcessing")
+        self.action_processing.triggered.connect(lambda: self.processing_dialog.show_processing())
 
         self.action_add = QAction("Add Segment", self)
         self.action_add.setShortcut(QKeySequence("Ctrl+Shift+A"))
@@ -394,6 +398,7 @@ class ProjectEditor(QWidget):
             self.action_save, self.action_save_as, self.action_restore_previous, self.action_export,
         ]
         self.project_actions = [self.action_analyze, self.action_backing]
+        self.tool_actions = [self.action_processing]
         self.segment_actions = [
             self.action_add, self.action_split, self.action_combine,
             self.action_duplicate, self.action_delete,
@@ -406,6 +411,7 @@ class ProjectEditor(QWidget):
             (self.action_export, "export", "Export", "Review export quality and options, then export the active project as a game-ready pack and ZIP."),
             (self.action_analyze, "analyze", "Analyze", "Analyze this video's dialogue and review suggested segments."),
             (self.action_backing, "backing", "Backing", "Generate music/effects backing for this project without changing the source."),
+            (self.action_processing, "tasks", None, "View transcript, voice, and backing progress or manage processing for this project."),
             (self.action_add, "add", "Add", "Create a new segment using the current In/Out times. Existing segments are not changed."),
             (self.action_split, "split", "Split", "Cut the selected segment into two at the white playback line (playhead). Move the playhead inside the segment first."),
             (self.action_combine, "combine", "Combine", "Select multiple rows with Ctrl or Shift, then combine their ranges and lines."),
@@ -415,7 +421,9 @@ class ProjectEditor(QWidget):
             (self.action_preview, "play", "Preview", "Play Selected Segment: play its saved range, then pause. For preserved audio, listen to the prompt recording instead of the video. Does not use pending changes in the In/Out fields."),
         ):
             describe_action(action, icon, description, label=label)
-        self.addActions(self.file_actions + self.project_actions + self.segment_actions)
+        self.addActions(
+            self.file_actions + self.project_actions + self.segment_actions + self.tool_actions
+        )
 
     def _build_ui(self) -> None:
         toolbar = QToolBar("Project", self)
@@ -434,9 +442,10 @@ class ProjectEditor(QWidget):
         self.project_toolbar = toolbar
         self.addToolBar(toolbar)
 
-        self.processing_panel = ProcessingPanel(self.processing, self)
-        self.processing_panel.action_requested.connect(self._processing_action)
-        self._document_layout.addWidget(self.processing_panel)
+        self.processing_dialog = ProcessingDialog(self.processing, self)
+        self.processing_dialog.action_requested.connect(self._processing_action)
+        self.processing_status = ProcessingStatus(self.processing, self.action_processing, self)
+        self.statusBar().addPermanentWidget(self.processing_status)
 
         root = QWidget(self)
         root.setObjectName("projectEditorContent")
@@ -1083,6 +1092,7 @@ class ProjectEditor(QWidget):
             elif action == "retry":
                 self.speaker_matching.retry()
             else:
+                self.processing_dialog.hide()
                 self.segments_section.set_collapsed(False)
                 self.speaker_matching.setFocus()
         elif group == "backing":
@@ -1351,7 +1361,6 @@ class ProjectEditor(QWidget):
         self.speaker_matching.project_replaced(preserve_view=preserve_view)
         if not preserve_view:
             self.processing.reset()
-        self.processing_panel.setVisible(bool(project.video_path or project.segments))
         self._set_dirty(mark_dirty)
         self._refresh_validation_label()
 
@@ -2331,7 +2340,6 @@ class ProjectEditor(QWidget):
         self._start_waveform(str(source), info.duration)
         self.speaker_matching.project_replaced(preserve_view=False)
         self.processing.reset()
-        self.processing_panel.show()
         self._set_dirty(True)
         self._refresh_validation_label()
         invalid = [item for item in self.project.segments if item.end > info.duration + 0.05]
@@ -2374,7 +2382,6 @@ class ProjectEditor(QWidget):
         self.project.preserve_source_video = False
         self.speaker_matching.project_replaced(preserve_view=False)
         self.processing.reset()
-        self.processing_panel.setVisible(bool(self.project.segments))
         self.video_path_label.setText("No video loaded")
         self.video_path_label.setToolTip("")
         self.timeline.set_waveform([])
@@ -2759,10 +2766,11 @@ class ProjectEditor(QWidget):
     def _set_loading(self, loading: bool) -> None:
         self.session.loading = loading
         self.editor_splitter.setEnabled(not loading)
-        self.processing_panel.setEnabled(not loading)
+        self.processing_dialog.setEnabled(not loading)
+        self.processing_status.setEnabled(not loading)
         for action in (
             self.action_save, self.action_save_as, self.action_restore_previous,
-            self.action_analyze, self.action_backing, self.action_add,
+            self.action_analyze, self.action_backing, self.action_processing, self.action_add,
             self.action_delete, self.action_duplicate,
         ):
             action.setEnabled(not loading)
@@ -3158,6 +3166,7 @@ class MainWindow(QMainWindow):
                 (self.file_menu, previous.file_actions),
                 (self.project_menu, previous.project_actions),
                 (self.segments_menu, previous.segment_actions),
+                (self.tools_menu, previous.tool_actions),
             ):
                 for action in actions:
                     menu.removeAction(action)
@@ -3167,6 +3176,7 @@ class MainWindow(QMainWindow):
             self.file_menu.insertAction(self.action_close_project, current.action_export)
             self.project_menu.addActions(current.project_actions)
             self.segments_menu.addActions(current.segment_actions)
+            self.tools_menu.addActions(current.tool_actions)
         for action in (
             self.project_menu.menuAction(), self.segments_menu.menuAction(),
             self.action_close_project,
@@ -3328,6 +3338,7 @@ class MainWindow(QMainWindow):
         previous = self._active_editor
         current = self.tabs.widget(index)
         if previous is not None and previous is not current:
+            previous.processing_dialog.hide()
             previous._save_layout_state()
             previous._layout_restored = False
             previous._commit_editors()
@@ -3789,6 +3800,7 @@ class MainWindow(QMainWindow):
         job.failed.connect(lambda message: self.notice("Could not restore workspace", message))
 
     def _hide_editor(self, editor: ProjectEditor, *, retain: bool) -> None:
+        editor.processing_dialog.hide()
         editor._commit_editors()
         editor._recovery_timer.stop()
         editor._save_layout_state()

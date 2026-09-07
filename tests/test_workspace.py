@@ -106,7 +106,9 @@ def test_workspace_menu_precedes_tabs_and_project_toolbar(
     ]
     assert all(toolbar.widgetForAction(action).isVisible() for action in actions)
     assert toolbar.widgetForAction(actions[-1]).geometry().right() < toolbar.width()
-    assert workspace.tools_menu.actions() == [workspace.tasks_window.show_action]
+    assert workspace.tools_menu.actions() == [
+        workspace.tasks_window.show_action, workspace.action_processing,
+    ]
     assert workspace.action_backing in workspace.project_menu.actions()
     assert workspace.generate_backing_button.defaultAction() is workspace.action_backing
     assert workspace.project_section.isAncestorOf(workspace.generate_backing_button)
@@ -286,8 +288,11 @@ def test_project_loading_disables_matching_menu_and_toolbar_actions(workspace):
     ready = workspace.add_project(PackProject(title="Ready"), dirty=False)
     loading = workspace.add_project(PackProject(title="Loading"), dirty=False)
     loading._set_loading(True)
-    assert not loading.processing_panel.isEnabled()
-    for action in loading.file_actions + loading.project_actions + loading.segment_actions:
+    assert not loading.processing_dialog.isEnabled()
+    assert not loading.processing_status.isEnabled()
+    for action in (
+        loading.file_actions + loading.project_actions + loading.segment_actions + loading.tool_actions
+    ):
         assert not action.isEnabled()
         button = loading.project_toolbar.widgetForAction(action)
         if button is not None:
@@ -300,10 +305,94 @@ def test_project_loading_disables_matching_menu_and_toolbar_actions(workspace):
     assert ready.action_save in workspace.file_menu.actions()
     assert ready.action_backing in workspace.project_menu.actions()
     loading._set_loading(False)
-    assert loading.processing_panel.isEnabled()
+    assert loading.processing_dialog.isEnabled()
+    assert loading.processing_status.isEnabled()
+    assert loading.action_processing.isEnabled()
     workspace.tabs.setCurrentWidget(loading)
     assert loading.action_save.isEnabled()
     assert loading.action_backing.isEnabled()
+
+
+@pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
+def test_processing_uses_existing_status_bar_and_on_demand_popup(workspace, qtbot, stylesheet):
+    workspace.setStyleSheet(stylesheet)
+    workspace.resize(1050, 680)
+    editor = workspace.add_project(PackProject(title="First", video_path="missing.mp4"), dirty=False)
+    qtbot.waitUntil(lambda: editor._layout_restored)
+    assert editor._document_layout.count() == 3
+    assert editor._document_layout.itemAt(0).widget() is editor.project_toolbar
+    assert editor._document_layout.itemAt(1).widget() is editor.editor_scroll
+    assert editor._document_layout.itemAt(2).widget() is editor.statusBar()
+    assert editor.statusBar().isAncestorOf(editor.processing_status)
+    assert not editor.processing_status.isVisible()
+    assert not editor.processing_dialog.isVisible()
+    geometry = editor.editor_scroll.geometry()
+    status_height = editor.statusBar().height()
+    editor.statusBar().showMessage("Saved project")
+    editor.processing.set_status("analysis", "running", "Transcribing.", 0.4)
+    editor.processing.set_status("speaker-preparation", "consent", "Permission needed.")
+    editor.processing.set_status("backing", "queued", "Waiting.")
+    qtbot.waitUntil(editor.processing_status.isVisible)
+    assert editor.processing_status.accessibleName() == "Background: 2 active, 1 needs attention"
+    assert editor.statusBar().currentMessage() == "Saved project"
+    assert editor.statusBar().height() == status_height
+    assert editor.editor_scroll.geometry() == geometry
+    assert not editor.processing_dialog.isVisible()
+    qtbot.mouseClick(editor.processing_status, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(editor.processing_dialog.isVisible)
+    assert editor.processing_dialog.windowModality() == Qt.WindowModality.NonModal
+    assert editor.processing_dialog.rows["transcript"][2].value() == 400
+    assert editor.editor_scroll.geometry() == geometry
+    qtbot.keyClick(editor.processing_dialog, Qt.Key.Key_Escape)
+    assert not editor.processing_dialog.isVisible()
+    assert editor.processing.group_state("transcript").state == "running"
+
+    editor.processing_status.setFocus()
+    qtbot.keyClick(editor.processing_status, Qt.Key.Key_Return)
+    qtbot.waitUntil(editor.processing_dialog.isVisible)
+    second = workspace.add_project(PackProject(title="Second"), dirty=False)
+    assert not editor.processing_dialog.isVisible()
+    assert not second.processing_status.isVisible()
+    assert editor.action_processing not in workspace.tools_menu.actions()
+    second.action_processing.trigger()
+    assert second.processing_dialog.isVisible()
+    assert "Second" in second.processing_dialog.windowTitle()
+    workspace.tabs.setCurrentWidget(editor)
+    assert not second.processing_dialog.isVisible()
+    assert editor.action_processing in workspace.tools_menu.actions()
+    editor.processing.set_status("analysis", "ready", "Draft ready.")
+    editor.processing.set_status("speaker-preparation", "cancelled", "Paused.")
+    editor.processing.set_status("backing", "ready", "Ready.")
+    assert not editor.processing_status.isVisible()
+    editor.action_processing.trigger()
+    assert editor.processing_dialog.isVisible()
+    assert editor.processing_dialog.rows["transcript"][0].text() == "Ready"
+    assert editor.processing_dialog.rows["voices"][3].text() == "Retry"
+    workspace._hide_editor(editor, retain=True)
+    assert not editor.processing_dialog.isVisible()
+
+
+def test_closing_processing_popup_does_not_cancel_job(workspace, qtbot):
+    editor = workspace.active_editor
+    release = threading.Event()
+    job = workspace.job_manager.submit(
+        editor.session.id, "analysis", "Transcript", lambda _context: release.wait(10),
+        source_snapshot={"source_revision": editor.session.source_revision},
+    )
+    try:
+        qtbot.waitUntil(lambda: job.record.state == "running")
+        assert editor.processing_status.isVisible()
+        assert not editor.processing_dialog.isVisible()
+        editor.action_processing.trigger()
+        editor.processing_dialog.close()
+        assert job.record.active
+        assert not job.record.cancel_requested
+        assert editor.processing_status.isVisible()
+    finally:
+        release.set()
+    qtbot.waitUntil(lambda: not job.record.active)
+    assert not editor.processing_status.isVisible()
+    assert not editor.processing_dialog.isVisible()
 
 
 @pytest.mark.parametrize("control", ["tab-button", "shortcut", "menu"])
@@ -365,7 +454,7 @@ def test_window_close_saves_cancels_and_discards_across_projects(
 
 def test_command_icons_and_compact_buttons_are_described(workspace):
     editor = workspace.active_editor
-    for action in editor.file_actions + editor.project_actions + editor.segment_actions + [
+    for action in editor.file_actions + editor.project_actions + editor.segment_actions + editor.tool_actions + [
         workspace.action_new, workspace.action_open, workspace.action_import,
         workspace.tasks_window.show_action, workspace.action_logs, workspace.updater.check_action,
         workspace.action_reset_layout,
@@ -890,8 +979,8 @@ def test_fresh_native_layout_keeps_task_and_segment_rows_clickable(workspace, qt
     qtbot.waitUntil(lambda: not workspace.job_manager.active_jobs())
     QApplication.processEvents()
     assert workspace.height() <= available.height()
-    assert not editor.editor_scroll.isAncestorOf(editor.processing_panel)
-    assert editor.processing_panel.visibleRegion().boundingRect().height() == editor.processing_panel.height()
+    assert not editor.processing_dialog.isVisible()
+    assert editor._document_layout.count() == 3
     scrollbar = editor.editor_scroll.verticalScrollBar()
     assert scrollbar.objectName() == "projectEditorScrollbar"
     if scrollbar.isVisible():

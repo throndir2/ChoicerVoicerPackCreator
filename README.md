@@ -113,8 +113,8 @@ It does not require a system FFmpeg installation. Use
 The finished outputs are:
 
 ```text
-dist/v1.3.2/portable-<build-id>/Choicer Voicer Pack Creator/
-dist/v1.3.2/Choicer-Voicer-Pack-Creator-1.3.2-Windows-x64.zip
+dist/v1.3.3/portable-<build-id>/Choicer Voicer Pack Creator/
+dist/v1.3.3/Choicer-Voicer-Pack-Creator-1.3.3-Windows-x64.zip
 ```
 
 The script prints the exact generated application-folder path. Each rebuild uses a new path to avoid
@@ -220,9 +220,12 @@ or reference prepared local assets. The MCP tools also do not provide OCR or wik
 
 1. Choose **File → New → From Video**.
 2. Once the source is ready, start editing immediately. Transcript analysis, voice-fingerprint
-   preparation, and backing generation use the shared background queue. The inline
-   **Background processing** panel shows their progress, permission requests, and cancel/retry
-   actions; **Review** opens the transcript when you want it, without an automatic popup.
+   preparation, and backing generation use the shared background queue. A small **Background**
+   link in the existing status bar appears while work is active or needs attention, and hides
+   when nothing is pending. Click it, or choose **Tools > Background Processing**, to open
+   progress, permission status, and cancel/retry controls in a separate nonmodal popup.
+   **Review** opens the transcript when you want it; the overview never opens automatically,
+   and closing it does not stop processing.
    Voice preparation starts as dialogue ranges become available, before you name any characters.
    A shared nonmodal prompt combines requests for
    missing runtime/model versions across projects. Declining keeps your media and drafts; other
@@ -707,7 +710,7 @@ No names are guessed during preparation, and unfinished or short draft ranges ar
 The first use requests permission for a checksum-verified WeSpeaker voice model (about 25 MiB).
 Inference is local, needs no account or token, and does not upload audio or transcripts.
 **Match now** starts or retries a pass; **Cancel** pauses matching until explicitly resumed.
-Progress, permission status, and cancellation are also available in **Background processing**
+Progress, permission status, and cancellation are also available in **Tools > Background Processing**
 and **Tools > Tasks**. Cancel pauses both preparation and automatic matching until resumed.
 
 Only strong matches fill blank names. Existing names are never replaced. Results for segments
@@ -855,8 +858,8 @@ with another compatible pair.
 .\Build-Portable.ps1
 ```
 
-The Windows application folder is written below `dist/v1.3.2/portable-<build-id>/`, with a
-shareable `Choicer-Voicer-Pack-Creator-1.3.2-Windows-x64.zip` beside it. The first build downloads
+The Windows application folder is written below `dist/v1.3.3/portable-<build-id>/`, with a
+shareable `Choicer-Voicer-Pack-Creator-1.3.3-Windows-x64.zip` beside it. The first build downloads
 about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. The stable sharing ZIP is not
 replaced until both the application folder and a clean ZIP extraction pass packaged smoke tests.
 Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or
