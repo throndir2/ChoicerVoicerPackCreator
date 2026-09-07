@@ -156,6 +156,7 @@ class SpeakerMatchingControls(QWidget):
         self._prepared_ranges: set[tuple[str, float, float | None]] = set()
         self._typing = False
         self._paused = False
+        self._history_paused = False
         self._resume_requested = False
         self._canceled_run = False
         self._pending_consent = False
@@ -236,6 +237,7 @@ class SpeakerMatchingControls(QWidget):
             self._prepared_ranges.clear()
             self._typing = False
             self._paused = False
+            self._history_paused = False
             self._resume_requested = False
             self._undo.clear()
             if self._consent_callback is not None:
@@ -290,6 +292,9 @@ class SpeakerMatchingControls(QWidget):
             "manual" if any(name.strip() for name in segment.characters) else "excluded"
         )
         self._typing = True
+        if self._history_paused:
+            self._paused = False
+            self._history_paused = False
         if self._preprocess:
             self._timer.start(900)
         else:
@@ -308,7 +313,9 @@ class SpeakerMatchingControls(QWidget):
     @Slot(bool)
     def _enabled_changed(self, enabled: bool) -> None:
         self.editor.project.auto_speaker_matching = enabled
-        self.editor._set_dirty(True)
+        self.editor._set_dirty(
+            True, history_label="Change automatic speaker matching", fields_only=True,
+        )
         if enabled:
             self.retry()
         else:
@@ -330,6 +337,7 @@ class SpeakerMatchingControls(QWidget):
             self.enabled_check.setChecked(True)
             return
         self._paused = False
+        self._history_paused = False
         self._activated = True
         self._preprocess = True
         self._typing = False
@@ -639,7 +647,7 @@ class SpeakerMatchingControls(QWidget):
                 segment.speaker_assignment = "automatic"
                 applied.append(segment)
             if applied:
-                self.editor._set_dirty(True)
+                self.editor._set_dirty(True, history_label="Auto-fill speakers")
                 self._refresh_names(applied)
                 self._undo = {
                     segment.id: (segment.characters[0], self._versions[segment.id])
@@ -654,6 +662,9 @@ class SpeakerMatchingControls(QWidget):
 
     @Slot()
     def _publish_ready(self) -> None:
+        if self.editor.edit_history.busy:
+            self._publication_timer.start(100)
+            return
         publication, self._publication = self._publication, None
         if publication is None:
             return
@@ -709,16 +720,40 @@ class SpeakerMatchingControls(QWidget):
                     restored.append(segment)
             self._undo.clear()
             if restored:
-                self.editor._set_dirty(True)
+                self.editor._set_dirty(True, history_label="Clear last speaker auto-fill")
                 self._refresh_names(restored)
         finally:
             self._applying = False
         self.editor.statusBar().showMessage(f"Cleared {len(restored)} auto-filled name(s).", 5000)
         self._update_actions()
 
+    def history_replayed(self) -> None:
+        self._generation += 1
+        self._source_token = self.editor.session.source_token()
+        self._timer.stop()
+        self._publication_timer.stop()
+        self._publication = None
+        self._pending = False
+        self._typing = False
+        self._paused = True
+        self._undo.clear()
+        self._history_paused = True
+        if self.worker is not None:
+            self.worker.requestInterruption()
+        with QSignalBlocker(self.enabled_check):
+            self.enabled_check.setChecked(self.editor.project.auto_speaker_matching)
+        self._observe()
+        self._update_actions()
+        self.editor.processing.set_status(
+            "speakers", "cancelled",
+            "Matching paused after restoring history. Edit a speaker or resume "
+            "Speaker matching in Background Processing.",
+        )
+
     @Slot()
     def cancel(self) -> None:
         self._paused = True
+        self._history_paused = False
         self._resume_requested = False
         self._pending = False
         self._timer.stop()

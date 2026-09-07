@@ -188,8 +188,11 @@ class EditorProjectAccess:
         def apply() -> None:
             require_revision(self._snapshot(), expected_revision)
             window = self._editor()
+            if window.session.loading:
+                raise ValueError("Wait for this project to finish loading or restoring history.")
             window._set_project(
-                snapshot.project, snapshot.path, snapshot.dirty, preserve_view=True
+                snapshot.project, snapshot.path, snapshot.dirty, preserve_view=True,
+                history_label="Assistant project edit",
             )
             window._saved_project_hash = snapshot.saved_hash
             # Use the same recovery journal as manual edits.
@@ -217,6 +220,7 @@ class EditorProjectAccess:
                     return save_snapshot(snapshot, destination, overwrite)
 
             reservation = window.reserve_project_save(snapshot.project_id, destination)
+            editor.edit_history.saving(revision)
             try:
                 handle = window.job_manager.submit(
                     snapshot.project_id, "save", f"MCP save: {snapshot.project.title}", operation,

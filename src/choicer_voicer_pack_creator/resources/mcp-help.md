@@ -34,12 +34,16 @@ Prefer the absolute executable path in client settings.
 `list_projects` returns stable document IDs and the active ID. Pass `project_id`
 to project tools to target a specific document; omitted IDs capture the active
 document at request start, not completion. `activate_project` selects a document.
-An initial opening placeholder reports `loading=true`; read it, but wait for it
-to finish before editing or saving.
+An initial opening placeholder or history restore reports `loading=true`; read it,
+but wait for it to finish before editing or saving.
 `show_in_editor` can select a segment or seek to a timestamp for human
 review. It does not silently attach to an editor that was already running.
 The single-instance lock rejects a second visible editor: save and close the old
 window, then reconnect.
+
+Live assistant edits join the editor's per-project, 100-edit undo/redo history in
+**Project > Edit History**. Closing the project clears it. Undo/redo does not roll
+back saved/exported files or downloads and is not available in headless mode.
 
 **Headless is opt-in** with `--headless`. It creates no QApplication or window
 and has its own in-memory documents, independent of the GUI. It reads and writes

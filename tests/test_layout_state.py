@@ -5,7 +5,7 @@ import sys
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtCore import QByteArray, QSettings, Qt
+from PySide6.QtCore import QByteArray, QPoint, QSettings, Qt
 from PySide6.QtWidgets import QApplication
 
 from choicer_voicer_pack_creator.media import MediaTools
@@ -74,6 +74,61 @@ def test_inspector_headers_are_compact_and_remain_operable(make_window, qtbot, w
         assert header.height() <= content_height + 8
 
 
+@pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
+def test_inspector_dividers_are_thin_even_gaps_and_remain_draggable(
+    make_window, qtbot, stylesheet,
+):
+    window = make_window()
+    window.setStyleSheet(stylesheet)
+    splitter = window.inspector_splitter
+    assert splitter.handleWidth() == window.editor_splitter.handleWidth() == 1
+    for collapsed in (False, True, False):
+        window.project_section.set_collapsed(collapsed)
+        qtbot.waitUntil(
+            lambda collapsed=collapsed: window.project_section.body.isVisible() is not collapsed
+        )
+        qtbot.waitUntil(lambda: not window.active_editor._layout_save_timer.isActive())
+        for index in (1, 2):
+            before = splitter.widget(index - 1)
+            after = splitter.widget(index)
+            qtbot.waitUntil(
+                lambda before=before, after=after:
+                after.y() - (before.y() + before.height()) == 1
+            )
+            assert splitter.handle(index).height() >= 5
+
+    for index, delta in ((1, -40), (2, -20)):
+        handle = splitter.handle(index)
+        before_y = splitter.widget(index).y()
+        grab_point = handle.rect().center()
+        target = handle.mapToGlobal(grab_point) + QPoint(0, delta)
+        qtbot.mousePress(handle, Qt.MouseButton.LeftButton, pos=grab_point)
+        qtbot.mouseMove(handle, handle.mapFromGlobal(target))
+        qtbot.mouseRelease(handle, Qt.MouseButton.LeftButton, pos=handle.mapFromGlobal(target))
+        qtbot.waitUntil(
+            lambda index=index, before_y=before_y, delta=delta:
+            abs(splitter.widget(index).y() - before_y - delta) <= 2
+        )
+    assert not window.dirty
+
+
+def test_inspector_restore_keeps_collapsed_sections_but_not_old_wide_gaps(make_window, qtbot):
+    window = make_window()
+    window.inspector_splitter.setHandleWidth(9)
+    window.project_section.set_collapsed(True)
+    qtbot.waitUntil(lambda: window.inspector_splitter.sizes()[0] < 60)
+    window.close()
+
+    restored = make_window()
+    splitter = restored.inspector_splitter
+    assert restored.project_section.is_collapsed
+    assert splitter.handleWidth() == 1
+    for index in (1, 2):
+        before = splitter.widget(index - 1)
+        after = splitter.widget(index)
+        assert after.y() - (before.y() + before.height()) == 1
+
+
 def test_shared_layout_follows_existing_and_new_tabs_before_debounce(make_window, qtbot):
     window = make_window()
     first = window.add_project(PackProject(title="First"), dirty=False)
@@ -123,6 +178,7 @@ def test_restart_keeps_active_layout_not_last_created_tab(make_window, qtbot, le
     first.playback_splitter.moveSplitter(150, 1)
     first.selected_section.set_collapsed(True)
     qtbot.waitUntil(lambda: first.inspector_splitter.sizes()[2] < 60)
+    expected_width = first.editor_splitter.sizes()[0]
     expected_heights = first.inspector_splitter.sizes()
     expected_playback = first.playback_splitter.sizes()
     expanded_height = first.selected_section.last_expanded_height
@@ -130,7 +186,7 @@ def test_restart_keeps_active_layout_not_last_created_tab(make_window, qtbot, le
     window.close()
 
     restored = make_window()
-    assert abs(restored.editor_splitter.sizes()[0] - left_width) <= 2
+    assert abs(restored.editor_splitter.sizes()[0] - expected_width) <= 2
     assert_sizes(restored.inspector_splitter.sizes(), expected_heights)
     assert_sizes(restored.playback_splitter.sizes(), expected_playback)
     assert restored.selected_section.is_collapsed

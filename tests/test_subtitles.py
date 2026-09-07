@@ -153,7 +153,7 @@ def test_live_range_edits_duplicates_and_deletions_refresh_subtitles(window, mon
 
     window.duplicate_segment()
     assert subtitle_text(window.video_widget) == ["Line", "Line"]
-    monkeypatch.setattr(QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(QMessageBox, "exec", lambda *_args: QMessageBox.StandardButton.Yes)
     window.delete_segment()
     assert subtitle_text(window.video_widget) == ["Line"]
     window.select_segment(segment.id)

@@ -81,7 +81,8 @@ def test_workspace_menu_precedes_tabs_and_project_toolbar(
     workspace.resize(width, 950)
     menu = workspace.menuBar()
     tabs = workspace.tabs.tabBar()
-    toolbar = workspace.active_editor.project_toolbar
+    editor = workspace.active_editor
+    toolbar = editor.project_toolbar
     qtbot.waitUntil(lambda: (
         workspace.active_editor._layout_restored
         and workspace.tabs.y() >= menu.height()
@@ -94,6 +95,19 @@ def test_workspace_menu_precedes_tabs_and_project_toolbar(
     )
     assert tabs.mapTo(workspace, QPoint(0, tabs.height())).y() <= (
         toolbar.mapTo(workspace, QPoint(0, 0)).y()
+    )
+    left = editor.editor_splitter.widget(0)
+    assert left.layout().itemAt(0).widget() is toolbar
+    assert left.layout().itemAt(1).widget() is editor.playback_splitter
+    assert toolbar.parentWidget() is left
+    assert toolbar.x() == editor.playback_splitter.x()
+    assert toolbar.width() == editor.playback_splitter.width()
+    assert toolbar.geometry().bottom() < editor.playback_splitter.y()
+    assert editor.inspector_splitter.mapTo(
+        editor.editor_splitter, QPoint(0, 0),
+    ).y() == left.y()
+    assert editor.project_section.mapTo(editor, QPoint(0, 0)).y() < (
+        toolbar.mapTo(editor, QPoint(0, toolbar.height())).y()
     )
     assert [action.text() for action in menu.actions()] == [
         "&File", "&Project", "&Segments", "&View", "&Tools", "&Help",
@@ -203,9 +217,12 @@ def test_project_menus_follow_active_tab_without_duplicate_actions(workspace, qt
     assert first.action_save in workspace.file_menu.actions()
 
 
-@pytest.mark.parametrize("control", ["menu", "shortcut", "toolbar"])
+@pytest.mark.parametrize("control,collapsed", [
+    ("menu", False), ("shortcut", False), ("toolbar", False),
+    ("menu", True), ("shortcut", True),
+])
 def test_project_save_commands_only_save_active_tab(
-    workspace, qtbot, monkeypatch, control,
+    workspace, qtbot, monkeypatch, control, collapsed,
 ):
     first = workspace.add_project(PackProject(title="First"), dirty=False)
     second = workspace.add_project(PackProject(title="Second"), dirty=False)
@@ -215,6 +232,12 @@ def test_project_save_commands_only_save_active_tab(
     qtbot.waitUntil(workspace.isActiveWindow)
     for editor in (first, second, first):
         workspace.tabs.setCurrentWidget(editor)
+        qtbot.waitUntil(lambda editor=editor: editor._layout_restored)
+        if collapsed:
+            editor.editor_splitter.moveSplitter(0, 1)
+            assert editor.editor_splitter.sizes()[0] == 0
+        workspace.activateWindow()
+        qtbot.waitUntil(workspace.isActiveWindow)
         editor.title_edit.setFocus()
         qtbot.waitUntil(editor.title_edit.hasFocus)
         if control == "menu":
@@ -320,10 +343,9 @@ def test_processing_uses_existing_status_bar_and_on_demand_popup(workspace, qtbo
     workspace.resize(1050, 680)
     editor = workspace.add_project(PackProject(title="First", video_path="missing.mp4"), dirty=False)
     qtbot.waitUntil(lambda: editor._layout_restored)
-    assert editor._document_layout.count() == 3
-    assert editor._document_layout.itemAt(0).widget() is editor.project_toolbar
-    assert editor._document_layout.itemAt(1).widget() is editor.editor_scroll
-    assert editor._document_layout.itemAt(2).widget() is editor.statusBar()
+    assert editor._document_layout.count() == 2
+    assert editor._document_layout.itemAt(0).widget() is editor.editor_scroll
+    assert editor._document_layout.itemAt(1).widget() is editor.statusBar()
     assert editor.statusBar().isAncestorOf(editor.processing_status)
     assert editor.processing_status.isVisible()
     assert not editor.processing_dialog.isVisible()
@@ -1063,7 +1085,7 @@ def test_fresh_native_layout_keeps_task_and_segment_rows_clickable(workspace, qt
     QApplication.processEvents()
     assert workspace.height() <= available.height()
     assert not editor.processing_dialog.isVisible()
-    assert editor._document_layout.count() == 3
+    assert editor._document_layout.count() == 2
     scrollbar = editor.editor_scroll.verticalScrollBar()
     assert scrollbar.objectName() == "projectEditorScrollbar"
     if scrollbar.isVisible():

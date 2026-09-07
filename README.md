@@ -36,7 +36,12 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
   from the same video without changing the original project.
 - Adds, previews, splits, combines, duplicates, deletes, and re-times segments.
   Press **Backspace** (or **Ctrl+Delete**) to delete the selected segment after confirmation;
-  Backspace still works normally when editing text or numbers.
+  check **Don't ask again** to skip future segment confirmations. Backspace still works
+  normally when editing text or numbers.
+- Keeps the latest **100 project edits** per open tab. Use **Ctrl+Z** to undo and
+  **Ctrl+Y** or **Ctrl+Shift+Z** to redo. Text fields undo/redo their own typing first;
+  empty local histories fall back to project history. **Project > Edit History** shows the history, restores a selected state,
+  and lets you turn deletion confirmations back on.
 - Resizes or collapses Pack Details, Segments, and Selected Segment so the segment list can use
 	most of the sidebar when needed.
 - Freely shrinks or fully collapses the video/timeline pane; drag the thin divider back to reopen it.
@@ -62,6 +67,26 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 	project, using local stdio tools for media review, editing, saving, and validated export.
 - Checks public GitHub releases and offers verified, in-place Windows updates without replacing
   projects, media, or unrelated files.
+
+## Undo and redo
+
+History covers segment changes, captions and speakers, pack details, media selections,
+export settings, analysis drafts and accepted suggestions, automatic speaker batches,
+assistant edits in the live editor, and completed video cuts/backing selections.
+Continuous typing and timeline drags are grouped into edits. New edits after undo discard
+the redo branch. Each tab has independent history; closing it or restarting clears history.
+
+Undo/redo prepares the restored project and its validation in a background job, then
+updates the segment list in short batches so the application remains responsive.
+It restores references to existing media, rather than copying or regenerating media.
+Keep source and generated files at their recorded paths. Automatic speaker matching is
+paused after a restore so it does not immediately replace restored names; edit a speaker
+or resume **Speaker matching** in **Tools > Background Processing**.
+
+Saving and exporting, downloads, filesystem changes, creating/closing tabs, playback,
+and application preferences are not project edits and are not rolled back. Undo does
+not remove or rewrite saved/exported files; save the restored project explicitly to
+update its project file.
 
 ## Pack format
 
@@ -303,7 +328,8 @@ segment editing and preview commands. **Tools > Tasks** and **Help** apply to th
 **Help → Updates** groups update commands and preferences, and **Help → Diagnostics** groups log
 collection commands; MCP help and About remain directly under Help.
 
-Each tab has a compact **Save / Export / Analyze** toolbar. Its commands and the
+Each tab has a compact **Save / Export / Analyze** toolbar above the video in the left pane,
+leaving the full workspace height available to the right-side panels. Its commands and the
 project-related menus always target the active tab. Primary actions pair icons with short labels;
 secondary segment, file-picker, and tab-close controls use icons with descriptive tooltips.
 Hover over a command for its purpose and available shortcut. **File → Close Project** or **Ctrl+W**
@@ -311,6 +337,8 @@ closes the active project, with the same unsaved-change and running-task prompts
 button. The Windows close button or **Alt+F4** exits the application, prompting to save/discard/cancel
 unsaved projects and to stop active tasks before exiting.
 Backing generation remains in Pack Details and the Project menu.
+The right-side sections use the same thin dividers as the video/timeline panes; drag them to
+resize sections, or click a section header to collapse it.
 
 The In/Out fields, segment actions, and timeline zoom share one row below the waveform;
 actions wrap to a second row only when the video pane is too narrow.

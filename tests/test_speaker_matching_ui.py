@@ -340,6 +340,28 @@ def test_undo_preserves_manual_correction_and_excludes_restored_blanks(matching,
     assert "Latest notice: Cleared 1 auto-filled name(s)." in (
         matching.editor.statusBar().details_text()
     )
+    assert matching.editor.edit_history.history.undo_label == "Clear last speaker auto-fill"
+
+
+def test_shared_history_restores_speaker_batches_without_immediate_refill(matching, qtbot):
+    start(matching, qtbot)
+    finish(matching, qtbot)
+    editor, controls = matching.editor, matching.controls
+    assert editor.edit_history.history.undo_label == "Auto-fill speakers"
+    after = editor.project.to_dict()
+    editor.action_undo.trigger()
+    qtbot.waitUntil(lambda: not editor.edit_history.busy)
+    assert editor.project.segment_by_id(matching.target.id).characters == []
+    assert controls._paused
+    assert not controls._timer.isActive()
+    assert not editor.action_clear_speaker_autofill.isEnabled()
+    calls = len(matching.state.calls)
+    controls._start()
+    assert len(matching.state.calls) == calls
+    editor.action_redo.trigger()
+    qtbot.waitUntil(lambda: not editor.edit_history.busy)
+    assert editor.project.to_dict() == after
+    assert controls._paused
 
 
 def test_only_manual_single_speaker_references_and_eligible_targets_are_submitted(matching, qtbot):
