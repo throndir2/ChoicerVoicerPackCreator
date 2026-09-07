@@ -233,6 +233,13 @@ class JobManager(QObject):
         self._assert_thread()
         return self._tasks[job_id].handle
 
+    def release_result(self, job_id: str) -> None:
+        """Release an adopted result while retaining the task's diagnostic record."""
+        handle = self.handle(job_id)
+        if handle.record.active:
+            raise ValueError("Cannot release the result of an active job")
+        self._update(handle, result=None)
+
     def _update(self, handle: JobHandle, **changes: Any) -> None:
         previous = handle.record
         record = handle._record = replace(previous, **changes)

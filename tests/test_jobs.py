@@ -27,6 +27,19 @@ def finish(qtbot, manager):
     qtbot.waitUntil(lambda: not manager.active_jobs(), timeout=10000)
 
 
+def test_adopted_results_can_be_released_without_losing_diagnostics(qtbot, manager):
+    job = manager.submit("one", "edit-history", "Restore", lambda _context: ["restored"])
+    with pytest.raises(ValueError, match="active"):
+        manager.release_result(job.id)
+    finish(qtbot, manager)
+    assert job.record.result == ["restored"]
+    manager.release_result(job.id)
+    assert job.record.result is None
+    assert job.record.state == "succeeded"
+    assert job.record.title == "Restore"
+    assert manager.tasks("one") == (job.record,)
+
+
 def test_projects_run_concurrently_and_results_reach_qt_thread(qtbot, manager):
     started = threading.Barrier(2)
     threads = []

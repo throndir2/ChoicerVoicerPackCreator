@@ -188,8 +188,11 @@ class EditorProjectAccess:
         def apply() -> None:
             require_revision(self._snapshot(), expected_revision)
             window = self._editor()
+            if window.session.loading:
+                raise ValueError("Wait for this project to finish loading or restoring history.")
             window._set_project(
-                snapshot.project, snapshot.path, snapshot.dirty, preserve_view=True
+                snapshot.project, snapshot.path, snapshot.dirty, preserve_view=True,
+                history_label="Assistant project edit",
             )
             window._saved_project_hash = snapshot.saved_hash
             # Use the same recovery journal as manual edits.
@@ -211,6 +214,7 @@ class EditorProjectAccess:
             window = self.bridge.window
             editor = self._editor()
             revision = editor.session.revision
+            editor.edit_history.saving(revision)
 
             def operation(ctx):
                 with ctx.critical_stage("Saving editable project"):
