@@ -911,6 +911,7 @@ class WhisperManager:
             start = max(0.0, min(audio_duration, start))
             end = max(0.0, min(audio_duration, end))
             caption = " ".join(str(item.get("text", "")).split())
+            caption = re.sub(r"^(?:>>\s*)+", "", caption)
             if not caption or end - start < 0.05:
                 continue
             # Token offsets are estimates, not forced alignment. Even complete, monotonic
