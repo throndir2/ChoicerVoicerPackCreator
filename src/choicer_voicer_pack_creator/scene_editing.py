@@ -230,10 +230,11 @@ def _video_timing(
     media: MediaTools, path: Path, duration_hint: float, fps: float,
 ) -> tuple[float, float]:
     """Read the last video packets, not container duration (which can include an offset/audio tail)."""
-    def probe(start: float) -> dict:
+    def probe(start: float | None) -> dict:
         return json.loads(media.run([
             media.ffprobe, "-v", "error", "-select_streams", "v:0",
-            "-read_intervals", f"{start:.9f}%", "-show_streams", "-show_packets",
+            *(["-read_intervals", f"{start:.9f}%"] if start is not None else []),
+            "-show_streams", "-show_packets",
             "-show_entries", "stream=start_time:packet=pts_time,duration_time",
             "-of", "json", str(path),
         ], f"Checking video timestamps in {path.name}").stdout)
@@ -244,7 +245,9 @@ def _video_timing(
         raise MediaError(f"{path.name} does not contain a video stream.")
     origin = float(streams[0].get("start_time", 0.0))
     if not data.get("packets"):
-        data = probe(origin)
+        # Some valid Matroska files yield no packets after a seek, even to zero.
+        # Read sequentially instead of repeating the same unsuccessful seek.
+        data = probe(None)
     ends = []
     for packet in data.get("packets", []):
         check_cancelled()

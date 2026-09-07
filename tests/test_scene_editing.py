@@ -29,7 +29,11 @@ from choicer_voicer_pack_creator.operations import (
     operation_scope,
 )
 from choicer_voicer_pack_creator.project_io import ProjectStore
-from choicer_voicer_pack_creator.scene_editing import execute_scene_edit, plan_scene_edit
+from choicer_voicer_pack_creator.scene_editing import (
+    _video_timing,
+    execute_scene_edit,
+    plan_scene_edit,
+)
 
 
 @pytest.fixture
@@ -97,6 +101,36 @@ def execute(project, tmp_path, start, end, mode="cut", **kwargs):
         project, start, end, mode, tmp_path,
         FakeMedia(project, plan.duration), **kwargs,
     )
+
+
+@pytest.mark.parametrize("origin", [0.0, 5.0])
+@pytest.mark.parametrize("has_packets", [False, True])
+def test_video_timing_reads_sequentially_after_empty_seek(
+    project, monkeypatch, origin, has_packets,
+):
+    media = FakeMedia(project, 10)
+    commands = []
+
+    def probe(command, description):
+        commands.append(command)
+        packets = []
+        if "-read_intervals" not in command and has_packets:
+            packets = [{"pts_time": str(origin + 9.95), "duration_time": "0.05"}]
+        return subprocess.CompletedProcess(command, 0, json.dumps({
+            "streams": [{"start_time": str(origin)}], "packets": packets,
+        }), "")
+
+    monkeypatch.setattr(media, "run", probe)
+    if has_packets:
+        assert _video_timing(media, Path(project.video_path), 10, 20) == pytest.approx(
+            (origin, 10),
+        )
+    else:
+        with pytest.raises(MediaError, match="Could not determine the decoded video timeline"):
+            _video_timing(media, Path(project.video_path), 10, 20)
+    assert len(commands) == 2
+    assert "-read_intervals" in commands[0]
+    assert "-read_intervals" not in commands[1]
 
 
 @pytest.mark.parametrize(
