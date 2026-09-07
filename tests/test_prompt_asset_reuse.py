@@ -498,3 +498,77 @@ def test_previous_asset_path_escape_is_never_read(fixture, monkeypatch, escape):
     warm = exporter.export(project, parent, create_zip=False, progress=progress)
     assert generation_counts(exporter) == (3, 2)
     assert warm.file_hashes == cold.file_hashes
+
+
+def test_disabling_cache_keeps_existing_generation_without_extra_source_hash(fixture, monkeypatch):
+    exporter, project, parent = fixture
+    exporter.video_cache = exporter.prompt_cache = None
+    project.preserve_source_video = True
+    project.video_height = 720
+    original = exporter_module.sha256
+
+    def output_hashes_only(path):
+        assert path != Path(project.video_path)
+        return original(path)
+
+    monkeypatch.setattr(exporter_module, "sha256", output_hashes_only)
+    cold = exporter.export(project, parent, create_zip=False)
+    warm = exporter.export(project, parent, create_zip=False)
+    assert generation_counts(exporter) == (4, 4)
+    assert warm.file_hashes == cold.file_hashes
+
+
+def test_returning_from_custom_assets_regenerates_only_newly_eligible_assets(fixture, tmp_path):
+    exporter, project, parent = fixture
+    exporter.export(project, parent, create_zip=False)
+    audio = tmp_path / "chosen.mp3"
+    image = tmp_path / "chosen.png"
+    audio.write_bytes(b"chosen recording")
+    image.write_bytes(b"chosen still")
+    project.segments[0].audio_mode = "file"
+    project.segments[0].audio_path = str(audio)
+    project.segments[1].image_path = str(image)
+    exporter.export(project, parent, create_zip=False)
+    assert generation_counts(exporter) == (2, 2)
+    project.segments[0].audio_mode = "video"
+    project.segments[0].audio_path = ""
+    project.segments[1].image_path = ""
+    exporter.export(project, parent, create_zip=False)
+    assert generation_counts(exporter) == (3, 3)
+
+
+def test_reuse_staging_write_failure_is_not_hidden_as_a_generation_miss(fixture, monkeypatch):
+    exporter, project, parent = fixture
+    cold = exporter.export(project, parent, create_zip=False)
+    before = prompt_receipt(exporter).read_bytes()
+    original = exporter_module._copy_file
+
+    def fail(source, destination):
+        if source == cold.pack_path / "001_Alice.mp3":
+            raise OSError("staging disk failure")
+        original(source, destination)
+
+    monkeypatch.setattr(exporter_module, "_copy_file", fail)
+    with pytest.raises(OSError, match="staging disk failure"):
+        exporter.export(project, parent, create_zip=False)
+    assert generation_counts(exporter) == (2, 2)
+    assert prompt_receipt(exporter).read_bytes() == before
+    assert {p.name: exporter_module.sha256(p) for p in cold.pack_path.iterdir()} == cold.file_hashes
+
+
+def test_late_cancellation_can_remember_only_a_successfully_published_reuse(fixture):
+    exporter, project, parent = fixture
+    exporter.export(project, parent)
+    project.segments[0].characters = ["Renamed"]
+    stopped = threading.Event()
+
+    def progress(update):
+        if update.message == "Revalidating published pack...":
+            stopped.set()
+
+    result = exporter.export(project, parent, progress=progress, cancelled=stopped.is_set)
+    assert stopped.is_set()
+    assert result.validation["status"] == "passed"
+    assert generation_counts(exporter) == (2, 2)
+    filenames = {item.filename for item in exporter.prompt_cache.lookup(result.pack_path).values()}
+    assert filenames == {"001_Renamed.mp3", "001_Renamed.png", "002_Bob.mp3", "002_Bob.png"}
