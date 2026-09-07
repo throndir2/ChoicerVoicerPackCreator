@@ -71,6 +71,7 @@ def test_combine_button_joins_selected_rows_and_updates_editor_and_saved_project
 
     combined = window.project.segments[0]
     assert window.project.segments == [combined, untouched]
+    assert window.statusBar().currentMessage() == "Combined 2 segments."
     assert (combined.start, combined.end) == (1, 6)
     assert combined.caption == "First line. Edited last line."
     assert combined.characters == ["Alice", "Carol"]

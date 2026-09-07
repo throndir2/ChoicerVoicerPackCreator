@@ -168,12 +168,6 @@ class YouTubeDialog(QDialog):
         self.setWindowTitle("New from YouTube")
         self.resize(650, 300)
         layout = QVBoxLayout(self)
-        intro = QLabel(
-            "YouTube captions and a separate local Whisper transcript are prepared automatically. "
-            "Model downloads require permission."
-        )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
         form = QFormLayout()
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("https://www.youtube.com/watch?v=...")
@@ -318,9 +312,7 @@ class YouTubeDialog(QDialog):
     def _progress(self, message: str, value: int) -> None:
         if self._close_after_cancel:
             return
-        self.progress_label.setText(
-            f"{message} Progress is not measurable in this stage." if value < 0 else message
-        )
+        self.progress_label.setText(message)
         self.progress_bar.setRange(0, 0 if value < 0 else 1000)
         self.progress_bar.setFormat("Ready" if value == 1000 else "Transfers: %p%")
         if value >= 0:

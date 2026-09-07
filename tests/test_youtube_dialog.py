@@ -27,14 +27,11 @@ class UnusedMedia:
     pass
 
 
-def test_import_copy_keeps_automatic_processing_and_media_requirements(qtbot, tmp_path):
+def test_import_copy_keeps_media_requirements_without_processing_instructions(qtbot, tmp_path):
     dialog = youtube_dialog.YouTubeDialog(UnusedMedia(), str(tmp_path))
     qtbot.addWidget(dialog)
     labels = [label.text() for label in dialog.findChildren(QLabel)]
-    assert (
-        "YouTube captions and a separate local Whisper transcript are prepared automatically. "
-        "Model downloads require permission."
-    ) in labels
+    assert not any("prepared automatically" in text for text in labels)
     assert "Keep downloaded media with the saved project." in labels
     assert not any("overwrite" in text.lower() for text in labels)
     assert "permission to use" in dialog.url_edit.toolTip()
@@ -340,7 +337,7 @@ def test_dialog_labels_indeterminate_stages_and_restores_transfer_percentage(qtb
     qtbot.addWidget(dialog)
     dialog._progress("Downloading YouTube video — total size unknown", -1)
     assert dialog.progress_bar.maximum() == 0
-    assert "not measurable" in dialog.progress_label.text()
+    assert dialog.progress_label.text() == "Downloading YouTube video — total size unknown"
     dialog._progress("Downloading YouTube audio — estimated combined transfer progress", 940)
     assert dialog.progress_bar.maximum() == 1000
     assert dialog.progress_bar.value() == 940
@@ -349,7 +346,7 @@ def test_dialog_labels_indeterminate_stages_and_restores_transfer_percentage(qtb
     for stage in ("Merging", "Checking", "Publishing"):
         dialog._progress(stage, -1)
         assert dialog.progress_bar.maximum() == 0
-        assert "not measurable" in dialog.progress_label.text()
+        assert dialog.progress_label.text() == stage
 
 
 def test_worker_does_not_round_unfinished_transfers_to_100_percent(qtbot, tmp_path, monkeypatch):
