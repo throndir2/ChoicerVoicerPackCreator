@@ -11,6 +11,25 @@ def _point(widget: TimelineWidget, timestamp: float, y: int) -> QPoint:
     return QPoint(round(widget._time_to_x(timestamp)), y)
 
 
+def test_segment_release_applies_final_pointer_after_last_move(qtbot):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 220)
+    timeline.set_duration(10)
+    segment = Segment(2, 4, "Line", ["Speaker"])
+    timeline.set_segments([segment])
+    timeline.show()
+    y = round(timeline._segment_rect(segment).center().y())
+    finished = []
+    timeline.range_edit_finished.connect(lambda *values: finished.append(values))
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 3, y))
+    qtbot.mouseMove(timeline, _point(timeline, 4, y))
+    assert (segment.start, segment.end) == (3, 5)
+    qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 5, y))
+    assert (segment.start, segment.end) == (4, 6)
+    assert finished == [(segment.id, 2, 4, 4, 6)]
+
+
 @pytest.mark.parametrize("y", [4, 65, 210])
 def test_playhead_drag_seeks_continuously_without_editing_ranges(qtbot, y: int) -> None:
     timeline = TimelineWidget()

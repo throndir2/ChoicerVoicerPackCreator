@@ -44,8 +44,9 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
   window size, position, and maximized state. **View > Reset UI Layout** restores the default
   window and panes for all tabs without changing projects or other preferences.
 - Defines, moves, and trims ranges directly on the waveform; segment blocks also support body and
-	edge dragging. Project validation and new voice-processing jobs wait until the drag ends;
-	prompt audio from the source video is regenerated on export, not while dragging.
+	edge dragging. Project checks run in the background after editing settles; newer edits
+	supersede obsolete checks and affected voice work without blocking the editor.
+	Prompt audio from the source video is regenerated on export, not while dragging.
 - Highlights substantial, non-identical segment overlaps for deterministic human review.
 - Offers a one-time initial scan that proposes editable ranges from deterministic audio activity.
 - Optionally downloads a pinned local Whisper CPU runtime/model to draft captions and timestamps;
@@ -670,6 +671,15 @@ duration in the status tooltip. Exact duplicate ranges with disjoint speaker ass
 unflagged because they intentionally support simultaneous speakers; duplicates that repeat any
 speaker are flagged. These amber notices are review evidence, not export-blocking errors; the tool
 never moves a range automatically.
+
+During an edit, the last warnings remain visible as pending, not as current export readiness.
+Only checks for the latest edit can replace them. Repeated drags coalesce into the newest request;
+timing-only releases reuse the segment table's existing cells and selection. Voice preparation
+retains reusable fingerprints: changing a speaker name only requires comparison, and changing one
+audio range does not restart unrelated preparation. **Cancel** in processing/task details pauses
+that work until an explicit resume; automatic supersession is not a user cancellation.
+Explicit saves and exports are independent of these advisory checks and retain their revision,
+validation, and transactional publication guarantees.
 
 Experimental Silero VAD, OCR, and game-dialogue lookup tools were evaluated but
 are not treated as correctness oracles. Their existing results varied with model settings, merged

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, Qt, Signal
@@ -51,6 +52,7 @@ class ProcessingModel(QObject):
         self._token = session.source_token()
         self._states: dict[str, ProcessingState] = {}
         self._latest: dict[str, str] = {}
+        self.publication_guard: Callable[[JobRecord], bool] | None = None
         manager.changed.connect(self._job_changed)
 
     def reset(self) -> None:
@@ -80,6 +82,7 @@ class ProcessingModel(QObject):
             record.project_id != self.session.id or record.kind not in PROCESSING_KINDS
             or self.session.source_token() != self._token
             or record.source_snapshot.get("source_revision") != self.session.source_revision
+            or self.publication_guard is not None and not self.publication_guard(record)
         ):
             return
         if record.state == "queued":

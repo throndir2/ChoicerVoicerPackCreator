@@ -359,6 +359,7 @@ class TimelineWidget(QWidget):
         if self._drag_kind == "playhead":
             self._update_drag(event.position().x())
         elif self._drag_active:
+            self._update_drag(event.position().x())
             final_start, final_end = self._current_drag_range()
             self.range_edit_finished.emit(
                 self._drag_id,

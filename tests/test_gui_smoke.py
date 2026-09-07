@@ -1021,6 +1021,7 @@ def test_overlap_review_is_visible_but_does_not_block_export_readiness(
         mark_dirty=False,
     )
 
+    qtbot.waitUntil(lambda: not window.project_checks.pending)
     assert "Ready to export" in window.validation_label.text()
     assert "1 potential overlap" in window.validation_label.text()
     assert "overlap by 0.500s" in window.validation_label.toolTip()
@@ -1028,6 +1029,7 @@ def test_overlap_review_is_visible_but_does_not_block_export_readiness(
 
     second.start = 3
     window._refresh_table(second.id)
+    qtbot.waitUntil(lambda: not window.project_checks.pending)
     assert "potential overlap" not in window.validation_label.text()
     assert window.validation_label.toolTip() == ""
     window.dirty = False

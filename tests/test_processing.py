@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget
 
-from choicer_voicer_pack_creator.jobs import JobManager
+from choicer_voicer_pack_creator.jobs import JobManager, JobRecord
 from choicer_voicer_pack_creator.models import PackProject
 from choicer_voicer_pack_creator.project_session import ProjectSession
 from choicer_voicer_pack_creator.ui.processing import ProcessingDialog, ProcessingModel
@@ -102,6 +104,44 @@ def test_source_reset_ignores_old_job_and_restores_saved_outputs(qtbot):
     qtbot.waitUntil(lambda: not old.record.active)
     assert model.group_state("transcript").state == "idle"
     assert model.group_state("backing").state == "ready"
+    manager.shutdown(wait=True)
+
+
+def test_derived_progress_errors_and_cancellation_obey_publication_guard(qtbot):
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    session = ProjectSession(PackProject(video_path="source.mp4"))
+    manager = JobManager(parent)
+    model = ProcessingModel(manager, session, parent)
+    generation = 1
+    blocked = False
+    model.publication_guard = lambda record: (
+        record.source_snapshot["derived_generation"] == generation and not blocked
+    )
+    old = JobRecord(
+        "old", session.id, "speakers", "Compare", "io",
+        {"source_revision": session.source_revision, "derived_generation": 1},
+    )
+    model._job_changed(old)
+    generation = 2
+    model.set_status("speakers", "waiting", "Waiting for edits")
+    for state in ("running", "failed", "cancelled", "succeeded"):
+        model._job_changed(replace(old, state=state, message="obsolete", error="obsolete error"))
+        assert model.group_state("voices").message == "Waiting for edits"
+    current = replace(
+        old, id="new", source_snapshot={
+            "source_revision": session.source_revision, "derived_generation": 2,
+        },
+    )
+    model._job_changed(current)
+    blocked = True
+    model._job_changed(replace(current, state="running", message="Held during gesture"))
+    assert model.group_state("voices").state == "queued"
+    blocked = False
+    model._job_changed(replace(current, state="running", message="Current progress"))
+    assert model.group_state("voices").message == "Current progress"
+    model._job_changed(replace(current, state="failed", error="Current error"))
+    assert model.group_state("voices").message == "Current error"
     manager.shutdown(wait=True)
 
 

@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from choicer_voicer_pack_creator.operations import check_cancelled
+
 AudioMode = Literal["video", "file"]
 SpeakerAssignment = Literal["manual", "automatic", "excluded"]
 DEFAULT_VIDEO_HEIGHT = 480
@@ -328,6 +330,7 @@ class PackProject:
         return combined
 
     def validate(self) -> list[str]:
+        check_cancelled()
         errors: list[str] = []
         if not self.title.strip():
             errors.append("Pack title is required.")
@@ -354,6 +357,7 @@ class PackProject:
 
         seen_ids: set[str] = set()
         for index, segment in enumerate(self.segments, start=1):
+            check_cancelled()
             prefix = f"Segment {index}"
             if segment.id in seen_ids:
                 errors.append(f"{prefix} has a duplicate identifier.")
