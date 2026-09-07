@@ -113,6 +113,12 @@ def test_dialog_buttons_and_advanced_controls_are_visible_and_keyboard_accessibl
     assert not dialog.advanced.is_collapsed
     qtbot.waitUntil(lambda: not dialog.head_pad_spin.visibleRegion().isEmpty())
     assert not dialog.tail_pad_spin.visibleRegion().isEmpty()
+    assert not any(
+        label.isVisible() and label.wordWrap() for label in dialog.findChildren(QLabel)
+    )
+    for spin in (dialog.head_pad_spin, dialog.tail_pad_spin):
+        assert "silence" in spin.toolTip()
+        assert "Imported prompt recordings are kept unchanged." in spin.toolTip()
     qtbot.keyClick(dialog.cancel_button, Qt.Key.Key_Escape)
     assert not dialog.isVisible()
     assert dialog.result() == QDialog.DialogCode.Rejected

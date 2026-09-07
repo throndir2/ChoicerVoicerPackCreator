@@ -192,7 +192,10 @@ def test_background_result_updates_only_intended_project(
     original_path = editor.project_path
     editor._start_scene_edit(2, 4, mode, tmp_path / "result", title="New scene" if mode == "extract" else None)
     assert not editor.action_cut_video.isEnabled()
+    assert editor.statusBar().currentMessage() == "Video edit queued."
     job = editor._scene_job
+    job.progress.emit("Preparing edited video", None)
+    assert editor.statusBar().currentMessage() == "Preparing edited video"
     other = window.add_project(PackProject(title="Other tab"), dirty=False)
     qtbot.waitUntil(lambda: editor._scene_job is None)
     assert job.record.state == "succeeded"

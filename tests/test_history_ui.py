@@ -6,7 +6,15 @@ from unittest.mock import Mock
 
 import pytest
 from PySide6.QtCore import QSettings, Qt, QThread, QTimer
-from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox, QPushButton
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QDockWidget,
+    QFileDialog,
+    QMessageBox,
+    QPushButton,
+    QToolButton,
+)
 
 from choicer_voicer_pack_creator.analysis import AnalysisSuggestion
 from choicer_voicer_pack_creator.models import (
@@ -118,6 +126,26 @@ def test_history_dialog_and_preference_do_not_change_project(window, qtbot):
     assert controller._list.currentRow() == 0
     assert window.action_redo.isEnabled()
     controller._dialog.reject()
+
+
+def test_history_never_auto_opens_or_adds_persistent_workspace_controls(window, qtbot):
+    first = window.active_editor
+    window.show()
+    qtbot.waitUntil(lambda: first._layout_restored)
+    first.duplicate_segment()
+    second = window.add_project(PackProject(title="Another project"), dirty=False)
+    for editor in (first, second, first, second):
+        window.tabs.setCurrentWidget(editor)
+        assert editor.edit_history._dialog is None
+        assert editor.action_history in window.project_menu.actions()
+        history_actions = {editor.action_undo, editor.action_redo, editor.action_history}
+        assert all(
+            button.defaultAction() not in history_actions
+            for button in editor.findChildren(QToolButton)
+        )
+        assert all(editor.project_toolbar.widgetForAction(action) is None for action in history_actions)
+    assert window.findChildren(QDockWidget) == []
+    assert not any(dialog.windowTitle() == "Edit History" for dialog in window.findChildren(QDialog))
 
 
 @pytest.mark.parametrize("operation", ["add", "duplicate", "split", "range", "combine", "suggestions"])
@@ -260,17 +288,17 @@ def test_history_shortcuts_outside_text_fields(window, qtbot, widget_name, key, 
     window.show()
     window.activateWindow()
     qtbot.waitUntil(window.isActiveWindow)
+    qtbot.waitUntil(lambda: window._layout_restored)
     window.duplicate_segment()
     widget = getattr(window, widget_name)
     widget.setFocus()
     qtbot.waitUntil(widget.hasFocus)
     qtbot.keyClick(widget, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
-    qtbot.waitUntil(lambda: not window.edit_history.busy)
-    assert len(window.project.segments) == 1
+    qtbot.waitUntil(lambda: len(window.project.segments) == 1 and not window.edit_history.busy)
     widget.setFocus()
+    qtbot.waitUntil(widget.hasFocus)
     qtbot.keyClick(widget, key, modifiers)
-    qtbot.waitUntil(lambda: not window.edit_history.busy)
-    assert len(window.project.segments) == 2
+    qtbot.waitUntil(lambda: len(window.project.segments) == 2 and not window.edit_history.busy)
 
 
 @pytest.mark.parametrize("widget_name", ["title_edit", "authors_edit", "readme_edit", "speakers_edit", "caption_edit"])
@@ -278,6 +306,7 @@ def test_text_shortcuts_use_native_undo_without_starting_replay(window, qtbot, w
     window.show()
     window.activateWindow()
     qtbot.waitUntil(window.isActiveWindow)
+    qtbot.waitUntil(lambda: window._layout_restored)
     widget = getattr(window, widget_name)
     widget.setFocus()
     qtbot.waitUntil(widget.hasFocus)
@@ -289,6 +318,18 @@ def test_text_shortcuts_use_native_undo_without_starting_replay(window, qtbot, w
     text = widget.toPlainText() if hasattr(widget, "toPlainText") else widget.text()
     assert text != "Native"
     assert window.edit_history.history.index <= before + 1
+
+
+def test_undo_works_immediately_after_duplicate_focuses_an_unedited_text_field(window, qtbot):
+    window.show()
+    window.activateWindow()
+    qtbot.waitUntil(window.isActiveWindow)
+    qtbot.waitUntil(lambda: window._layout_restored)
+    window.duplicate_segment()
+    qtbot.waitUntil(window.speakers_edit.hasFocus)
+    assert not window.speakers_edit.isUndoAvailable()
+    qtbot.keyClick(window.speakers_edit, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    qtbot.waitUntil(lambda: len(window.project.segments) == 1 and not window.edit_history.busy)
 
 
 def test_shortcuts_in_dialog_do_not_change_project(window, qtbot):
@@ -358,6 +399,26 @@ def test_save_completion_after_undo_marks_the_saved_history_state(window, qtbot,
     qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
     assert window.dirty
     restore(window, qtbot, redo=True)
+    assert not window.dirty
+
+
+def test_gui_and_mcp_save_reservation_refuse_mid_drag_snapshots(window, qtbot, tmp_path, monkeypatch):
+    destination = tmp_path / "saved.cvpack.json"
+    ProjectStore.save(window.project, destination)
+    original = destination.read_bytes()
+    notices = []
+    monkeypatch.setattr(window, "notice", lambda *args: notices.append(args))
+    segment = window.project.segments[0]
+    window._timeline_range_edit_started(segment.id, 1, 3)
+    window._timeline_range_changed(segment.id, 1, 4)
+    assert not window.save_editor(window.active_editor, destination=destination)
+    with pytest.raises(ValueError, match="Finish the current timing edit"):
+        window.reserve_project_save(window.session.id, destination)
+    assert notices and "Finish the current timing edit" in notices[0][1]
+    assert destination.read_bytes() == original
+    window._timeline_range_edit_finished(segment.id, 1, 3, 1, 5)
+    restore(window, qtbot)
+    assert window.project.segments[0].end == 3
     assert not window.dirty
 
 

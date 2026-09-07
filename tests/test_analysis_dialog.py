@@ -731,6 +731,7 @@ def test_main_window_adds_suggestions_without_speakers_or_duplicates(
     assert segment.audio_mode == "video"
     assert window.selected_segment_id == segment.id
     assert window.dirty
+    assert window.statusBar().currentMessage() == "Added 1 review suggestion(s)."
     window.dirty = False
     window.close()
 
@@ -1535,11 +1536,14 @@ def test_source_labels_and_play_action_identify_the_selected_transcript(qtbot, t
     assert dialog._recovery_hint(refine=True).startswith("No YouTube draft is available.")
     assert dialog.local_panel.title() == "Whisper Transcript"
     assert not dialog.preview_button.isEnabled()
+    assert dialog.refined_status.text() == "Waiting for YouTube refinement."
     complete_refinement(dialog)
     dialog.refined_table.selectRow(0)
     assert dialog.preview_button.isEnabled()
     assert dialog.preview_button.text() == "Play Selected YouTube Line"
-    assert dialog.refined_status.text().startswith("1 YouTube rows.")
+    assert dialog.refined_status.text() == (
+        "1 YouTube rows. Music can hide pauses; speaker changes are not detected."
+    )
     assert "'Use YouTube Transcript'" in dialog._recovery_hint(refine=True)
     previews = []
     dialog.preview_requested.connect(lambda start, end: previews.append((start, end)))
@@ -1549,6 +1553,7 @@ def test_source_labels_and_play_action_identify_the_selected_transcript(qtbot, t
         [AnalysisSuggestion(0.5, 3, "Whisper line", "Whisper")],
         1, 1, -30, "base", "en", detect_hardware(),
     ))
+    assert dialog.local_status.text() == "1 Whisper rows."
     dialog.local_radio.setChecked(True)
     assert dialog.preview_button.text() == "Play Selected Whisper Line"
     assert dialog.add_button.text() == "Use Whisper Transcript"
@@ -1588,7 +1593,8 @@ def test_refinement_runs_without_whisper_and_replaces_only_its_draft(
     qtbot.addWidget(dialog)
 
     missing = tmp_path / "missing-whisper"
-    assert dialog.refined_status.text().startswith("Saved YouTube draft: 1 rows.")
+    assert dialog.refined_status.text() == "Saved YouTube draft: 1 rows."
+    assert dialog.progress_label.text() == "Saved drafts restored."
     monkeypatch.setattr(
         analysis_dialog, "WhisperManager",
         lambda _root: SimpleNamespace(cli_path=missing, model_path=lambda _key: missing),

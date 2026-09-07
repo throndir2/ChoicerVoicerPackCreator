@@ -502,8 +502,7 @@ class AnalysisDialog(QDialog):
             "local": self.local_radio,
         }[selected].setChecked(True)
         self.refined_status = QLabel(
-            "YouTube captions are waiting for refinement; no unprocessed rows are shown. "
-            "Uses local audio pauses with no model download. Music can hide pauses."
+            "Waiting for YouTube refinement."
             if self.source_captions else
             "No original YouTube caption evidence is available. Reimport the video to retrieve it."
         )
@@ -621,8 +620,7 @@ class AnalysisDialog(QDialog):
             self.local_status.setText(f"Saved {self.local_source} draft: {len(review.local_rows)} rows.")
             if review.refined_rows:
                 self.refined_status.setText(
-                    f"Saved YouTube draft: {len(review.refined_rows)} rows. "
-                    "Review Source notes for timing limitations."
+                    f"Saved YouTube draft: {len(review.refined_rows)} rows."
                 )
         if not self.source_captions and not self.refined_table.rowCount():
             self.local_radio.setChecked(True)
@@ -640,12 +638,12 @@ class AnalysisDialog(QDialog):
         self._update_selection_controls()
         self._update_scan_button()
         if review:
-            self.progress_label.setText("Saved drafts restored; choose a source or regenerate a draft.")
+            self.progress_label.setText("Saved drafts restored.")
         elif self.source_choice:
-            self.progress_label.setText("Process YouTube captions or run the separate Whisper transcript.")
+            self.progress_label.setText("Ready to analyze")
         needs_refinement = bool(self.source_captions) and not (review and review.refined_rows)
         if needs_refinement and (auto_start or review is not None):
-            self.progress_label.setText("Refining YouTube captions before showing their draft.")
+            self.progress_label.setText("Refining YouTube captions.")
             if auto_start and review is None:
                 QTimer.singleShot(0, self._start_automatic_refinement)
             else:
@@ -1146,8 +1144,7 @@ class AnalysisDialog(QDialog):
             button.show()
             status = self.refined_status if refine else self.local_status
             status.setText(
-                "A new result is ready. Your edits made during processing are unchanged. "
-                "Use the replacement button to review the new result instead."
+                "A new result is ready. Your edits made during processing are unchanged."
             )
             self.progress_label.setText("New result saved separately; current draft edits kept.")
             self.progress_bar.setRange(0, 1000)
@@ -1168,7 +1165,6 @@ class AnalysisDialog(QDialog):
             ])
             self.refined_status.setText(
                 f"{len(value.refined_captions)} YouTube rows. "
-                "Review Source notes for timing limitations. "
                 "Music can hide pauses; speaker changes are not detected."
             )
             self.refined_radio.setEnabled(bool(self.refined_table.rowCount()))
@@ -1199,9 +1195,7 @@ class AnalysisDialog(QDialog):
             "Whisper Transcript" if value.model_name else "Detected Audio Ranges"
         )
         self._populate(suggestions)
-        self.local_status.setText(
-            f"{len(suggestions)} {self.local_source} rows with their own text and timings."
-        )
+        self.local_status.setText(f"{len(suggestions)} {self.local_source} rows.")
         language = f" · detected {value.detected_language}" if value.detected_language else ""
         self.progress_label.setText(
             f"Review {len(suggestions)} local suggestion(s) · "

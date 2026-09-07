@@ -183,7 +183,7 @@ class ProcessingDialog(QDialog):
         self.rows: dict[str, tuple[QLabel, _StatusLabel, QProgressBar, QPushButton]] = {}
         for group, title, action in (
             ("transcript", "Transcript", "Review"),
-            ("voices", "Voice fingerprints", "Speakers"),
+            ("voices", "Speaker matching", "Speakers"),
             ("backing", "Backing track", "Details"),
         ):
             card = QWidget(self)
@@ -253,5 +253,10 @@ class ProcessingDialog(QDialog):
                 round(value.fraction * 1000) if value.fraction is not None
                 else 1000 if value.state == "ready" else 0
             )
-            control.setText("Cancel" if active else "Start" if value.state in {"idle", "off"} else "Retry")
-            control.setEnabled(value.state not in {"ready", "cancelling"})
+            control.setText(
+                "Cancel" if active else
+                "Resume" if group == "voices" and value.state == "cancelled" else
+                "Start" if value.state in {"idle", "off"} or group == "voices" and value.state == "ready"
+                else "Retry"
+            )
+            control.setEnabled(value.state != "cancelling" and (group == "voices" or value.state != "ready"))

@@ -127,16 +127,10 @@ class ExportOptionsDialog(QDialog):
             spin.setSuffix(" s")
             spin.setValue(value)
             spin.setToolTip(
-                f"{label} for prompts extracted from video, from 0 to 2 seconds. "
+                f"{label}: 0-2 seconds of silence for prompts extracted from video. "
                 "Imported prompt recordings are kept unchanged."
             )
             padding_form.addRow(f"{label} (seconds)", spin)
-        padding_note = QLabel(
-            "Silence before/after newly generated prompts. Export adjusts timestamps to keep "
-            "them synchronized. Imported prompt recordings are not repadded."
-        )
-        padding_note.setWordWrap(True)
-        padding_form.addRow(padding_note)
         self.advanced.set_content(padding)
         self.advanced.set_collapsed(True)
         self.advanced.collapsed_changed.connect(lambda _collapsed: self.adjustSize())

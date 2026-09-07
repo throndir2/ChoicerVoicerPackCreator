@@ -214,13 +214,13 @@ class EditorProjectAccess:
             window = self.bridge.window
             editor = self._editor()
             revision = editor.session.revision
-            editor.edit_history.saving(revision)
 
             def operation(ctx):
                 with ctx.critical_stage("Saving editable project"):
                     return save_snapshot(snapshot, destination, overwrite)
 
             reservation = window.reserve_project_save(snapshot.project_id, destination)
+            editor.edit_history.saving(revision)
             try:
                 handle = window.job_manager.submit(
                     snapshot.project_id, "save", f"MCP save: {snapshot.project.title}", operation,

@@ -39,8 +39,8 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
   check **Don't ask again** to skip future segment confirmations. Backspace still works
   normally when editing text or numbers.
 - Keeps the latest **100 project edits** per open tab. Use **Ctrl+Z** to undo and
-  **Ctrl+Y** or **Ctrl+Shift+Z** to redo outside text fields, which retain their native
-  text undo/redo. **Project > Edit History** shows the history, restores a selected state,
+  **Ctrl+Y** or **Ctrl+Shift+Z** to redo. Text fields undo/redo their own typing first;
+  empty local histories fall back to project history. **Project > Edit History** shows the history, restores a selected state,
   and lets you turn deletion confirmations back on.
 - Resizes or collapses Pack Details, Segments, and Selected Segment so the segment list can use
 	most of the sidebar when needed.
@@ -49,7 +49,8 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
   window size, position, and maximized state. **View > Reset UI Layout** restores the default
   window and panes for all tabs without changing projects or other preferences.
 - Defines, moves, and trims ranges directly on the waveform; segment blocks also support body and
-	edge dragging.
+	edge dragging. Project validation and new voice-processing jobs wait until the drag ends;
+	prompt audio from the source video is regenerated on export, not while dragging.
 - Highlights substantial, non-identical segment overlaps for deterministic human review.
 - Offers a one-time initial scan that proposes editable ranges from deterministic audio activity.
 - Optionally downloads a pinned local Whisper CPU runtime/model to draft captions and timestamps;
@@ -80,7 +81,7 @@ updates the segment list in short batches so the application remains responsive.
 It restores references to existing media, rather than copying or regenerating media.
 Keep source and generated files at their recorded paths. Automatic speaker matching is
 paused after a restore so it does not immediately replace restored names; edit a speaker
-or choose **Match now** to resume.
+or resume **Speaker matching** in **Tools > Background Processing**.
 
 Saving and exporting, downloads, filesystem changes, creating/closing tabs, playback,
 and application preferences are not project edits and are not rolled back. Undo does
@@ -754,11 +755,11 @@ file, or Still image to relink the missing asset.
 
 ## Background speaker matching
 
-With **Auto-fill matching speakers in the background** enabled in the Segments panel, finish
+With **Auto-fill speaker names** enabled in the Segments panel, finish
 typing a speaker name (Enter or move focus out of the field) to compare that voice with eligible
 unassigned segments. You can keep editing captions, timings, and other projects while it runs.
-Rapid name edits are coalesced with a short delay before comparison; **Match now** skips that
-delay. Typing updates only the edited name and defers whole-project validation until a brief
+Rapid name edits are coalesced with a short delay before comparison.
+Typing updates only the edited name and defers whole-project validation until a brief
 pause or commit. Committing a name and applying automatic matches update existing table cells
 without rebuilding the segment list or disturbing its selection and scroll position.
 For the best reference, name a clear, single-speaker dialogue line of about 2 seconds or more,
@@ -770,9 +771,12 @@ Whisper and YouTube drafts keep their independent ranges; identical ranges share
 No names are guessed during preparation, and unfinished or short draft ranges are skipped.
 The first use requests permission for a checksum-verified WeSpeaker voice model (about 25 MiB).
 Inference is local, needs no account or token, and does not upload audio or transcripts.
-**Match now** starts or retries a pass; **Cancel** pauses matching until explicitly resumed.
-Progress, permission status, and cancellation are also available in **Tools > Background Processing**
-and **Tools > Tasks**. Cancel pauses both preparation and automatic matching until resumed.
+Matching runs automatically after a name edit; no matching button is needed in the Segments panel.
+Use **Tools > Background Processing > Speaker matching** to **Start** a pass, **Retry** a
+failure, **Resume** paused work, or **Cancel**. Cancel pauses both preparation and automatic
+matching until resumed. The existing status bar indicates active work or attention needed;
+open Background Processing for progress and permission details. Tasks are also available in
+**Tools > Tasks**.
 
 Only strong matches fill blank names. Existing names are never replaced. Results for segments
 edited, removed, or retimed during processing are discarded; changing a reference name causes a
@@ -781,9 +785,16 @@ segment, or replace the caption being edited. Automatic names are shown in itali
 but are never reused as trusted voice references. Edit a name yourself to provide a reference.
 New manually added segments start unassigned when matching is enabled.
 
+**Filled N speaker name(s)** appears briefly in the status bar and remains in Background Processing.
+It reports only the names applied by that pass. A count of zero is not
+an error: uncertain or short clips stay unassigned. Try a longer, clean reference line as described
+above, or assign the remaining speakers manually.
+
 Clearing a name deliberately checks **Keep unassigned (skip auto-fill)**. Uncheck it on that
-segment to include it again. **Undo auto-fill** clears unchanged names from the last automatic
-batch in this session, keeps those segments unassigned, and preserves subsequent manual edits.
+segment to include it again. **Project > Clear last auto-filled names** clears unchanged names
+from the last automatic batch in the current tab, keeps those segments unassigned, and preserves
+subsequent manual edits. This selective clear is available only during the current session;
+it does not undo intervening edits.
 The project-wide enabled setting and each segment's assignment/exclusion state survive saving.
 Automatic changes mark the project unsaved; use **Save Project** to persist them.
 
@@ -808,7 +819,7 @@ nonverbal-only captions such as `[grunting]` or `Ugh...`, multiple-speaker assig
 matches are skipped. Music, overlapping dialogue, shouting, impersonations, or one actor playing
 several characters can still fool the model. Similarity scores are not accuracy percentages:
 review automatic names before exporting. Reopening a saved project does not start matching by
-itself; finish a name edit or use **Match now**.
+itself; finish a name edit or use **Start** in Background Processing.
 
 ## Simultaneous speakers
 

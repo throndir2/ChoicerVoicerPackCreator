@@ -116,6 +116,33 @@ def test_segment_help_only_shows_empty_states_and_preserved_audio(qtbot, tmp_pat
     window.close()
 
 
+@pytest.mark.parametrize("action,expected", [
+    ("add_segment", "Segment added."),
+    ("split_segment", "Segment split."),
+    ("duplicate_segment", "Segment duplicated at the same timestamp."),
+])
+def test_segment_completion_reports_result_without_instructions(
+    qtbot, tmp_path, monkeypatch, action, expected,
+) -> None:
+    window = MainWindow(UnusedMedia())  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    segment = Segment(1, 3, "A line", ["Speaker"])
+    window._set_project(PackProject(
+        video_duration=10, auto_speaker_matching=False, segments=[segment],
+    ), None, mark_dirty=False)
+    editor = window.active_editor
+    editor.project.video_path = str(tmp_path / "source.mp4")
+    editor.select_segment(segment.id)
+    monkeypatch.setattr(editor, "current_position", lambda: 2)
+
+    getattr(editor, action)()
+
+    assert len(editor.project.segments) == 2
+    assert editor.statusBar().currentMessage() == expected
+    editor.dirty = False
+    window.close()
+
+
 def test_pack_details_preserve_export_options_without_duplicate_controls(qtbot, tmp_path) -> None:
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     window = MainWindow(

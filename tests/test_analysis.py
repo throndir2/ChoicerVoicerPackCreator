@@ -936,6 +936,63 @@ def test_download_total_deadline_is_enforced(
         )
 
 
+@pytest.mark.parametrize(("text", "caption"), [
+    (">> Hello there.", "Hello there."),
+    (" \t>>\t Hello  there. \n", "Hello there."),
+    (">>Hello there.", "Hello there."),
+    (">> >> Hello there.", "Hello there."),
+    (">>>> Hello there.", "Hello there."),
+    ("Hello  there.", "Hello there."),
+    ("> Hello there.", "> Hello there."),
+    ("Use >> to continue.", "Use >> to continue."),
+    (">> Use >> to continue.", "Use >> to continue."),
+    (">>", ""),
+    (" \t>> >> \n", ""),
+    (" \t\n", ""),
+])
+def test_whisper_parser_strips_only_leading_speaker_markers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str, caption: str,
+) -> None:
+    wav_path = tmp_path / "source.wav"
+    _write_test_wav(wav_path)
+    manager = WhisperManager(tmp_path / "data", default_manifest_path())
+    model_path = tmp_path / "model.bin"
+    model_path.write_bytes(b"test model")
+    monkeypatch.setattr(manager, "ensure_runtime", lambda *_args: tmp_path / "whisper-cli.exe")
+    monkeypatch.setattr(manager, "ensure_model", lambda *_args: model_path)
+
+    def write_transcript(command, *_args, **_kwargs):
+        output_base = Path(command[command.index("--output-file") + 1])
+        output_base.with_suffix(".json").write_text(
+            json.dumps({
+                "result": {"language": "en"},
+                "transcription": [{
+                    "offsets": {"from": 500, "to": 1500},
+                    "text": text,
+                    "tokens": [{"text": " Hello", "p": 0.9}],
+                }],
+            }),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(analysis_module, "_run_cancellable", write_transcript)
+    suggestions, language = manager.transcribe(
+        wav_path,
+        tmp_path / "output",
+        "base",
+        "auto",
+        HardwareProfile(4, 8 * 1024**3, 6 * 1024**3, "base", "test"),
+        lambda *_args: None,
+        lambda: False,
+    )
+
+    assert language == "en"
+    assert suggestions == (
+        [AnalysisSuggestion(0.35, 1.75, caption, "Whisper", 0.9)] if caption else []
+    )
+
+
 @pytest.mark.parametrize("invalid_edge", [
     None, "missing-first", "missing-last", "zero-first", "zero-last",
     "nonfinite", "negative", "outside-segment", "backwards",

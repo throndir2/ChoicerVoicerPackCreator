@@ -283,6 +283,7 @@ class ProjectEditor(QWidget):
         self.edit_history = EditHistoryController(self)
         self._build_actions()
         self._build_ui()
+        self.edit_history.bind_text_shortcuts()
         self._connect_player()
         self._set_project(self.project, self.project_path, mark_dirty=session.dirty)
         self._document_layout.addWidget(self._status_bar)
@@ -390,6 +391,10 @@ class ProjectEditor(QWidget):
         self.action_processing = QAction("Background Processing...", self)
         self.action_processing.setObjectName("showProcessing")
         self.action_processing.triggered.connect(lambda: self.processing_dialog.show_processing())
+        self.action_clear_speaker_autofill = QAction("Clear last auto-filled names", self)
+        self.action_clear_speaker_autofill.setObjectName("clearSpeakerAutofill")
+        self.action_clear_speaker_autofill.setEnabled(False)
+        self.action_clear_speaker_autofill.triggered.connect(lambda: self.speaker_matching.undo())
 
         self.action_add = QAction("Add Segment", self)
         self.action_add.setShortcut(QKeySequence("Ctrl+Shift+A"))
@@ -426,6 +431,7 @@ class ProjectEditor(QWidget):
             self.action_undo, self.action_redo, self.action_history,
             self.action_analyze, self.action_backing,
             self.action_cut_video, self.action_extract_scene,
+            self.action_clear_speaker_autofill,
         ]
         self.tool_actions = [self.action_processing]
         self.segment_actions = [
@@ -444,6 +450,7 @@ class ProjectEditor(QWidget):
             (self.action_cut_video, "split", None, "Remove an In/Out range from the video and close the gap, keeping later dialogue and backing in sync. Original media is preserved."),
             (self.action_extract_scene, "new", None, "Copy the In/Out range and its dialogue into a separate scene project. Select a segment first to use its range."),
             (self.action_processing, "tasks", None, "View transcript, voice, and backing progress or manage processing for this project."),
+            (self.action_clear_speaker_autofill, "restore", None, "Clear unchanged names from the last automatic batch in this tab and keep those segments unassigned. Subsequent manual edits are preserved."),
             (self.action_add, "add", "Add", "Create a new segment using the current In/Out times. Existing segments are not changed."),
             (self.action_split, "split", "Split", "Cut the selected segment into two at the white playback line (playhead). Move the playhead inside the segment first."),
             (self.action_combine, "combine", "Combine", "Select multiple rows with Ctrl or Shift, then combine their ranges and lines."),
@@ -833,7 +840,7 @@ class ProjectEditor(QWidget):
         self.progress_bar.hide()
         progress_row.addWidget(self.progress_bar)
         root_layout.addLayout(progress_row)
-        self.statusBar().showMessage("Create a pack from a video or import an existing pack.")
+        self.statusBar().showMessage("Ready")
 
     def _time_spin(self) -> QDoubleSpinBox:
         spin = QDoubleSpinBox()
@@ -1006,6 +1013,9 @@ class ProjectEditor(QWidget):
 
     def _write_recovery_snapshot(self) -> None:
         if not self.recovery_store or not self.dirty:
+            return
+        if self._range_edit_record is not None:
+            self._recovery_timer.start()
             return
         snapshot, path, store = self.session.snapshot(), self.project_path, self.recovery_store
         job = self.workspace.job_manager.submit(
@@ -1283,9 +1293,7 @@ class ProjectEditor(QWidget):
         self._refresh_table(added[0].id)
         self.select_segment(added[0].id)
         self.speakers_edit.setFocus()
-        self.statusBar().showMessage(
-            f"Added {len(added)} review suggestion(s). Assign speakers and verify every caption/range."
-        )
+        self.statusBar().showMessage(f"Added {len(added)} review suggestion(s).")
 
     def open_project(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1325,8 +1333,7 @@ class ProjectEditor(QWidget):
 
     def _show_pack_recovery_hint(self) -> None:
         self.statusBar().showMessage(
-            f"Imported {len(self.project.segments)} segments with existing prompt media. "
-            "Missing music? Use Generate backing, then Save Project As and export to a new location."
+            f"Imported {len(self.project.segments)} segments with existing prompt media."
         )
 
     def save_project(self, save_as: bool = False) -> bool:
@@ -1518,11 +1525,9 @@ class ProjectEditor(QWidget):
         )
         self._scene_job = job
         self._refresh_scene_actions()
-        self.statusBar().showMessage("Video edit queued. Manage or cancel it in Tools > Tasks.")
+        self.statusBar().showMessage("Video edit queued.")
         job.progress.connect(
-            lambda message, _fraction: self.statusBar().showMessage(
-                f"{message}  (Tools > Tasks)"
-            )
+            lambda message, _fraction: self.statusBar().showMessage(message)
         )
 
         def completed(project: PackProject) -> None:
@@ -1824,7 +1829,7 @@ class ProjectEditor(QWidget):
         self._refresh_table(segment.id)
         self.select_segment(segment.id)
         self.caption_edit.setFocus()
-        self.statusBar().showMessage("Segment added. Enter its speaker and exact line.")
+        self.statusBar().showMessage("Segment added.")
 
     def apply_selected_range(self) -> None:
         segment = self.selected_segment()
@@ -1873,7 +1878,7 @@ class ProjectEditor(QWidget):
         self._set_dirty(True, history_label="Split segment")
         self._refresh_table(second.id)
         self.select_segment(second.id)
-        self.statusBar().showMessage("Segment split. File audio was switched to source-video audio if needed.")
+        self.statusBar().showMessage("Segment split.")
 
     def duplicate_segment(self) -> None:
         segment = self.selected_segment()
@@ -1887,9 +1892,7 @@ class ProjectEditor(QWidget):
         self.select_segment(duplicate.id)
         self.speakers_edit.setFocus()
         self.speakers_edit.selectAll()
-        self.statusBar().showMessage(
-            "Segment duplicated at the same timestamp—useful for simultaneous speakers."
-        )
+        self.statusBar().showMessage("Segment duplicated at the same timestamp.")
 
     def combine_segments(self) -> None:
         identifiers = self._selected_table_ids()
@@ -1925,10 +1928,7 @@ class ProjectEditor(QWidget):
         self._set_dirty(True, history_label="Combine segments")
         self._refresh_table(combined.id)
         self.select_segment(combined.id)
-        self.statusBar().showMessage(
-            f"Combined {len(selected)} segments. Lines and speakers were joined in timeline order; "
-            "the source-video range includes any gaps."
-        )
+        self.statusBar().showMessage(f"Combined {len(selected)} segments.")
 
     def delete_segment(self) -> None:
         segment = self.selected_segment()
@@ -2032,12 +2032,12 @@ class ProjectEditor(QWidget):
         segment.start, segment.end = start, end
         self.video_widget.set_segments(self.project.segments)
         self.selected_segment_id = segment_id
-        self._set_dirty(True)
+        self._set_dirty(True, segment=segment)
         row = self._row_for_segment(segment_id)
         if row >= 0:
             self.segment_table.item(row, 1).setText(format_time(start))
             self.segment_table.item(row, 2).setText(format_time(end))
-        self._refresh_validation_label()
+        self._validation_timer.start()
 
     def _timeline_range_edit_finished(
         self,
@@ -2145,7 +2145,9 @@ class ProjectEditor(QWidget):
                 )
 
         self.project.sort_segments()
-        self._set_dirty(True, history_label="Change segment timing")
+        self._set_dirty(
+            True, segment=segment, history_label="Change segment timing", full_history=True,
+        )
         self._refresh_table(segment.id)
         self.select_segment(segment.id)
         if segment.audio_mode == "video":
@@ -2192,7 +2194,7 @@ class ProjectEditor(QWidget):
         if selected_id is None:
             self._table_selection_changed()
         self._update_combine_action()
-        self._refresh_validation_label()
+        self._refresh_validation_label(timeline_warnings=timeline_warnings)
 
     def _populate_table_row(self, row: int, segment: Segment, *, warned: bool = False) -> None:
         values = (
@@ -3022,20 +3024,26 @@ class ProjectEditor(QWidget):
         self._refresh_scene_actions()
         self.action_export.setEnabled(not loading and self._export_worker is None)
         self._update_combine_action()
+        self.speaker_matching._update_actions()
         if loading:
             self.action_combine.setEnabled(False)
         self.edit_history.refresh()
 
     def _refresh_validation_label(
         self, *, refresh_highlights: bool = False,
+        timeline_warnings: list[TimelineOverlap] | None = None,
         prepared: tuple[list[str], list[TimelineOverlap], list[str]] | None = None,
     ) -> None:
         self._validation_timer.stop()
         if prepared is None:
             if self.edit_history.busy:
                 return
+            if self._range_edit_record is not None:
+                self._validation_timer.start()
+                return
             errors = self.project.validate()
-            timeline_warnings = audit_timeline_overlaps(self.project.segments)
+            if timeline_warnings is None:
+                timeline_warnings = audit_timeline_overlaps(self.project.segments)
             warning_details = self._timeline_review_details(timeline_warnings)
         else:
             errors, timeline_warnings, warning_details = prepared
@@ -3070,8 +3078,9 @@ class ProjectEditor(QWidget):
 
     def _set_dirty(
         self, dirty: bool, *, segment: Segment | None = None,
-        history_label: str = "Edit project", history_merge: str | None = None,
+        history_label: str | None = None, history_merge: str | None = None,
         fields_only: bool = False, record_history: bool = True,
+        full_history: bool = False,
     ) -> None:
         was_dirty = self.dirty
         recording = (
@@ -3079,9 +3088,13 @@ class ProjectEditor(QWidget):
             and not self.edit_history.suspended
         )
         if recording:
-            self.edit_history.record(
-                history_label, segment=segment, merge_key=history_merge, fields_only=fields_only,
+            changed = self.edit_history.record(
+                history_label or "Edit project", segment=None if full_history else segment,
+                merge_key=history_merge, fields_only=fields_only,
             )
+            if not changed and history_label is None and self.edit_history.history.is_clean:
+                # Explicit dirty baselines (imports/recovery) have no saved history state.
+                self.edit_history.history.mark_saved(-1)
         self.dirty = dirty
         if recording:
             self.edit_history._sync_clean()
@@ -3800,6 +3813,11 @@ class MainWindow(QMainWindow):
         self, editor: ProjectEditor, *, save_as: bool = False,
         destination: Path | None = None, on_saved: Callable[[], None] | None = None,
     ) -> bool:
+        try:
+            self._ensure_save_ready(editor)
+        except ValueError as error:
+            self.notice("Could not save project", str(error))
+            return False
         editor._commit_editors()
         destination = destination or (None if save_as else editor.project_path)
         if destination is None:
@@ -3858,10 +3876,16 @@ class MainWindow(QMainWindow):
         job.finished.connect(finished)
         return True
 
+    @staticmethod
+    def _ensure_save_ready(editor: ProjectEditor) -> None:
+        if editor.session.loading:
+            raise ValueError("Wait for this project to finish opening or restoring history before saving it.")
+        if editor._range_edit_record is not None:
+            raise ValueError("Finish the current timing edit before saving the project.")
+
     def reserve_project_save(self, project_id: str, destination: Path) -> str:
         editor = self.editor_for_project(project_id)
-        if editor.session.loading:
-            raise ValueError("Wait for this project to finish opening before saving it.")
+        self._ensure_save_ready(editor)
         key = canonical_project_path(destination)
         owner = self._save_targets.get(key)
         if owner is None:

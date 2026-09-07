@@ -4,15 +4,17 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QSettings, QSignalBlocker, Qt, QTimer
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import QEvent, QObject, QSettings, QSignalBlocker, Qt, QTimer
+from PySide6.QtGui import QAction, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
 )
@@ -93,6 +95,32 @@ class EditHistoryController(QObject):
         describe_action(self.show_action, "logs", "Review the last 100 edits for this open project.")
         self.refresh()
 
+    def bind_text_shortcuts(self) -> None:
+        for widget in (
+            *self.editor.findChildren(QLineEdit), *self.editor.findChildren(QPlainTextEdit),
+        ):
+            widget.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if (
+            event.type() != QEvent.Type.ShortcutOverride or not isinstance(event, QKeyEvent)
+            or not isinstance(watched, (QLineEdit, QPlainTextEdit))
+            or watched.window() is not self.editor.window()
+        ):
+            return False
+        undo = QKeySequence(event.keyCombination()) in self.undo_action.shortcuts()
+        redo = QKeySequence(event.keyCombination()) in self.redo_action.shortcuts()
+        if not undo and not redo:
+            return False
+        local = watched if isinstance(watched, QLineEdit) else watched.document()
+        available = local.isUndoAvailable() if undo else local.isRedoAvailable()
+        action = self.undo_action if undo else self.redo_action
+        if not available and action.isEnabled():
+            # Qt text widgets otherwise swallow Undo even when their local stack is empty.
+            event.ignore()
+            return True
+        return False
+
     def reset(self, *, dirty: bool) -> None:
         self.history.reset(self.editor.project)
         self.history.mark_saved(-1 if dirty else self.history.current_id)
@@ -103,13 +131,15 @@ class EditHistoryController(QObject):
     def record(
         self, label: str, *, segment: Segment | None = None,
         merge_key: str | None = None, fields_only: bool = False,
-    ) -> None:
+    ) -> bool:
         if not self.suspended:
-            self.history.record(
+            changed = self.history.record(
                 self.editor.project, label, segment=segment,
                 merge_key=merge_key, fields_only=fields_only,
             )
             self.refresh()
+            return changed
+        return False
 
     def saving(self, revision: int) -> None:
         self.history.break_merge()
@@ -292,7 +322,6 @@ class EditHistoryController(QObject):
     def _finish(self) -> None:
         self.busy = False
         self.editor._set_loading(False)
-        self.editor.speaker_matching._update_buttons()
         self.editor.workspace.refresh_tabs()
         if self.editor.dirty:
             self.editor._recovery_timer.start()

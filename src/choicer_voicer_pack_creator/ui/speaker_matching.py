@@ -11,9 +11,6 @@ from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -181,7 +178,7 @@ class SpeakerMatchingControls(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 0)
-        self.enabled_check = QCheckBox("Auto-fill matching speakers in the background")
+        self.enabled_check = QCheckBox("Auto-fill speaker names")
         self.enabled_check.setObjectName("autoSpeakerMatching")
         self.enabled_check.setToolTip(
             "Prepare local voice fingerprints in the background as transcript ranges arrive. "
@@ -192,29 +189,7 @@ class SpeakerMatchingControls(QWidget):
         self.enabled_check.setChecked(editor.project.auto_speaker_matching)
         self.enabled_check.toggled.connect(self._enabled_changed)
         layout.addWidget(self.enabled_check)
-        buttons = QHBoxLayout()
-        self.match_button = QPushButton("Match now")
-        self.match_button.setObjectName("matchSpeakers")
-        self.match_button.clicked.connect(self.retry)
-        self.undo_button = QPushButton("Undo auto-fill")
-        self.undo_button.setObjectName("undoSpeakerMatching")
-        self.undo_button.setToolTip(
-            "Clear unchanged names from the last automatic batch and keep those segments "
-            "unassigned. Your subsequent edits are preserved."
-        )
-        self.undo_button.clicked.connect(self.undo)
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.setObjectName("cancelSpeakerMatching")
-        self.cancel_button.clicked.connect(self.cancel)
-        for button in (self.match_button, self.undo_button, self.cancel_button):
-            buttons.addWidget(button)
-        buttons.addStretch()
-        layout.addLayout(buttons)
-        self.status = QLabel("Finish naming a dialogue segment to match its voice.")
-        self.status.setObjectName("speakerMatchingStatus")
-        self.status.setWordWrap(True)
-        layout.addWidget(self.status)
-        self._update_buttons()
+        self._update_actions()
 
     def _current(self) -> bool:
         workspace = self.editor.workspace
@@ -292,7 +267,7 @@ class SpeakerMatchingControls(QWidget):
 
     def changed(self, *, segment: Segment | None = None) -> None:
         changed = self._observe(segment)
-        self._update_buttons()
+        self._update_actions()
         if not changed or self._applying:
             return
         if self.worker is not None:
@@ -345,9 +320,6 @@ class SpeakerMatchingControls(QWidget):
             self.retry()
         else:
             self.cancel()
-            self.status.setText("Automatic speaker matching is off.")
-            for kind in ("speaker-preparation", "speakers"):
-                self.editor.processing.set_status(kind, "off", "Automatic voice matching is off.")
 
     @Slot()
     def retry(self) -> None:
@@ -356,7 +328,10 @@ class SpeakerMatchingControls(QWidget):
         if self.worker is not None:
             if self._paused:
                 self._resume_requested = True
-                self.status.setText("Waiting for cancellation to finish, then restarting matching.")
+                self.editor.processing.set_status(
+                    "speakers", "cancelling",
+                    "Waiting for cancellation to finish, then restarting matching.",
+                )
             return
         if not self.editor.project.auto_speaker_matching:
             self.enabled_check.setChecked(True)
@@ -441,6 +416,10 @@ class SpeakerMatchingControls(QWidget):
             or self._paused or self._pending_consent
         ):
             return
+        if self.editor._range_edit_record is not None:
+            # A pause with the mouse held down is not a committed audio range.
+            self._timer.start(900)
+            return
         if self.worker is not None or self._publication is not None:
             self._pending = True
             return
@@ -459,16 +438,15 @@ class SpeakerMatchingControls(QWidget):
                 )
             return
         if not preparing and (not references or not targets):
-            self.status.setText(
-                f"Name a dialogue segment with at least {MIN_ACTIVE_SECONDS:g} seconds of speech; "
-                "automatic names are not used as references."
+            message = (
+                f"Name a dialogue segment with at least {MIN_ACTIVE_SECONDS:g} seconds of speech."
                 if not references else "No eligible unassigned segments to match."
             )
+            self.editor.processing.set_status("speakers", "idle" if not references else "ready", message)
             if self._preprocess:
                 self.editor.processing.set_status(
                     "speaker-preparation", "ready" if self._prepared_ranges else "waiting",
-                    "Voice fingerprints ready. " + self.status.text()
-                    if self._prepared_ranges else self.status.text(),
+                    "Voice fingerprints ready." if self._prepared_ranges else message,
                 )
             return
         if preparing:
@@ -500,7 +478,6 @@ class SpeakerMatchingControls(QWidget):
             source_snapshot={"source_revision": self.editor.session.source_revision},
             priority=10 if preparing else 20,
         )
-        worker.progress.connect(self._progress)
         worker.completed.connect(self._completed)
         worker.failed.connect(self._failed)
         worker.download_required.connect(lambda: setattr(self, "_outcome", "download"))
@@ -508,10 +485,6 @@ class SpeakerMatchingControls(QWidget):
         worker.preparation_required.connect(lambda: setattr(self, "_outcome", "prepare"))
         worker.finished.connect(self._finished)
         worker.finished.connect(worker.deleteLater)
-        self.status.setText(
-            "Voice preparation queued. Names are not needed; you can keep editing."
-            if preparing else "Comparing cached voices. You can keep editing."
-        )
         worker.start()
         tasks = self.editor.workspace.tasks_window
         job_id = worker.job_handle.id
@@ -519,12 +492,7 @@ class SpeakerMatchingControls(QWidget):
             job_id, self.retry, available=lambda: self._current() and self.worker is None,
         )
         self.destroyed.connect(lambda: tasks.unregister_retry(job_id))
-        self._update_buttons()
-
-    @Slot(str, int)
-    def _progress(self, message: str, _value: int) -> None:
-        if self._request is not None and self._request.generation == self._generation:
-            self.status.setText(message)
+        self._update_actions()
 
     @Slot(object)
     def _completed(self, result: object) -> None:
@@ -540,8 +508,10 @@ class SpeakerMatchingControls(QWidget):
             return
         self._outcome = "failed"
         self._paused = True
-        self.status.setText(f"Speaker matching failed: {message}\nUse Match now to retry.")
-        self.editor.processing.set_status("speaker-preparation", "failed", message)
+        self.editor.processing.set_status(
+            "speaker-preparation" if self._request is not None and self._request.preparing else "speakers",
+            "failed", message,
+        )
 
     @Slot()
     def _finished(self) -> None:
@@ -551,7 +521,7 @@ class SpeakerMatchingControls(QWidget):
             request is None or request.generation != self._generation
             or not self._document_available()
         ):
-            self._update_buttons()
+            self._update_actions()
             if self._document_available() and self._preprocess and not self._paused:
                 self._timer.start(0)
             return
@@ -560,10 +530,10 @@ class SpeakerMatchingControls(QWidget):
             self._resume_requested = False
             self._paused = not resume
             self._pending = resume
-            self.status.setText(
-                "Restarting speaker matching with the current edits." if resume else
-                "Speaker matching paused. Use Match now to resume."
-            )
+            if resume:
+                self.retry()
+            else:
+                self.cancel()
         elif self._outcome == "download":
             self._request_download(worker.manager)
         elif self._outcome == "prepare":
@@ -577,28 +547,27 @@ class SpeakerMatchingControls(QWidget):
         ):
             if request.preparing and isinstance(self._result, SpeakerPreparationResult):
                 self._prepared_ranges.update(_audio_range(clip) for clip in request.clips)
-                self.status.setText("Voice fingerprints ready. Name a dialogue segment to match its voice.")
                 self.editor.processing.set_status(
-                    "speaker-preparation", "ready", self.status.text(),
+                    "speaker-preparation", "ready", "Voice fingerprints ready.",
                 )
                 self._pending = True
             elif isinstance(self._result, SpeakerResult):
                 self._apply(self._result, request)
         elif self._outcome == "canceled" or worker.job_handle.record.state == "cancelled":
-            self._paused = True
-            self.status.setText("Speaker matching paused. Use Match now to resume.")
-            self.editor.processing.set_status("speaker-preparation", "cancelled", self.status.text())
+            self.cancel()
         elif self._outcome != "failed":
             self._failed("The task stopped without returning a result.")
-        self._update_buttons()
+        self._update_actions()
         if self._pending and not self._paused and not self._timer.isActive():
             self._timer.start(0 if request.preparing else 900)
 
     def _request_download(self, manager: SpeakerMatchingManager) -> None:
         generation = self._generation
         self._pending_consent = True
-        self.status.setText("Waiting for permission to download the local speaker model.")
-        self.editor.processing.set_status("speaker-preparation", "consent", self.status.text())
+        self.editor.processing.set_status(
+            "speaker-preparation", "consent",
+            "Waiting for permission to download the local speaker model.",
+        )
 
         def current() -> bool:
             return (
@@ -617,9 +586,10 @@ class SpeakerMatchingControls(QWidget):
                 self._timer.start(0)
             elif not self._paused:
                 self._paused = True
-                self.status.setText("Speaker model download declined. Use Match now to retry.")
-                self.editor.processing.set_status("speaker-preparation", "cancelled", self.status.text())
-            self._update_buttons()
+                self.editor.processing.set_status(
+                    "speaker-preparation", "cancelled", "Speaker model download declined.",
+                )
+            self._update_actions()
 
         self._consent_callback = decided
         self.editor.workspace.setup_consent.request(
@@ -638,12 +608,16 @@ class SpeakerMatchingControls(QWidget):
         ):
             self._publication = result, request
             self._publication_timer.start()
-            self.status.setText("Voice matching is ready; waiting for the current edit to finish.")
+            self.editor.processing.set_status(
+                "speakers", "waiting", "Voice matching is ready; waiting for the current edit to finish.",
+            )
             return
         self._observe()
         _, references, _ = self._inputs()
         if self.editor.session.source_token() != request.source_token or references != request.references:
-            self.status.setText("Reference speakers changed. Rechecking with your latest names.")
+            self.editor.processing.set_status(
+                "speakers", "queued", "Reference speakers changed. Rechecking with your latest names.",
+            )
             self._pending = True
             return
         try:
@@ -651,7 +625,9 @@ class SpeakerMatchingControls(QWidget):
         except SourceChangedError as error:
             diagnostic_exception("speaker_matching_source_changed", error)
             self._paused = True
-            self.status.setText("Source audio changed. Use Match now to analyze the new audio.")
+            self.editor.processing.set_status(
+                "speakers", "failed", "Source audio changed. Retry to analyze the new audio.",
+            )
             return
         applied = []
         segments = {segment.id: segment for segment in self.editor.project.segments}
@@ -679,15 +655,9 @@ class SpeakerMatchingControls(QWidget):
                 }
         finally:
             self._applying = False
-        self.status.setText(
-            f"Filled {len(applied)} speaker name(s). Uncertain/short clips stay unassigned. "
-            "Automatic names are not used as voice references."
-            + (
-                " For a stronger reference, name a longer, clean dialogue line "
-                "(about 2 seconds or more)."
-                if not applied else ""
-            )
-        )
+        message = f"Filled {len(applied)} speaker name(s)."
+        self.editor.processing.set_status("speakers", "ready", message)
+        self.editor.statusBar().showMessage(message, 5000)
         diagnostic_event("speaker_matching_applied", count=len(applied), examined=result.examined)
 
     @Slot()
@@ -704,10 +674,10 @@ class SpeakerMatchingControls(QWidget):
             or not self.editor.project.auto_speaker_matching
             or request.generation != self._generation
         ):
-            self._update_buttons()
+            self._update_actions()
             return
         self._apply(result, request)
-        self._update_buttons()
+        self._update_actions()
         if self._pending and self._publication is None and not self._paused and not self._typing:
             self._timer.start(900)
 
@@ -754,11 +724,8 @@ class SpeakerMatchingControls(QWidget):
                 self._refresh_names(restored)
         finally:
             self._applying = False
-        self.status.setText(
-            f"Undid {len(restored)} automatic name(s); later edits were preserved. "
-            "Uncheck Keep unassigned on a segment to include it again."
-        )
-        self._update_buttons()
+        self.editor.statusBar().showMessage(f"Cleared {len(restored)} auto-filled name(s).", 5000)
+        self._update_actions()
 
     def history_replayed(self) -> None:
         self._generation += 1
@@ -776,9 +743,11 @@ class SpeakerMatchingControls(QWidget):
         with QSignalBlocker(self.enabled_check):
             self.enabled_check.setChecked(self.editor.project.auto_speaker_matching)
         self._observe()
-        self._update_buttons()
-        self.status.setText(
-            "Matching paused after restoring history. Edit a speaker or use Match now to resume."
+        self._update_actions()
+        self.editor.processing.set_status(
+            "speakers", "cancelled",
+            "Matching paused after restoring history. Edit a speaker or resume "
+            "Speaker matching in Background Processing.",
         )
 
     @Slot()
@@ -795,18 +764,22 @@ class SpeakerMatchingControls(QWidget):
             self.worker.requestInterruption()
         if self._consent_callback is not None:
             self.editor.workspace.setup_consent.cancel_request(self._consent_callback)
-        self.status.setText("Speaker matching paused. Use Match now to resume.")
         if self._document_available():
+            state, message = (
+                ("cancelling", "Stopping speaker matching.") if self.worker is not None else
+                ("cancelled", "Speaker matching paused.") if self.editor.project.auto_speaker_matching
+                else ("off", "Automatic voice matching is off.")
+            )
             for kind in ("speaker-preparation", "speakers"):
-                self.editor.processing.set_status(kind, "cancelled", self.status.text())
-        self._update_buttons()
+                self.editor.processing.set_status(kind, state, message)
+        self._update_actions()
 
     def close_processing(self) -> None:
         self._closed = True
         self.cancel()
 
-    def _update_buttons(self) -> None:
+    def _update_actions(self) -> None:
         running = self.worker is not None or self._publication is not None
-        self.match_button.setEnabled(not running and not self._pending_consent)
-        self.cancel_button.setEnabled(running or self._pending_consent or self._timer.isActive())
-        self.undo_button.setEnabled(bool(self._undo) and not running)
+        self.editor.action_clear_speaker_autofill.setEnabled(
+            bool(self._undo) and not running and self._current()
+        )
