@@ -459,11 +459,16 @@ class MediaTools:
         process = None
         counts = None
         canceled = False
+
+        def join_reader() -> None:
+            if reader is not None:
+                reader.join()
+
         with tempfile.TemporaryFile() as errors:
             try:
                 with owned_subprocess(
                     command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors,
-                    startupinfo=self._startup_info(),
+                    startupinfo=self._startup_info(), on_reaped=join_reader,
                 ) as process:
                     assert process.stdout is not None
                     stream = process.stdout
@@ -501,8 +506,7 @@ class MediaTools:
                 )
                 raise
             finally:
-                if reader is not None:
-                    reader.join()
+                join_reader()
                 errors.seek(0, os.SEEK_END)
                 errors.seek(max(0, errors.tell() - 16384))
                 detail = errors.read().decode("utf-8", "replace").strip()

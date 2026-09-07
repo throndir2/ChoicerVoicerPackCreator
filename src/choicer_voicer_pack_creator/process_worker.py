@@ -371,12 +371,13 @@ def _kill_group(pid: int) -> None:
 
 
 @contextmanager
-def owned_subprocess(command, **kwargs):
+def owned_subprocess(command, *, on_reaped: Callable[[], None] | None = None, **kwargs):
     """Contain an external program before it executes, and reap its whole tree.
 
     Windows starts suspended until assignment to a kill-on-close Job Object; POSIX
     creates a new process group in Popen itself. Cleanup failures propagate rather
     than reporting a cancelled job while descendants still own output files.
+    on_reaped joins pipe consumers after termination, before their streams close.
     """
     check_cancelled()
     with ExitStack() as resources:
@@ -409,9 +410,13 @@ def owned_subprocess(command, **kwargs):
                 if process.poll() is None:
                     process.kill()
                 process.wait()
-                for stream in (process.stdin, process.stdout, process.stderr):
-                    if stream is not None:
-                        stream.close()
+                try:
+                    if on_reaped is not None:
+                        on_reaped()
+                finally:
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        if stream is not None:
+                            stream.close()
 
 
 def run_process_worker(

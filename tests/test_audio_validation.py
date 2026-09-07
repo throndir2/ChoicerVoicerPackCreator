@@ -16,6 +16,12 @@ from types import SimpleNamespace
 import pytest
 
 from choicer_voicer_pack_creator import media as media_module
+from choicer_voicer_pack_creator.export_resources import (
+    ExportResourceBudget,
+    ResourceSnapshot,
+    current_ffmpeg_threads,
+    estimate_media_work,
+)
 from choicer_voicer_pack_creator.exporter import PackExporter
 from choicer_voicer_pack_creator.media import (
     DecodedAudioStats,
@@ -128,6 +134,8 @@ def fake_audio_process(monkeypatch):
         try:
             yield process
         finally:
+            if on_reaped := kwargs.get("on_reaped"):
+                on_reaped()
             state.closed = True
             state.stream.close()
             if state.cleanup_error:
@@ -202,6 +210,65 @@ def test_reader_failure_is_transferred_and_process_is_closed(fake_audio_process,
     assert state.closed
 
 
+@pytest.mark.parametrize("validated", [False, True])
+@pytest.mark.parametrize(
+    "failure",
+    [None, "closed-file-value", "reader-value", "reader-io", "process-cleanup", "pipe-close"],
+)
+def test_cancellation_during_pcm_processing_joins_before_stdout_close(
+    fake_audio_process, monkeypatch, validated, failure,
+):
+    media, state = fake_audio_process
+    processing, joining = threading.Event(), threading.Event()
+    errors = {
+        "closed-file-value": ValueError("I/O operation on closed file"),
+        "reader-value": ValueError("PCM conversion failed"),
+        "reader-io": OSError("PCM reader failed"),
+        "process-cleanup": OSError("process cleanup failed"),
+        "pipe-close": OSError("stdout close failed"),
+    }
+    error = errors.get(failure)
+    reader_failures = {"closed-file-value", "reader-value", "reader-io"}
+    close_states = []
+
+    class ObservedAudio(ChunkedAudio):
+        def close(self):
+            close_states.append(processing.is_set() and joining.is_set())
+            super().close()
+            if failure == "pipe-close":
+                raise error
+
+    class JoiningThread(threading.Thread):
+        def join(self, timeout=None):
+            joining.set()
+            super().join(timeout=3)
+            assert not self.is_alive()
+
+    def processing_array(code):
+        processing.set()
+        # Release only at join(), after stdout closure in the old teardown order.
+        assert joining.wait(3)
+        if failure in reader_failures:
+            raise error
+        return array(code)
+
+    state.stream = ObservedAudio(_pcm([0, 33, -33, 0]))
+    if failure == "process-cleanup":
+        state.cleanup_error = error
+    monkeypatch.setattr(media_module.threading, "Thread", JoiningThread)
+    monkeypatch.setattr(media_module, "array", processing_array)
+    method = media.validated_audio_stats if validated else media.decoded_audio_stats
+    expected = OperationCancelled if error is None else type(error)
+    with operation_scope(processing.is_set), pytest.raises(expected) as raised:
+        method(Path("prompt.mp3"))
+    if error is not None:
+        assert raised.value is error
+        assert isinstance(raised.value.__context__, OperationCancelled)
+    assert close_states == [True]
+    assert state.closed and state.stream.closed
+    assert not any(t.name == "ffmpeg-audio-statistics" for t in threading.enumerate())
+
+
 @pytest.mark.parametrize("failure", ["cancel", "callback", "reader-cleanup", "process-cleanup"])
 def test_stalled_reader_cancellation_joins_and_preserves_cleanup_failures(monkeypatch, failure):
     media = MediaTools.__new__(MediaTools)
@@ -223,6 +290,8 @@ def test_stalled_reader_cancellation_joins_and_preserves_cleanup_failures(monkey
             yield SimpleNamespace(stdout=StalledAudio(), returncode=0, poll=lambda: None)
         finally:
             released.set()
+            if on_reaped := kwargs.get("on_reaped"):
+                on_reaped()
             closed.append(True)
             if failure == "process-cleanup":
                 raise OSError("process cleanup failed")
@@ -343,8 +412,12 @@ def test_prompt_commands_consume_only_explicit_thread_overrides(tmp_path, monkey
                 assert command[command.index(flag) + 1] == str(threads)
 
 
-def test_cold_prompt_emits_thread_limits_for_each_ffmpeg_step(
-    tmp_path, monkeypatch, fake_audio_process,
+@pytest.mark.parametrize(
+    "requested_threads,idle_cpu_capacity,expected_threads",
+    [(1, 16.0, 1), (2, 16.0, 2), (2, None, 1)],
+)
+def test_cold_prompt_emits_actual_admitted_thread_limits_for_each_ffmpeg_step(
+    tmp_path, monkeypatch, fake_audio_process, requested_threads, idle_cpu_capacity, expected_threads,
 ):
     media, state = fake_audio_process
     state.stream = ChunkedAudio(_pcm([0] * 4800 + [1000] * 19200 + [0] * 9600))
@@ -358,7 +431,6 @@ def test_cold_prompt_emits_thread_limits_for_each_ffmpeg_step(
         commands.append(command)
         return subprocess.CompletedProcess(command, 0, _pcm([1000]), b"")
 
-    monkeypatch.setattr(media_module, "current_ffmpeg_threads", lambda: 1)
     monkeypatch.setattr(media, "run", run)
     monkeypatch.setattr(media, "_capture", capture)
     segment = Segment(0.1, 0.5, "Synthetic prompt", ["Speaker"])
@@ -367,15 +439,29 @@ def test_cold_prompt_emits_thread_limits_for_each_ffmpeg_step(
         segments=[segment],
     )
     exporter = PackExporter(media, prompt_workers=1)
-    exporter._write_prompt(
-        project, segment, 1, tmp_path / "source.mp4", tmp_path, 3, 640, 360, lambda _: None,
+    budget = ExportResourceBudget(lambda: ResourceSnapshot(
+        4 * 1024**3, 16 * 1024**3, 16, idle_cpu_capacity,
+        "CPU load is warming up" if idle_cpu_capacity is None else None,
+    ))
+    estimate = estimate_media_work(
+        640, 360, frame_buffers=16, cpu_threads=requested_threads,
     )
+    assert current_ffmpeg_threads() is None
+    with budget.acquire(estimate) as admission:
+        assert admission.ffmpeg_threads == expected_threads
+        exporter._write_prompt(
+            project, segment, 1, tmp_path / "source.mp4", tmp_path, 3, 640, 360, lambda _: None,
+        )
+    assert current_ffmpeg_threads() is None and not budget._held
     assert len(commands) == 4
     for command in commands:
         assert command.count("-threads") == 2
         assert command.index("-threads") < command.index("-i")
-        assert command[command.index("-filter_threads") + 1] == "1"
-        assert command[command.index("-filter_complex_threads") + 1] == "1"
+        assert all(
+            command[index + 1] == str(expected_threads)
+            for index, arg in enumerate(command)
+            if arg in {"-threads", "-filter_threads", "-filter_complex_threads"}
+        )
 
 
 @pytest.fixture(scope="module")
