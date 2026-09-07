@@ -11,9 +11,16 @@ from types import SimpleNamespace
 import pytest
 
 from choicer_voicer_pack_creator import exporter as exporter_module
+from choicer_voicer_pack_creator import validation as validation_module
 from choicer_voicer_pack_creator.config_format import read_config
 from choicer_voicer_pack_creator.export_cache import ExportVideoCache
+from choicer_voicer_pack_creator.export_resources import (
+    ExportResourceBudget,
+    ResourceSnapshot,
+    current_ffmpeg_threads,
+)
 from choicer_voicer_pack_creator.exporter import PackExporter
+from choicer_voicer_pack_creator.media import AudioInfo, DecodedAudioStats
 from choicer_voicer_pack_creator.models import PackProject, Segment
 from choicer_voicer_pack_creator.operations import (
     OperationCancelled,
@@ -91,6 +98,171 @@ def _assert_unchanged(parent: Path) -> None:
     assert (parent / "Pack" / "old.txt").read_bytes() == b"previous pack"
     assert (parent / "Pack.zip").read_bytes() == b"previous zip"
     assert set(path.name for path in parent.iterdir()) == {"Pack", "Pack.zip"}
+
+
+@pytest.fixture
+def resource_wait_export(tmp_path, monkeypatch):
+    exporter, project, parent = _fixture(tmp_path)
+    state = SimpleNamespace(phase="", now=0.0, recovered=set(), waits=[], reports=[], decoded=[])
+    png_signature = b"\x89PNG\r\n\x1a\n"
+    Path(project.segments[0].image_path).write_bytes(png_signature + b"source image")
+
+    class ValidatingMedia(FakeMedia):
+        def probe(self, path):
+            if path.name == "dub_video.ogv":
+                state.phase = (
+                    "published-validation" if path.parent == parent / "Pack"
+                    else "staged-validation"
+                )
+            return super().probe(path)
+
+        def make_icon(self, _source, destination, *, is_video):
+            destination.write_bytes(png_signature + b"icon")
+
+        def probe_audio(self, path):
+            if path.name == "_backing_track.mp3":
+                return AudioInfo(3, "mp3", 44100, 2)
+            return AudioInfo(1, "mp3", 48000, 1)
+
+        def probe_image_dimensions(self, path):
+            return (660, 364) if path.name == "icon.png" else (640, 360)
+
+        def decode(self, path):
+            assert current_ffmpeg_threads() is not None
+            check_cancelled()
+            state.decoded.append((state.phase, path.name))
+
+        def validated_audio_stats(self, path):
+            self.decode(path)
+            return DecodedAudioStats(1, 0, 0, True)
+
+    def wait(seconds):
+        state.waits.append((state.phase, seconds))
+        state.now += seconds
+        state.recovered.add(state.phase)
+
+    budget = ExportResourceBudget(
+        lambda: ResourceSnapshot(
+            4 * 1024**3 if state.phase in state.recovered else 0,
+            16 * 1024**3, 16, 16.0, None,
+        ),
+        clock=lambda: state.now, wait=wait,
+    )
+    original_report = exporter_module.report
+
+    def observe_report(message, fraction=None):
+        state.reports.append(message)
+        original_report(message, fraction)
+
+    media = ValidatingMedia()
+    exporter.media = media
+    exporter.validator = PackValidator(media)
+    monkeypatch.setattr(validation_module, "export_resources", budget)
+    monkeypatch.setattr(exporter_module, "report", observe_report)
+    return exporter, project, parent, state, budget
+
+
+@pytest.mark.parametrize("callbacks", ["none", "export", "operation", "both"])
+def test_export_resource_wait_recovers_through_both_complete_validation_passes(
+    resource_wait_export, callbacks,
+):
+    exporter, project, parent, state, budget = resource_wait_export
+    export_updates, operation_updates = [], []
+    with operation_scope(
+        progress=(
+            lambda message, _fraction: operation_updates.append(message)
+        ) if callbacks in {"operation", "both"} else None,
+    ):
+        result = exporter.export(
+            project, parent,
+            progress=export_updates.append if callbacks in {"export", "both"} else None,
+        )
+    assert result.validation["status"] == "passed"
+    assert result.validation["clip_count"] == 1 and result.validation["file_count"] == 7
+    assert state.waits == [("staged-validation", 0.1), ("published-validation", 0.1)]
+    names = ["dub_video.ogv", "icon.png", "_backing_track.mp3", "001_Speaker.mp3", "001_Speaker.png"]
+    assert state.decoded == [
+        (phase, name) for phase in ("staged-validation", "published-validation") for name in names
+    ]
+    waits = [message for message in state.reports if "Waiting for export resources:" in message]
+    assert len(waits) == 2
+    assert waits[0].startswith("Validating staged pack: Waiting")
+    assert waits[1].startswith("Revalidating published pack: Waiting")
+    if callbacks in {"operation", "both"}:
+        assert [message for message in operation_updates if "Waiting" in message] == waits
+    if callbacks in {"export", "both"}:
+        assert [update.message for update in export_updates if "Waiting" in update.message] == waits
+    assert result.zip_path and zipfile.is_zipfile(result.zip_path)
+    assert not (result.pack_path / "old.txt").exists()
+    assert not budget._held and current_ffmpeg_threads() is None
+
+
+@pytest.mark.parametrize("phase", ["staged-validation", "published-validation"])
+@pytest.mark.parametrize("callback", ["export", "operation"])
+def test_export_resource_wait_cancellation_preserves_publication_deferral(
+    resource_wait_export, phase, callback,
+):
+    exporter, project, parent, state, budget = resource_wait_export
+    stopped = threading.Event()
+    committed = threading.Event()
+
+    def progress(message):
+        if state.phase == phase and "Waiting for export resources:" in message:
+            stopped.set()
+
+    def run():
+        with operation_scope(
+            progress=(lambda message, _fraction: progress(message)) if callback == "operation" else None,
+            committed=committed.set,
+        ):
+            return exporter.export(
+                project, parent, cancelled=stopped.is_set,
+                progress=(lambda update: progress(update.message)) if callback == "export" else None,
+            )
+
+    if phase == "staged-validation":
+        with pytest.raises(OperationCancelled):
+            run()
+        _assert_unchanged(parent)
+        assert not state.waits and not state.decoded and not committed.is_set()
+    else:
+        result = run()
+        assert result.validation["status"] == "passed"
+        assert committed.is_set()
+        assert state.waits == [("staged-validation", 0.1), ("published-validation", 0.1)]
+        assert len(state.decoded) == 10
+        assert not (result.pack_path / "old.txt").exists()
+    assert stopped.is_set()
+    assert not budget._held and current_ffmpeg_threads() is None
+
+
+@pytest.mark.parametrize("phase", ["staged-validation", "published-validation"])
+@pytest.mark.parametrize("callback", ["export", "operation"])
+def test_export_resource_wait_callback_failure_is_preserved_and_rolls_back(
+    resource_wait_export, phase, callback,
+):
+    exporter, project, parent, state, budget = resource_wait_export
+    stopped = threading.Event()
+    error = ValueError("caller progress failed")
+
+    def progress(message):
+        if state.phase == phase and "Waiting for export resources:" in message:
+            stopped.set()
+            raise error
+
+    with (
+        operation_scope(
+            progress=(lambda message, _fraction: progress(message)) if callback == "operation" else None,
+        ),
+        pytest.raises(ValueError, match="caller progress failed") as raised,
+    ):
+        exporter.export(
+            project, parent, cancelled=stopped.is_set,
+            progress=(lambda update: progress(update.message)) if callback == "export" else None,
+        )
+    assert raised.value is error and stopped.is_set()
+    _assert_unchanged(parent)
+    assert not budget._held and current_ffmpeg_threads() is None
 
 
 @pytest.mark.parametrize("create_zip", [False, True])

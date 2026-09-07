@@ -4,6 +4,7 @@ import json
 import zipfile
 from collections.abc import Callable
 from contextlib import contextmanager
+from contextvars import copy_context
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,11 @@ class PackValidator:
 
         @contextmanager
         def admit(estimate: WorkEstimate):
-            with operation_scope(progress=lambda message, _fraction: notify(message)):
+            # Exporter progress reports again; forward outside this admission's handler.
+            progress_context = copy_context()
+            with operation_scope(
+                progress=lambda message, _fraction: progress_context.run(notify, message),
+            ):
                 admission = export_resources.acquire(estimate)
             with admission:
                 yield
