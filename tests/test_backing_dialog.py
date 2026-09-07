@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QSettings, Qt, QTimer
-from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QDialog, QFileDialog, QLabel, QMessageBox
 
 from choicer_voicer_pack_creator.jobs import JobManager
 from choicer_voicer_pack_creator.models import PackProject, Segment, SourceCaption
@@ -244,6 +244,11 @@ def test_dismissed_dialog_does_not_start_scheduled_worker(qtbot, tmp_path, monke
     )
     dialog = backing_dialog.BackingDialog(SimpleNamespace(), tmp_path / "video.mp4", tmp_path)
     qtbot.addWidget(dialog)
+    labels = [label.text() for label in dialog.findChildren(QLabel)]
+    assert (
+        "Separation may leave voices or remove some effects. Audio stays on this computer."
+    ) in labels
+    assert not any("captions, speakers, timings" in text for text in labels)
     dialog.reject()
     qtbot.wait(20)
     assert dialog.worker is None

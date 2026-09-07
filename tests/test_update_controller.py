@@ -430,6 +430,12 @@ def test_declining_available_update_never_downloads(
     qtbot.waitUntil(lambda: "Update available" in dialogs.titles)
 
     assert dialogs.titles == ["Update available"]
+    text = dialogs.calls[0][2]
+    assert release.version in text and "(prerelease)" in text
+    assert update_controller.__version__ in text
+    assert text.endswith("Download the update (2.0 MiB)?")
+    assert "Unsaved changes" not in text
+    assert "extra files" not in text
     assert window.updater.worker is None
     assert window.updater.pending_release is None
     assert window.updater.downloaded is None
@@ -480,6 +486,9 @@ def test_verified_download_restart_refusal_removes_staging_not_installed_files(
     qtbot.waitUntil(lambda: "Update ready" in dialogs.titles)
 
     assert dialogs.titles == ["Update available", "Update ready"]
+    assert dialogs.calls[1][2] == (
+        f"Version {release.version} is downloaded and verified. Restart and update now?"
+    )
     assert all(thread == window.thread() for thread in dialogs.threads)
     assert not prepared.directory.exists()
     assert (prepared.target / "installed.txt").read_text(encoding="utf-8") == "original application"

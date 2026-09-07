@@ -101,10 +101,8 @@ class YouTubeConflictDialog(QDialog):
         self.resize(650, 250)
         layout = QVBoxLayout(self)
         intro = QLabel(
-            "An import of this video already exists. Use its complete video and fetch the "
-            "title/captions again, or download a replacement. Overwrite replaces source download "
-            "files only after the new video is ready; other files are kept. "
-            "Projects using the replaced source files may be affected."
+            "Use Existing refreshes the title and captions without downloading video. "
+            "Overwrite replaces source download files and may affect projects using them."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -171,17 +169,18 @@ class YouTubeDialog(QDialog):
         self.resize(650, 300)
         layout = QVBoxLayout(self)
         intro = QLabel(
-            "Download one public YouTube video that you own or have permission to use. "
-            "Available creator or automatic captions load first; local Whisper then runs "
-            "automatically as a separate transcript (first-time model downloads ask permission). "
-            "Review both and choose either YouTube's text and timings or Whisper's. "
-            "No sign-in, cookies, or access-restriction bypass is used."
+            "YouTube captions and a separate local Whisper transcript are prepared automatically. "
+            "Model downloads require permission."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
         form = QFormLayout()
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("https://www.youtube.com/watch?v=...")
+        self.url_edit.setToolTip(
+            "Public videos you own or have permission to use only. "
+            "Playlists, live streams, and restricted videos are not supported."
+        )
         form.addRow("Video URL", self.url_edit)
         self.default_folder = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.DownloadLocation
@@ -206,11 +205,7 @@ class YouTubeDialog(QDialog):
         )
         form.addRow("Caption language", self.language_combo)
         layout.addLayout(form)
-        note = QLabel(
-            "If this video was imported before, choose whether to use its existing video "
-            "or explicitly overwrite it. New videos get a separate media folder. "
-            "Keep this folder with your saved project. Playlists and live streams are not imported."
-        )
+        note = QLabel("Keep downloaded media with the saved project.")
         note.setWordWrap(True)
         layout.addWidget(note)
         self.progress_label = QLabel("Ready")

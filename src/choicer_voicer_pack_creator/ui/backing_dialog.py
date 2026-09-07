@@ -110,10 +110,7 @@ class BackingDialog(QDialog):
         self.setMinimumWidth(540)
         layout = QVBoxLayout(self)
         note = QLabel(
-            "Separate music and effects from the original dialogue, locally on your CPU. "
-            "No audio is uploaded. Your captions, speakers, timings and prompt files will not change.\n\n"
-            "Separation can take several minutes and may leave some voice bleed or remove "
-            "some effects. Listen to the backing before sharing the pack."
+            "Separation may leave voices or remove some effects. Audio stays on this computer."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -203,8 +200,7 @@ class BackingDialog(QDialog):
     def _failed(self, message: str) -> None:
         self._outcome = "failed"
         self.progress_label.setText(
-            f"{message}\n\nYour existing project and backing are unchanged. "
-            "Retry here or use Tools > Generate Backing Track later."
+            f"{message}\n\nExisting backing is unchanged."
         )
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)

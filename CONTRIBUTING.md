@@ -24,6 +24,8 @@ completion. Never modify another active session's checkout or work directly on `
   existing menus. If background work needs a visible indicator, use short text in the existing
   status bar and open details from there; hide it when no work or attention is pending. Do not
   automatically open detail dialogs or take space away from the video, timeline, or segment editor.
+- Prefer self-explanatory labels over persistent help paragraphs. Keep decision-relevant warnings
+  and errors visible; put non-obvious details in contextual tooltips or on-demand help.
 - Preserve imported media unless a user explicitly replaces or regenerates it.
 - Stage exports completely before replacing an existing destination.
 - Keep the project JSON as the editable source of truth; generated pack files are outputs.
