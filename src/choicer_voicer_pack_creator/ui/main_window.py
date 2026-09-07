@@ -998,6 +998,9 @@ class ProjectEditor(QWidget):
     def _write_recovery_snapshot(self) -> None:
         if not self.recovery_store or not self.dirty:
             return
+        if self._range_edit_record is not None:
+            self._recovery_timer.start()
+            return
         snapshot, path, store = self.session.snapshot(), self.project_path, self.recovery_store
         job = self.workspace.job_manager.submit(
             self.session.id, "recovery", "Saving recovery",
@@ -1990,12 +1993,12 @@ class ProjectEditor(QWidget):
         segment.start, segment.end = start, end
         self.video_widget.set_segments(self.project.segments)
         self.selected_segment_id = segment_id
-        self._set_dirty(True)
+        self._set_dirty(True, segment=segment)
         row = self._row_for_segment(segment_id)
         if row >= 0:
             self.segment_table.item(row, 1).setText(format_time(start))
             self.segment_table.item(row, 2).setText(format_time(end))
-        self._refresh_validation_label()
+        self._validation_timer.start()
 
     def _timeline_range_edit_finished(
         self,
@@ -2103,7 +2106,7 @@ class ProjectEditor(QWidget):
                 )
 
         self.project.sort_segments()
-        self._set_dirty(True)
+        self._set_dirty(True, segment=segment)
         self._refresh_table(segment.id)
         self.select_segment(segment.id)
         if segment.audio_mode == "video":
@@ -2166,7 +2169,7 @@ class ProjectEditor(QWidget):
         if selected_id is None:
             self._table_selection_changed()
         self._update_combine_action()
-        self._refresh_validation_label()
+        self._refresh_validation_label(timeline_warnings=timeline_warnings)
 
     def _apply_timeline_review_highlights(self, warnings: list[TimelineOverlap]) -> None:
         warning_ids = {
@@ -2954,10 +2957,17 @@ class ProjectEditor(QWidget):
         if loading:
             self.action_combine.setEnabled(False)
 
-    def _refresh_validation_label(self, *, refresh_highlights: bool = False) -> None:
+    def _refresh_validation_label(
+        self, *, refresh_highlights: bool = False,
+        timeline_warnings: list[TimelineOverlap] | None = None,
+    ) -> None:
         self._validation_timer.stop()
+        if self._range_edit_record is not None:
+            self._validation_timer.start()
+            return
         errors = self.project.validate()
-        timeline_warnings = audit_timeline_overlaps(self.project.segments)
+        if timeline_warnings is None:
+            timeline_warnings = audit_timeline_overlaps(self.project.segments)
         if refresh_highlights:
             self._apply_timeline_review_highlights(timeline_warnings)
         warning_details = self._timeline_review_details(timeline_warnings)

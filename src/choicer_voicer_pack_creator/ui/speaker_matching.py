@@ -433,6 +433,10 @@ class SpeakerMatchingControls(QWidget):
             or self._paused or self._pending_consent
         ):
             return
+        if self.editor._range_edit_record is not None:
+            # A pause with the mouse held down is not a committed audio range.
+            self._timer.start(900)
+            return
         if self.worker is not None or self._publication is not None:
             self._pending = True
             return
