@@ -297,7 +297,8 @@ segment editing and preview commands. **Tools > Tasks** and **Help** apply to th
 **Help → Updates** groups update commands and preferences, and **Help → Diagnostics** groups log
 collection commands; MCP help and About remain directly under Help.
 
-Each tab has a compact **Save / Export / Analyze** toolbar. Its commands and the
+Each tab has a compact **Save / Export / Analyze** toolbar above the video in the left pane,
+leaving the full workspace height available to the right-side panels. Its commands and the
 project-related menus always target the active tab. Primary actions pair icons with short labels;
 secondary segment, file-picker, and tab-close controls use icons with descriptive tooltips.
 Hover over a command for its purpose and available shortcut. **File → Close Project** or **Ctrl+W**
@@ -305,6 +306,8 @@ closes the active project, with the same unsaved-change and running-task prompts
 button. The Windows close button or **Alt+F4** exits the application, prompting to save/discard/cancel
 unsaved projects and to stop active tasks before exiting.
 Backing generation remains in Pack Details and the Project menu.
+The right-side sections use the same thin dividers as the video/timeline panes; drag them to
+resize sections, or click a section header to collapse it.
 
 The In/Out fields, segment actions, and timeline zoom share one row below the waveform;
 actions wrap to a second row only when the video pane is too narrow.

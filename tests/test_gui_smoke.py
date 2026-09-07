@@ -310,7 +310,7 @@ def test_inspector_sections_resize_collapse_and_restore(qtbot, tmp_path: Path) -
     assert after_collapse[1] > before_collapse[1]
     assert after_collapse[1] > after_collapse[0]
     assert window.editor_splitter.handleWidth() == 1
-    assert window.inspector_splitter.handleWidth() == 9
+    assert window.inspector_splitter.handleWidth() == 1
     window._save_layout_state()
     window.close()
 

@@ -87,7 +87,7 @@ class EditorLayout:
             ),
             (
                 editor.inspector_splitter, self.inspector_state, DEFAULT_INSPECTOR_SIZES,
-                "layout/inspectorSplitterV1", 9,
+                "layout/inspectorSplitterV1", 1,
             ),
         ):
             if defaults is None:
