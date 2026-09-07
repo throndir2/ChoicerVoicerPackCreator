@@ -72,13 +72,13 @@ def send_drop(target, mime, actions=Qt.DropAction.CopyAction | Qt.DropAction.Mov
     return events
 
 
-@pytest.mark.parametrize("width", [1050, 1500])
+@pytest.mark.parametrize("width,height", [(1050, 680), (1500, 950)])
 @pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
 def test_workspace_menu_precedes_tabs_and_project_toolbar(
-    workspace, qtbot, width, stylesheet,
+    workspace, qtbot, width, height, stylesheet,
 ):
     workspace.setStyleSheet(stylesheet)
-    workspace.resize(width, 950)
+    workspace.resize(width, height)
     menu = workspace.menuBar()
     tabs = workspace.tabs.tabBar()
     editor = workspace.active_editor
@@ -93,9 +93,9 @@ def test_workspace_menu_precedes_tabs_and_project_toolbar(
     assert menu.mapTo(workspace, QPoint(0, menu.height())).y() <= (
         tabs.mapTo(workspace, QPoint(0, 0)).y()
     )
-    assert tabs.mapTo(workspace, QPoint(0, tabs.height())).y() <= (
-        toolbar.mapTo(workspace, QPoint(0, 0)).y()
-    )
+    tabs_bottom = tabs.mapTo(workspace, QPoint(0, tabs.height())).y()
+    toolbar_top = toolbar.mapTo(workspace, QPoint(0, 0)).y()
+    assert 0 <= toolbar_top - tabs_bottom <= 8
     left = editor.editor_splitter.widget(0)
     assert left.layout().itemAt(0).widget() is toolbar
     assert left.layout().itemAt(1).widget() is editor.playback_splitter
@@ -121,6 +121,9 @@ def test_workspace_menu_precedes_tabs_and_project_toolbar(
     ]
     assert all(toolbar.widgetForAction(action).isVisible() for action in actions)
     assert toolbar.widgetForAction(actions[-1]).geometry().right() < toolbar.width()
+    save_button = toolbar.widgetForAction(workspace.action_save)
+    assert 0 <= save_button.mapTo(workspace, QPoint(0, 0)).y() - tabs_bottom <= 12
+    assert save_button.height() >= save_button.sizeHint().height()
     assert workspace.tools_menu.actions() == [
         workspace.tasks_window.show_action, workspace.action_processing,
     ]

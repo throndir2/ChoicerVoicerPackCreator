@@ -505,7 +505,7 @@ class ProjectEditor(QWidget):
         root.setObjectName("projectEditorContent")
         root.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(10, 10, 10, 8)
+        root_layout.setContentsMargins(10, 4, 10, 8)
         root_layout.setSpacing(8)
         self.setCentralWidget(root)
 
@@ -522,7 +522,7 @@ class ProjectEditor(QWidget):
         left.setFrameShape(QFrame.Shape.StyledPanel)
         left.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(7, 7, 7, 7)
+        left_layout.setContentsMargins(7, 0, 7, 7)
         left_layout.setSpacing(7)
         left_layout.addWidget(toolbar)
 
