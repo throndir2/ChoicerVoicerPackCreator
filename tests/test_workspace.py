@@ -367,7 +367,7 @@ def test_processing_uses_existing_status_bar_and_on_demand_popup(workspace, qtbo
     editor.action_processing.trigger()
     assert editor.processing_dialog.isVisible()
     assert editor.processing_dialog.rows["transcript"][0].text() == "Ready"
-    assert editor.processing_dialog.rows["voices"][3].text() == "Retry"
+    assert editor.processing_dialog.rows["voices"][3].text() == "Resume"
     workspace._hide_editor(editor, retain=True)
     assert not editor.processing_dialog.isVisible()
 
