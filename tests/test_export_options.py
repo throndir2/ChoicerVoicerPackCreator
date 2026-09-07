@@ -40,6 +40,15 @@ def test_options_open_with_current_profile_without_mutation(qtbot, height, fps, 
     assert dialog.preserve_note.text() == ""
 
 
+def test_imported_video_tooltip_gives_plain_language_recommendation(qtbot):
+    dialog = ExportOptionsDialog(PackProject())
+    qtbot.addWidget(dialog)
+    assert dialog.preserve_check.toolTip() == (
+        "Recommended: check this for faster exports without losing video quality "
+        "when the imported video is already game-ready."
+    )
+
+
 def test_fast_higher_quality_custom_and_padding_controls(qtbot):
     project = PackProject()
     dialog = ExportOptionsDialog(project)
