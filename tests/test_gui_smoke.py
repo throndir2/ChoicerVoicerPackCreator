@@ -81,9 +81,37 @@ def test_main_window_starts_with_empty_editor(qtbot) -> None:
     assert window.project.video_height == 480
     assert window.project.video_fps == 30
     assert window.segment_table.rowCount() == 0
+    assert window.segment_audio_help.text() == "No segment selected."
     assert "Choicer Voicer Pack Creator" in window.windowTitle()
     assert window.updater.check_action in window.updates_menu.actions()
     assert window.action_logs in window.diagnostics_menu.actions()
+    window.dirty = False
+    window.close()
+
+
+def test_segment_help_only_shows_empty_states_and_preserved_audio(qtbot, tmp_path) -> None:
+    window = MainWindow(UnusedMedia())  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    video_segment = Segment(1, 2, "Video line", ["Speaker"])
+    file_segment = Segment(
+        3, 4, "Recorded line", ["Speaker"], audio_mode="file",
+        audio_path=str(tmp_path / "prompt.mp3"),
+    )
+    window._set_project(PackProject(
+        video_duration=10, auto_speaker_matching=False, segments=[video_segment, file_segment],
+    ), None, mark_dirty=False)
+    for segment in (video_segment, file_segment, video_segment):
+        window.select_segment(segment.id)
+        if segment.audio_mode == "file":
+            assert not window.segment_audio_help.isHidden()
+            assert window.segment_audio_help.text() == "Timing edits do not change this audio file."
+            assert "regenerate" in window.audio_mode_combo.toolTip()
+        else:
+            assert window.segment_audio_help.isHidden()
+            assert window.segment_audio_help.text() == ""
+    window._set_project(PackProject(), None, mark_dirty=False)
+    assert not window.segment_audio_help.isHidden()
+    assert window.segment_audio_help.text() == "No segment selected."
     window.dirty = False
     window.close()
 

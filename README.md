@@ -371,7 +371,7 @@ creation (when requested), final validation, and cleanup. Estimates can move bac
 change; an unmeasured step that outlasts its estimate shows **re-estimating** instead of a false
 zero-second countdown. Only a successful export reaches 100%. The current-step bar shows measured
 video or completed-prompt progress separately and stays indeterminate for operations without measurable progress.
-The details window is nonmodal and can be closed while the export continues in the background. It retains
+The nonmodal details window has a **Hide** button while export runs and **Close** when it finishes. It retains
 output locations, cleanup notes, and failures for later inspection. Export uses a snapshot; edits
 made during export affect the next export, not the one already running.
 
@@ -707,6 +707,10 @@ file, or Still image to relink the missing asset.
 With **Auto-fill matching speakers in the background** enabled in the Segments panel, finish
 typing a speaker name (Enter or move focus out of the field) to compare that voice with eligible
 unassigned segments. You can keep editing captions, timings, and other projects while it runs.
+Rapid name edits are coalesced with a short delay before comparison; **Match now** skips that
+delay. Typing updates only the edited name and defers whole-project validation until a brief
+pause or commit. Committing a name and applying automatic matches update existing table cells
+without rebuilding the segment list or disturbing its selection and scroll position.
 For the best reference, name a clear, single-speaker dialogue line of about 2 seconds or more,
 rather than an isolated name or reaction. Naming other characters helps reject competing voices;
 you can also manually name more clean lines for the same character to strengthen its reference.

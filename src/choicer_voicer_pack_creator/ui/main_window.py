@@ -256,6 +256,10 @@ class ProjectEditor(QWidget):
         self._recovery_timer.setSingleShot(True)
         self._recovery_timer.setInterval(750)
         self._recovery_timer.timeout.connect(self._write_recovery_snapshot)
+        self._validation_timer = QTimer(self)
+        self._validation_timer.setSingleShot(True)
+        self._validation_timer.setInterval(250)
+        self._validation_timer.timeout.connect(self._refresh_validation_label)
         self._layout_save_timer = QTimer(self)
         self._layout_save_timer.setSingleShot(True)
         self._layout_save_timer.setInterval(250)
@@ -745,6 +749,9 @@ class ProjectEditor(QWidget):
         self.audio_mode_combo = QComboBox()
         self.audio_mode_combo.addItem("Extract from source video (rebuilt on export)", "video")
         self.audio_mode_combo.addItem("Preserve / use an audio file", "file")
+        self.audio_mode_combo.setToolTip(
+            "Audio files stay unchanged unless you choose to regenerate them from video."
+        )
         self.audio_mode_combo.currentIndexChanged.connect(self._audio_mode_changed)
         editor_form.addRow("Prompt audio", self.audio_mode_combo)
         self.segment_audio_label, audio_row = self._path_controls(
@@ -759,7 +766,7 @@ class ProjectEditor(QWidget):
         self.segment_audio_help = QLabel()
         self.segment_audio_help.setObjectName("muted")
         self.segment_audio_help.setWordWrap(True)
-        editor_form.addRow("", self.segment_audio_help)
+        editor_form.addRow(self.segment_audio_help)
         self.selected_section.set_content(
             editor_content, scrollable=True, scrollbar_name="selectedSegmentScrollbar",
         )
@@ -2023,20 +2030,25 @@ class ProjectEditor(QWidget):
             for warning in warnings
             for segment_id in (warning.first_id, warning.second_id)
         }
-        if not warning_ids:
-            return
-        brush = QBrush(QColor("#49351d"))
+        warning_brush = QBrush(QColor("#49351d"))
+        note = "Potential timeline overlap — review against the source."
         for row in range(self.segment_table.rowCount()):
             identity = self.segment_table.item(row, 0)
-            if not identity or identity.data(Qt.ItemDataRole.UserRole) not in warning_ids:
+            if not identity:
+                continue
+            warned = identity.data(Qt.ItemDataRole.UserRole) in warning_ids
+            brush = warning_brush if warned else QBrush()
+            if not warned and identity.background() == brush:
                 continue
             for column in range(self.segment_table.columnCount()):
                 item = self.segment_table.item(row, column)
                 if item:
-                    item.setBackground(brush)
-                    existing = item.toolTip()
-                    note = "Potential timeline overlap — review against the source."
-                    item.setToolTip(f"{existing}\n\n{note}".strip())
+                    if item.background() != brush:
+                        item.setBackground(brush)
+                    existing = item.toolTip().removesuffix(note).rstrip()
+                    tooltip = f"{existing}\n\n{note}".strip() if warned else existing
+                    if item.toolTip() != tooltip:
+                        item.setToolTip(tooltip)
 
     def _timeline_review_details(self, warnings: list[TimelineOverlap]) -> list[str]:
         indexes = {segment.id: index for index, segment in enumerate(self.project.segments, 1)}
@@ -2106,6 +2118,7 @@ class ProjectEditor(QWidget):
                 widget.setEnabled(enabled)
             for action in (self.action_apply_range, self.action_split, self.action_preview):
                 action.setEnabled(enabled)
+            self.segment_audio_help.setVisible(segment is None or segment.audio_mode == "file")
             if not segment:
                 self.speakers_edit.clear()
                 self._sync_speaker_exclusion()
@@ -2114,10 +2127,7 @@ class ProjectEditor(QWidget):
                 self.segment_image_label.setText("Generated from video")
                 count = len(self._selected_table_ids())
                 self.segment_audio_help.setText(
-                    f"{count} segments selected. Use Combine to join their ranges and lines, "
-                    "or select a single segment to edit it."
-                    if count > 1 else
-                    "Select a segment to edit its range, prompt source, and still image."
+                    f"{count} segments selected." if count > 1 else "No segment selected."
                 )
                 return
             self.speakers_edit.setText(", ".join(segment.characters))
@@ -2134,14 +2144,10 @@ class ProjectEditor(QWidget):
             )
             self.segment_image_label.setToolTip(segment.image_path)
             if segment.audio_mode == "video":
-                self.segment_audio_help.setText(
-                    "Range edits automatically rebuild this prompt MP3 from the source video "
-                    "during the next export."
-                )
+                self.segment_audio_help.clear()
             else:
                 self.segment_audio_help.setText(
-                    "This audio file is preserved unchanged. Editing the range will ask whether "
-                    "to keep it or regenerate from the source video."
+                    "Timing edits do not change this audio file."
                 )
         finally:
             self._syncing = False
@@ -2156,9 +2162,8 @@ class ProjectEditor(QWidget):
             names = [item.strip() for item in self.speakers_edit.text().split(",") if item.strip()]
             segment.characters = list(dict.fromkeys(names))
             self.speaker_matching.name_typed(segment)
-            self._set_dirty(True)
-        self._refresh_table(segment.id)
-        self._sync_speaker_exclusion()
+            self._set_dirty(True, segment=segment)
+        self.speaker_matching._refresh_names([segment])
         self.speaker_matching.name_committed()
 
     def _selected_speakers_typed(self) -> None:
@@ -2180,8 +2185,8 @@ class ProjectEditor(QWidget):
         if row >= 0:
             update_speaker_item(self.segment_table.item(row, 3), segment)
         self.video_widget.set_segments(self.project.segments)
-        self._set_dirty(True)
-        self._refresh_validation_label()
+        self._set_dirty(True, segment=segment)
+        self._validation_timer.start()
         self._sync_speaker_exclusion()
 
     def _sync_speaker_exclusion(self) -> None:
@@ -2212,7 +2217,7 @@ class ProjectEditor(QWidget):
             update_speaker_item(self.segment_table.item(row, 3), segment)
         self._set_dirty(True)
         if not excluded:
-            self.speaker_matching.name_committed()
+            self.speaker_matching.name_committed(force=True)
 
     def _selected_caption_changed(self) -> None:
         if self._syncing:
@@ -2804,9 +2809,12 @@ class ProjectEditor(QWidget):
         if loading:
             self.action_combine.setEnabled(False)
 
-    def _refresh_validation_label(self) -> None:
+    def _refresh_validation_label(self, *, refresh_highlights: bool = False) -> None:
+        self._validation_timer.stop()
         errors = self.project.validate()
         timeline_warnings = audit_timeline_overlaps(self.project.segments)
+        if refresh_highlights:
+            self._apply_timeline_review_highlights(timeline_warnings)
         warning_details = self._timeline_review_details(timeline_warnings)
         self.validation_label.setToolTip("\n".join(warning_details))
         if not self.project.segments:
@@ -2835,7 +2843,7 @@ class ProjectEditor(QWidget):
             )
             self.validation_label.setStyleSheet("color: #66ddb0;")
 
-    def _set_dirty(self, dirty: bool) -> None:
+    def _set_dirty(self, dirty: bool, *, segment: Segment | None = None) -> None:
         self.dirty = dirty
         if dirty and self.recovery_store:
             self._discard_recovery_on_transition = False
@@ -2846,7 +2854,7 @@ class ProjectEditor(QWidget):
         )
         self.workspace.refresh_tabs()
         if hasattr(self, "speaker_matching"):
-            self.speaker_matching.changed()
+            self.speaker_matching.changed(segment=segment)
 
     def _maybe_save(self) -> bool:
         if self._automation_disconnected:

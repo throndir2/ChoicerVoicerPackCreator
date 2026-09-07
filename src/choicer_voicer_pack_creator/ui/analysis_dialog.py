@@ -382,25 +382,6 @@ class AnalysisDialog(QDialog):
         self.setMinimumSize(900 if self.source_choice else 760, 660 if self.source_choice else 520)
 
         layout = QVBoxLayout(self)
-        intro = QLabel(
-            (
-                "Choose YouTube or Whisper. YouTube rows appear only after processing. "
-                "Each draft keeps its own text and timings. "
-                "Click the Use button below either draft to add only its checked rows. "
-                "Closing saves all drafts without adding segments. "
-                if self.source_choice else
-                "Create editable starting points from local audio. Activity scanning is deterministic. "
-            ) +
-            f"Caption drafts include up to {SOURCE_HEAD_PADDING:.2f}s before and "
-            f"{SOURCE_TAIL_PADDING:.2f}s after of source audio, limited by neighboring rows. "
-            "Adjust In/Out when reviewing. "
-            "Whisper can suggest text and timestamps, but it can be wrong—especially for names, "
-            "stylized speech, music, and overlapping speakers. Token scores are not accuracy "
-            "guarantees, and no speaker is assigned automatically."
-        )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-
         options = QFormLayout()
         self.sensitivity_combo = QComboBox()
         self.sensitivity_combo.addItem("Balanced", "balanced")
@@ -698,6 +679,20 @@ class AnalysisDialog(QDialog):
         table.setHorizontalHeaderLabels(
             ["Use", "In", "Out", "Transcript", "Source", "Token score"]
         )
+        table.horizontalHeaderItem(1).setToolTip(
+            f"Caption drafts include up to {SOURCE_HEAD_PADDING:.2f}s of source audio "
+            "before the line, limited by neighboring rows."
+        )
+        table.horizontalHeaderItem(2).setToolTip(
+            f"Caption drafts include up to {SOURCE_TAIL_PADDING:.2f}s of source audio "
+            "after the line, limited by neighboring rows."
+        )
+        table.horizontalHeaderItem(3).setToolTip(
+            "Automatic transcripts can mishear names, stylized speech, music, and overlapping voices."
+        )
+        table.horizontalHeaderItem(5).setToolTip(
+            "Whisper token scores are not accuracy guarantees."
+        )
         table.setAlternatingRowColors(True)
         table.verticalHeader().hide()
         header = table.horizontalHeader()
@@ -852,7 +847,7 @@ class AnalysisDialog(QDialog):
             self._update_scan_button()
         if not checked:
             self.setup_label.setText(
-                "No model download. Suggestions will contain activity ranges with blank captions."
+                "Activity ranges only; no captions or model download."
             )
             return
         model_key = str(self.model_combo.currentData())
@@ -865,13 +860,12 @@ class AnalysisDialog(QDialog):
             installed = False
         if installed:
             self.setup_label.setText(
-                "The selected CPU runtime and model are already installed. Their checksums are "
-                "verified again before transcription. Audio and transcripts stay local."
+                "Model installed. Audio and transcripts stay local."
             )
             return
         self.setup_label.setText(
-            f"First use downloads a checksum-verified ~8 MiB CPU runtime and ~{size} MiB model. "
-            "They remain in per-user application data for later scans. Audio and transcripts stay local."
+            f"First use: ~8 MiB runtime + ~{size} MiB model download. "
+            "Audio and transcripts stay local."
         )
 
     def start_scan(self) -> None:

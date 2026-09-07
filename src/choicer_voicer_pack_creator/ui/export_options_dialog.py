@@ -95,9 +95,6 @@ class ExportOptionsDialog(QDialog):
         self.fps_spin.setToolTip("1-120 FPS. Higher frame rates take longer to encode.")
         form.addRow("&FPS", self.fps_spin)
         layout.addLayout(form)
-        self.quality_note = QLabel()
-        self.quality_note.setWordWrap(True)
-        layout.addWidget(self.quality_note)
 
         self.preserve_check = QCheckBox("Copy compatible imported OGV without re-encoding")
         self.preserve_check.setObjectName("exportPreserveVideo")
@@ -145,13 +142,6 @@ class ExportOptionsDialog(QDialog):
         self.advanced.collapsed_changed.connect(lambda _collapsed: self.adjustSize())
         layout.addWidget(self.advanced)
 
-        note = QLabel(
-            "Continue applies these settings to the project, then asks for an export location "
-            "(and backing music if needed). Save the project to keep changed settings for next "
-            "time. Cancel leaves settings unchanged. Source files are never modified."
-        )
-        note.setWordWrap(True)
-        layout.addWidget(note)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -179,14 +169,6 @@ class ExportOptionsDialog(QDialog):
             with QSignalBlocker(self.height_spin), QSignalBlocker(self.fps_spin):
                 self.height_spin.setValue(profile[0])
                 self.fps_spin.setValue(profile[1])
-        self.quality_note.setText(
-            "Fast: less encoding work and smaller output; best for quicker exports."
-            if self.quality_combo.currentIndex() == 0 else
-            "Higher quality: more picture detail, but slower encoding and larger output."
-            if self.quality_combo.currentIndex() == 1 else
-            "Custom: keep your current profile or choose a height and frame rate. "
-            "Larger sizes and higher frame rates take longer to encode."
-        )
         self._profile_changed()
 
     def _profile_changed(self) -> None:
@@ -198,12 +180,10 @@ class ExportOptionsDialog(QDialog):
             self.preserve_check.setEnabled(unchanged)
             self.preserve_check.setChecked(unchanged and self._preserve_preference)
         self.preserve_note.setText(
-            "Copying avoids video conversion only when the imported OGV is compatible and "
-            "its height/FPS match. Otherwise export converts using the selected quality."
-            if unchanged else
-            "Height/FPS changed: imported-video copying is off so the selected profile is used. "
-            "Restore the original height/FPS to make copying available again."
+            "" if unchanged else
+            "Height/FPS changed: restore the original profile to copy imported video."
         )
+        self.preserve_note.setVisible(not unchanged)
 
     def _preservation_changed(self, checked: bool) -> None:
         self._preserve_preference = checked

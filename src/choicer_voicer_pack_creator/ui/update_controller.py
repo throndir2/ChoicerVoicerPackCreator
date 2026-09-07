@@ -270,12 +270,7 @@ class UpdateController(QObject):
         if target is None:
             message += "Source installations cannot update in place. Open the release page?"
         else:
-            message += (
-                f"Download the update ({release.archive_size / 1024**2:.1f} MiB)?\n\n"
-                "You can keep working until it is ready to restart. Unsaved changes must be "
-                "saved or explicitly discarded before restarting. Projects, media, preferences, "
-                "and extra files are preserved. Locally modified app files are not overwritten."
-            )
+            message += f"Download the update ({release.archive_size / 1024**2:.1f} MiB)?"
         answer = QMessageBox.question(
             self.window, "Update available", message,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -312,8 +307,7 @@ class UpdateController(QObject):
             return
         answer = QMessageBox.question(
             self.window, "Update ready",
-            f"Version {prepared.version} is downloaded and verified. Restart and update now?\n\n"
-            "The usual Save / Discard / Cancel prompt will protect unsaved edits.",
+            f"Version {prepared.version} is downloaded and verified. Restart and update now?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

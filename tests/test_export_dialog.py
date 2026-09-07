@@ -98,7 +98,7 @@ def test_failure_keeps_last_operation_and_full_error_without_claiming_success(qt
     assert dialog.progress_bar.format() == "Failed"
     assert "rollback was incomplete" in dialog.details.toPlainText()
     assert "Last operation: Revalidating published pack: checking audio" in dialog.details.toPlainText()
-    assert "did not complete" in dialog.note_label.text()
+    assert dialog.progress_label.text() == "Export failed"
     qtbot.keyClick(dialog, Qt.Key.Key_Escape)
     assert not dialog.isVisible()
 
@@ -110,6 +110,34 @@ def test_missing_worker_result_is_reported_as_failure(qtbot, tmp_path):
     assert dialog.progress_bar.format() == "Failed"
     assert "stopped without returning a result" in dialog.details.toPlainText()
     assert dialog.close_button.isEnabled()
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancelled"])
+def test_background_export_button_hides_until_worker_finishes(qtbot, tmp_path, outcome):
+    dialog = ExportProgressDialog(tmp_path, background=True)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    assert dialog.close_button.text() == "Hide"
+    assert "Tools > Tasks" in dialog.close_button.toolTip()
+    qtbot.mouseClick(dialog.close_button, Qt.MouseButton.LeftButton)
+    assert not dialog.isVisible()
+    assert dialog._running
+    assert dialog._timer.isActive()
+
+    dialog.show()
+    if outcome == "success":
+        dialog.show_result(export_result(tmp_path))
+    elif outcome == "failure":
+        dialog.show_error("Destination unavailable")
+    else:
+        dialog.show_cancelled()
+    assert dialog.close_button.text() == "Hide"
+    dialog.worker_finished()
+    assert dialog.isVisible()
+    assert dialog.close_button.text() == "Close"
+    assert dialog.close_button.toolTip() == ""
+    qtbot.mouseClick(dialog.close_button, Qt.MouseButton.LeftButton)
+    assert not dialog.isVisible()
 
 
 @pytest.mark.parametrize("outcome", ["success", "failure", "invalid-result"])
