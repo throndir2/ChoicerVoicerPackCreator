@@ -25,6 +25,8 @@ _DRAWINGS = {
     "split": '<circle cx="5" cy="6" r="3"/><circle cx="5" cy="18" r="3"/>'
     '<path d="m7 8 13 13M7 16 20 3"/>',
     "combine": '<path d="M3 5h4l7 7h7m-4-4 4 4-4 4M3 19h4l7-7"/>',
+    "next-unassigned": '<circle cx="8" cy="6" r="3"/>'
+    '<path d="M2 20v-3a6 6 0 0 1 12 0v3m1-9h7m-3-3 3 3-3 3"/>',
     "duplicate": '<rect x="8" y="8" width="13" height="13" rx="2"/>'
     '<path d="M16 8V3H3v13h5"/>',
     "delete": '<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/>',
