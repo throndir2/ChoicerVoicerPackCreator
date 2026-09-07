@@ -731,7 +731,7 @@ def test_main_window_adds_suggestions_without_speakers_or_duplicates(
     assert segment.audio_mode == "video"
     assert window.selected_segment_id == segment.id
     assert window.dirty
-    assert window.statusBar().currentMessage() == "Added 1 review suggestion(s)."
+    assert "Latest notice: Added 1 review suggestion(s)." in window.statusBar().details_text()
     window.dirty = False
     window.close()
 

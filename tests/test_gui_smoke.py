@@ -1021,15 +1021,15 @@ def test_overlap_review_is_visible_but_does_not_block_export_readiness(
         mark_dirty=False,
     )
 
-    assert "Ready to export" in window.validation_label.text()
-    assert "1 potential overlap" in window.validation_label.text()
-    assert "overlap by 0.500s" in window.validation_label.toolTip()
+    assert "Ready to export" in window.processing_status.accessibleName()
+    assert "1 potential overlap" in window.processing_status.accessibleName()
+    assert "overlap by 0.500s" in window.processing_status.toolTip()
     assert window.segment_table.item(0, 0).background().color() == QColor("#49351d")
 
     second.start = 3
     window._refresh_table(second.id)
-    assert "potential overlap" not in window.validation_label.text()
-    assert window.validation_label.toolTip() == ""
+    assert "potential overlap" not in window.processing_status.accessibleName()
+    assert "overlap by" not in window.processing_status.toolTip()
     window.dirty = False
     window.close()
 

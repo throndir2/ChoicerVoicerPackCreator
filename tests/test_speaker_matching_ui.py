@@ -194,14 +194,15 @@ def test_matching_failure_remains_visible_and_can_be_retried_in_processing(match
     qtbot.waitUntil(lambda: matching.controls.worker is None)
     assert "Voice model unavailable" in editor.processing.group_state("voices").message
     assert not editor.processing_status.isHidden()
-    assert "attention" in editor.processing_status.text()
+    assert "attention" in editor.processing_status.accessibleName()
     assert not editor.processing_dialog.isVisible()
     assert control.text() == "Retry"
     matching.state.match_error = ""
     start(matching, qtbot)
     finish(matching, qtbot)
     assert matching.target.characters == ["Alice"]
-    assert editor.processing_status.isHidden()
+    assert not editor.processing_status.isHidden()
+    assert "Background:" not in editor.processing_status.accessibleName()
 
 
 def test_background_matching_preserves_caption_cursor_selection_and_playhead(matching, qtbot):
@@ -336,7 +337,9 @@ def test_undo_preserves_manual_correction_and_excludes_restored_blanks(matching,
     assert matching.other.characters == []
     assert matching.other.speaker_assignment == "excluded"
     assert not matching.editor.action_clear_speaker_autofill.isEnabled()
-    assert matching.editor.statusBar().currentMessage() == "Cleared 1 auto-filled name(s)."
+    assert "Latest notice: Cleared 1 auto-filled name(s)." in (
+        matching.editor.statusBar().details_text()
+    )
 
 
 def test_only_manual_single_speaker_references_and_eligible_targets_are_submitted(matching, qtbot):
@@ -378,7 +381,9 @@ def test_matching_completion_reports_only_the_applied_count(matching, qtbot, cou
         matching.other.speaker_assignment = "excluded"
     start(matching, qtbot)
     finish(matching, qtbot)
-    assert matching.editor.statusBar().currentMessage() == f"Filled {count} speaker name(s)."
+    assert f"Latest notice: Filled {count} speaker name(s)." in (
+        matching.editor.statusBar().details_text()
+    )
     assert f"Filled {count} speaker name(s)." in matching.editor.processing.group_state("voices").message
     assert matching.target.characters == (["Alice"] if count else [])
     assert matching.other.characters == (["Alice"] if count == 2 else [])
@@ -520,7 +525,7 @@ def test_new_segment_drag_observes_only_its_state_and_validates_once_on_release(
     assert segment.audio_path == ""
     assert segment.source_range_known
     assert segment.characters == []
-    assert "overlap" in editor.validation_label.text()
+    assert "overlap" in editor.processing_status.accessibleName()
     row = editor._row_for_segment(segment.id)
     assert editor.segment_table.item(row, 0).background().style() != Qt.BrushStyle.NoBrush
 

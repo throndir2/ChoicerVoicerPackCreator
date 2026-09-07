@@ -246,10 +246,16 @@ or reference prepared local assets. The MCP tools also do not provide OCR or wik
 
 1. Choose **File → New → From Video**.
 2. Once the source is ready, start editing immediately. Transcript analysis, voice-fingerprint
-   preparation, and backing generation use the shared background queue. A small **Background**
-   link in the existing status bar appears while work is active or needs attention, and hides
-   when nothing is pending. Click it, or choose **Tools > Background Processing**, to open
-   progress, permission status, and cancel/retry controls in a separate nonmodal popup.
+   preparation, and backing generation use the shared background queue. One bottom status bar
+   shows current activity on the left and export readiness or issues on the right. Routine
+   confirmations such as **Project saved** disappear after five seconds without replacing
+   active work. The readiness link also indicates background work or notices needing attention;
+   those indicators clear when resolved, while the readiness summary stays visible.
+   Click it, or choose **Tools > Background Processing**, to see waveform readiness, transcript,
+   speaker and backing status, export requirements, and full save/notice details in a nonmodal
+   popup. Reported notices remain available until resolved or acknowledged; acknowledging them
+   does not dismiss export requirements or background failures. Processing retains its
+   permission status and cancel/retry controls.
    **Review** opens the transcript when you want it; the overview never opens automatically,
    and closing it does not stop processing.
    Voice preparation starts as dialogue ranges become available, before you name any characters.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import escape
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QAction
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QHBoxLayout,
     QLabel,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSizePolicy,
@@ -124,28 +126,69 @@ class ProcessingModel(QObject):
             parts.append(f"{attention} {'needs' if attention == 1 else 'need'} attention")
         return "Background: " + ", ".join(parts) if parts else ""
 
+    def has_active_work(self) -> bool:
+        return any(value.state in ACTIVE_STATES - {"consent"} for value in self._states.values())
+
 
 class ProcessingStatus(QLabel):
     def __init__(self, model: ProcessingModel, action: QAction, parent: QWidget) -> None:
         super().__init__(parent)
         self.setObjectName("processingStatus")
         self.model = model
+        self._validation = "No segments"
+        self._validation_details = ""
+        self._color = "#7f91a8"
+        self._issue_count = 0
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.setContentsMargins(0, 0, 6, 0)
         self.setTextFormat(Qt.TextFormat.RichText)
         self.setTextInteractionFlags(
             Qt.TextInteractionFlag.LinksAccessibleByMouse
             | Qt.TextInteractionFlag.LinksAccessibleByKeyboard
         )
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setToolTip("Open background processing details for this project.")
         self.linkActivated.connect(lambda _link: action.trigger())
         model.changed.connect(self.refresh)
         self.refresh()
 
+    def set_validation(self, summary: str, details: str, color: str) -> None:
+        self._validation, self._validation_details, self._color = summary, details, color
+        self.refresh()
+
+    def set_issue_count(self, count: int) -> None:
+        self._issue_count = count
+        self.refresh()
+
     def refresh(self) -> None:
-        summary = self.model.status_summary()
-        self.setText(f'<a href="details" style="color: #9eb0c6;">{summary}</a>')
+        parts = [self._validation]
+        background = self.model.status_summary()
+        if background:
+            parts.append(background)
+        if self._issue_count:
+            parts.append(f"{self._issue_count} notice(s) need attention")
+        summary = " · ".join(parts)
         self.setAccessibleName(summary)
-        self.setVisible(bool(summary))
+        self.setToolTip(
+            summary + "\n\n" + self._validation_details
+            + "\n\nOpen project status for readiness, progress, and notice details."
+        )
+        self._elide()
+
+    def _elide(self) -> None:
+        summary = self.accessibleName()
+        color = (
+            "#ffad7a" if self._issue_count or "attention" in self.model.status_summary()
+            else self._color
+        )
+        text = self.fontMetrics().elidedText(
+            summary, Qt.TextElideMode.ElideMiddle, max(0, self.contentsRect().width() - 4),
+        )
+        self.setText(f'<a href="details" style="color: {color};">{escape(text)}</a>')
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._elide()
 
 
 class _StatusLabel(QLabel):
@@ -171,13 +214,14 @@ class _StatusLabel(QLabel):
 
 class ProcessingDialog(QDialog):
     action_requested = Signal(str, str)
+    acknowledge_requested = Signal()
 
     def __init__(self, model: ProcessingModel, parent: QWidget) -> None:
         super().__init__(parent)
         self.setObjectName("processingDialog")
         self.setModal(False)
         self.setSizeGripEnabled(True)
-        self.resize(740, 330)
+        self.resize(740, 540)
         self.model = model
         layout = QVBoxLayout(self)
         self.rows: dict[str, tuple[QLabel, _StatusLabel, QProgressBar, QPushButton]] = {}
@@ -225,7 +269,20 @@ class ProcessingDialog(QDialog):
             content.addWidget(progress)
             layout.addWidget(card)
             self.rows[group] = state, message, progress, control
+        self.project_details = QPlainTextEdit(self)
+        self.project_details.setReadOnly(True)
+        self.project_details.setObjectName("projectStatusDetails")
+        self.project_details.setAccessibleName("Project readiness and notice details")
+        layout.addWidget(self.project_details, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        self.acknowledge_button = buttons.addButton(
+            "Acknowledge notices", QDialogButtonBox.ButtonRole.ActionRole,
+        )
+        self.acknowledge_button.setEnabled(False)
+        self.acknowledge_button.setToolTip(
+            "Dismiss reported notices. Export requirements and background failures remain visible."
+        )
+        self.acknowledge_button.clicked.connect(self.acknowledge_requested)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self.setToolTip(
@@ -237,10 +294,18 @@ class ProcessingDialog(QDialog):
         self.refresh()
 
     def show_processing(self) -> None:
-        self.setWindowTitle(f"Background processing - {self.model.session.project.title}")
+        self.setWindowTitle(f"Project status - {self.model.session.project.title}")
         self.show()
         self.raise_()
         self.activateWindow()
+
+    def set_project_details(self, text: str, *, has_notices: bool) -> None:
+        if self.project_details.toPlainText() != text:
+            scrollbar = self.project_details.verticalScrollBar()
+            position = scrollbar.value()
+            self.project_details.setPlainText(text)
+            scrollbar.setValue(position)
+        self.acknowledge_button.setEnabled(has_notices)
 
     def refresh(self) -> None:
         for group, (label, message, progress, control) in self.rows.items():

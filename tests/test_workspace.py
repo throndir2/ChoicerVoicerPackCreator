@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMenuBar,
     QMessageBox,
     QScrollArea,
+    QStatusBar,
     QTabBar,
     QToolButton,
 )
@@ -324,7 +325,7 @@ def test_processing_uses_existing_status_bar_and_on_demand_popup(workspace, qtbo
     assert editor._document_layout.itemAt(1).widget() is editor.editor_scroll
     assert editor._document_layout.itemAt(2).widget() is editor.statusBar()
     assert editor.statusBar().isAncestorOf(editor.processing_status)
-    assert not editor.processing_status.isVisible()
+    assert editor.processing_status.isVisible()
     assert not editor.processing_dialog.isVisible()
     geometry = editor.editor_scroll.geometry()
     status_height = editor.statusBar().height()
@@ -333,8 +334,10 @@ def test_processing_uses_existing_status_bar_and_on_demand_popup(workspace, qtbo
     editor.processing.set_status("speaker-preparation", "consent", "Permission needed.")
     editor.processing.set_status("backing", "queued", "Waiting.")
     qtbot.waitUntil(editor.processing_status.isVisible)
-    assert editor.processing_status.accessibleName() == "Background: 2 active, 1 needs attention"
-    assert editor.statusBar().currentMessage() == "Saved project"
+    assert editor.processing_status.accessibleName() == (
+        "No segments · Background: 2 active, 1 needs attention"
+    )
+    assert editor.statusBar().currentMessage() == "Background: 2 active, 1 needs attention"
     assert editor.statusBar().height() == status_height
     assert editor.editor_scroll.geometry() == geometry
     assert not editor.processing_dialog.isVisible()
@@ -352,7 +355,7 @@ def test_processing_uses_existing_status_bar_and_on_demand_popup(workspace, qtbo
     qtbot.waitUntil(editor.processing_dialog.isVisible)
     second = workspace.add_project(PackProject(title="Second"), dirty=False)
     assert not editor.processing_dialog.isVisible()
-    assert not second.processing_status.isVisible()
+    assert second.processing_status.isVisible()
     assert editor.action_processing not in workspace.tools_menu.actions()
     second.action_processing.trigger()
     assert second.processing_dialog.isVisible()
@@ -363,7 +366,8 @@ def test_processing_uses_existing_status_bar_and_on_demand_popup(workspace, qtbo
     editor.processing.set_status("analysis", "ready", "Draft ready.")
     editor.processing.set_status("speaker-preparation", "cancelled", "Paused.")
     editor.processing.set_status("backing", "ready", "Ready.")
-    assert not editor.processing_status.isVisible()
+    assert editor.processing_status.isVisible()
+    assert "Background:" not in editor.processing_status.accessibleName()
     editor.action_processing.trigger()
     assert editor.processing_dialog.isVisible()
     assert editor.processing_dialog.rows["transcript"][0].text() == "Ready"
@@ -391,8 +395,87 @@ def test_closing_processing_popup_does_not_cancel_job(workspace, qtbot):
     finally:
         release.set()
     qtbot.waitUntil(lambda: not job.record.active)
-    assert not editor.processing_status.isVisible()
+    assert editor.processing_status.isVisible()
+    assert "Background:" not in editor.processing_status.accessibleName()
     assert not editor.processing_dialog.isVisible()
+
+
+@pytest.mark.parametrize("width", [650, 1050, 1500])
+@pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
+def test_single_status_row_retains_readiness_at_narrow_widths(workspace, qtbot, width, stylesheet):
+    workspace.setStyleSheet(stylesheet)
+    workspace.resize(width, 680)
+    editor = workspace.active_editor
+    qtbot.waitUntil(lambda: editor._layout_restored)
+    bar = editor.statusBar()
+    readiness = editor.processing_status
+    assert editor.findChildren(QStatusBar) == [bar]
+    assert editor.editor_scroll.widget().layout().count() == 1
+    assert editor.editor_splitter.widget(1).layout().count() == 1
+    geometry = editor.editor_scroll.geometry()
+    height = bar.height()
+    editor._present_validation(["Caption required"] * 70, [])
+    editor.processing.set_status("analysis", "running", "Transcribing.")
+    bar.set_issue("waveform", "Waveform unavailable", details="Cannot decode audio")
+    bar.showMessage("Project saved", details="Saved revision 644 to " + "a-long-path" * 100)
+    qtbot.waitUntil(lambda: readiness.width() <= bar.width() // 2)
+    assert bar.height() == height
+    assert editor.editor_scroll.geometry() == geometry
+    assert bar.currentMessage() == "Background: 1 active"
+    assert readiness.isVisible()
+    assert readiness.alignment() & Qt.AlignmentFlag.AlignRight
+    assert readiness.geometry().right() < bar.width()
+    assert "notice(s) need attention" in readiness.accessibleName()
+    assert "Caption required" in readiness.toolTip()
+    assert bar.toolTip() == "Background: 1 active"
+    assert not editor.processing_dialog.isVisible()
+
+
+def test_readiness_details_keep_outputs_and_errors_after_confirmation_expires(workspace, qtbot):
+    editor = workspace.active_editor
+    bar = editor.statusBar()
+    editor.project.video_path = "source.mp4"
+    request = editor._waveform_request_id
+    editor._waveform_ready(request, "source.mp4", 5, [0.1, 0.5])
+    editor.processing.set_status("analysis", "ready", "Draft ready.")
+    bar.set_detail("save", "Saved revision 5 to project.cvpack.json")
+    bar.showMessage("Project saved", 20)
+    qtbot.waitUntil(lambda: bar.currentMessage() == "")
+    editor.action_processing.trigger()
+    dialog = editor.processing_dialog
+    assert dialog.project_details.isReadOnly()
+    assert "Waveform: Ready · 2 peaks" in dialog.project_details.toPlainText()
+    assert "Saved revision 5" in dialog.project_details.toPlainText()
+    assert "Export requirements:" in dialog.project_details.toPlainText()
+    assert dialog.rows["transcript"][0].text() == "Ready"
+    editor._waveform_failed(request, "source.mp4", "Cannot decode audio")
+    editor.processing.set_status("backing", "failed", "Backing model unavailable.")
+    bar.showMessage("Segment added.")
+    assert bar.currentMessage() == "Waveform unavailable"
+    assert "Cannot decode audio" in dialog.project_details.toPlainText()
+    dialog.acknowledge_button.click()
+    assert bar.issue_count == 0
+    assert "attention" in editor.processing_status.accessibleName()
+    assert dialog.rows["backing"][0].text() == "Failed"
+    assert "Export requirements:" in dialog.project_details.toPlainText()
+    assert not dialog.acknowledge_button.isEnabled()
+
+
+def test_source_change_rejects_stale_waveform_status(workspace):
+    editor = workspace.active_editor
+    bar = editor.statusBar()
+    editor.project.video_path = "old.mp4"
+    old_request = editor._waveform_request_id
+    editor._waveform_failed(old_request, "old.mp4", "Old failure")
+    assert bar.issue_count == 1
+    editor._set_project(PackProject(video_path="new.mp4"), None, mark_dirty=False)
+    editor._waveform_ready(old_request, "old.mp4", 10, [0.5])
+    editor._waveform_failed(old_request, "old.mp4", "Stale failure")
+    assert bar.issue_count == 0
+    assert "Old failure" not in bar.details_text()
+    assert "Stale failure" not in bar.details_text()
+    assert "Waveform: Ready" not in bar.details_text()
+    assert not bar.progress.isVisible()
 
 
 @pytest.mark.parametrize("control", ["tab-button", "shortcut", "menu"])
