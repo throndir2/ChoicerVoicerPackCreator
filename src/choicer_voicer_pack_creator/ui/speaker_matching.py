@@ -598,9 +598,16 @@ class SpeakerMatchingControls(QWidget):
         self._paused = True
         self.derived_work.pause("speakers")
         self.derived_work.pause("speaker-preparation")
+        failed_kind = (
+            "speaker-preparation" if self._request is not None and self._request.preparing
+            else "speakers"
+        )
+        other_kind = "speakers" if failed_kind == "speaker-preparation" else "speaker-preparation"
         self.editor.processing.set_status(
-            "speaker-preparation" if self._request is not None and self._request.preparing else "speakers",
-            "failed", message,
+            other_kind, "cancelled", "Voice work paused after failure; cached fingerprints are retained.",
+        )
+        self.editor.processing.set_status(
+            failed_kind, "failed", message,
         )
 
     def _finished(self, worker: SpeakerWorker, request: _Request) -> None:

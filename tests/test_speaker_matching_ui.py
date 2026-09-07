@@ -42,6 +42,7 @@ def matching(qtbot, tmp_path, monkeypatch):
         late_error="",
         ignore_cancel=False,
         hold_preparation=False,
+        preparation_error="",
         preparation_started=threading.Event(),
         preparation_release=threading.Event(),
     )
@@ -65,6 +66,8 @@ def matching(qtbot, tmp_path, monkeypatch):
                         raise SpeakerMatchingCancelled("Canceled")
             if state.needs_download and not allow_download:
                 raise SpeakerDownloadRequired("Permission required")
+            if state.preparation_error:
+                raise ValueError(state.preparation_error)
             return SpeakerPreparationResult(
                 sources, len(clips), 0, 0,
             )
@@ -992,6 +995,28 @@ def test_reference_rename_does_not_cancel_preparation_or_discard_cached_audio(ma
     finish(matching, qtbot)
     assert len(state.preparations) == 1
     assert matching.target.characters == ["Alicia"]
+
+
+def test_preparation_failure_after_reference_edit_exposes_retry_not_stale_queued(matching, qtbot):
+    controls, state = matching.controls, matching.state
+    state.hold_preparation = True
+    controls.retry()
+    qtbot.waitUntil(state.preparation_started.is_set)
+    matching.reference.characters = ["Alicia"]
+    matching.editor._set_dirty(True, segment=matching.reference)
+    state.preparation_error = "Preparation failed"
+    state.preparation_release.set()
+    qtbot.waitUntil(lambda: controls.worker is None and controls._paused)
+    model = matching.editor.processing
+    assert model.group_state("voices").state == "failed"
+    assert not model.has_active_work()
+    button = matching.editor.processing_dialog.rows["voices"][3]
+    assert button.text() == "Retry"
+    assert button.isEnabled()
+    state.preparation_error = ""
+    state.release.set()
+    button.click()
+    qtbot.waitUntil(lambda: matching.target.characters == ["Alicia"], timeout=10000)
 
 
 def test_editing_a_prepared_range_reuses_all_unrelated_fingerprints(matching, qtbot):
