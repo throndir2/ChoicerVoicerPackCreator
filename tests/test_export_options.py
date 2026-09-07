@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QSettings, Qt, QTimer
-from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QDialog, QFileDialog, QLabel, QMessageBox
 from shiboken6 import isValid
 
 from choicer_voicer_pack_creator.exporter import ExportResult, PackExporter
@@ -36,6 +36,8 @@ def test_options_open_with_current_profile_without_mutation(qtbot, height, fps, 
     assert dialog.options() == ExportOptions.from_project(project)
     assert project.to_dict() == before
     assert dialog.advanced.is_collapsed
+    assert dialog.preserve_note.isHidden()
+    assert dialog.preserve_note.text() == ""
 
 
 def test_fast_higher_quality_custom_and_padding_controls(qtbot):
@@ -46,7 +48,6 @@ def test_fast_higher_quality_custom_and_padding_controls(qtbot):
     assert dialog.options() == ExportOptions(480, 30, False, 0.15, 0.25)
     dialog.quality_combo.setCurrentIndex(1)
     assert dialog.options() == ExportOptions(720, 30, False, 0.15, 0.25)
-    assert "slower" in dialog.quality_note.text()
     dialog.quality_combo.setCurrentIndex(2)
     assert dialog.height_spin.isEnabled() and dialog.fps_spin.isEnabled()
     assert dialog.height_spin.value() == 720
@@ -77,12 +78,15 @@ def test_imported_copy_preference_clears_on_profile_change_and_returns_on_restor
         dialog.fps_spin.setValue(30)
     assert not dialog.preserve_check.isEnabled()
     assert not dialog.options().preserve_source_video
-    assert "copying is off" in dialog.preserve_note.text()
+    assert not dialog.preserve_note.isHidden()
+    assert "restore the original profile" in dialog.preserve_note.text()
     dialog.quality_combo.setCurrentIndex(2)
     dialog.height_spin.setValue(720)
     dialog.fps_spin.setValue(60)
     assert dialog.preserve_check.isEnabled()
     assert dialog.options().preserve_source_video
+    assert dialog.preserve_note.isHidden()
+    assert dialog.preserve_note.text() == ""
     dialog.preserve_check.setChecked(False)
     dialog.fps_spin.setValue(30)
     dialog.fps_spin.setValue(60)
@@ -99,6 +103,9 @@ def test_dialog_buttons_and_advanced_controls_are_visible_and_keyboard_accessibl
     qtbot.waitUntil(dialog.isVisible)
     assert dialog.isModal()
     assert "location" in dialog.continue_button.text()
+    assert not any(
+        label.isVisible() and label.wordWrap() for label in dialog.findChildren(QLabel)
+    )
     for widget in (dialog.quality_combo, dialog.continue_button, dialog.cancel_button):
         assert widget.isVisible() and not widget.visibleRegion().isEmpty()
     dialog.advanced.toggle_button.setFocus()

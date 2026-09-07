@@ -738,6 +738,9 @@ class ProjectEditor(QWidget):
         self.audio_mode_combo = QComboBox()
         self.audio_mode_combo.addItem("Extract from source video (rebuilt on export)", "video")
         self.audio_mode_combo.addItem("Preserve / use an audio file", "file")
+        self.audio_mode_combo.setToolTip(
+            "Audio files stay unchanged unless you choose to regenerate them from video."
+        )
         self.audio_mode_combo.currentIndexChanged.connect(self._audio_mode_changed)
         editor_form.addRow("Prompt audio", self.audio_mode_combo)
         self.segment_audio_label, audio_row = self._path_controls(
@@ -752,7 +755,7 @@ class ProjectEditor(QWidget):
         self.segment_audio_help = QLabel()
         self.segment_audio_help.setObjectName("muted")
         self.segment_audio_help.setWordWrap(True)
-        editor_form.addRow("", self.segment_audio_help)
+        editor_form.addRow(self.segment_audio_help)
         self.selected_section.set_content(
             editor_content, scrollable=True, scrollbar_name="selectedSegmentScrollbar",
         )
@@ -2083,6 +2086,7 @@ class ProjectEditor(QWidget):
                 widget.setEnabled(enabled)
             for action in (self.action_apply_range, self.action_split, self.action_preview):
                 action.setEnabled(enabled)
+            self.segment_audio_help.setVisible(segment is None or segment.audio_mode == "file")
             if not segment:
                 self.speakers_edit.clear()
                 self._sync_speaker_exclusion()
@@ -2091,10 +2095,7 @@ class ProjectEditor(QWidget):
                 self.segment_image_label.setText("Generated from video")
                 count = len(self._selected_table_ids())
                 self.segment_audio_help.setText(
-                    f"{count} segments selected. Use Combine to join their ranges and lines, "
-                    "or select a single segment to edit it."
-                    if count > 1 else
-                    "Select a segment to edit its range, prompt source, and still image."
+                    f"{count} segments selected." if count > 1 else "No segment selected."
                 )
                 return
             self.speakers_edit.setText(", ".join(segment.characters))
@@ -2111,14 +2112,10 @@ class ProjectEditor(QWidget):
             )
             self.segment_image_label.setToolTip(segment.image_path)
             if segment.audio_mode == "video":
-                self.segment_audio_help.setText(
-                    "Range edits automatically rebuild this prompt MP3 from the source video "
-                    "during the next export."
-                )
+                self.segment_audio_help.clear()
             else:
                 self.segment_audio_help.setText(
-                    "This audio file is preserved unchanged. Editing the range will ask whether "
-                    "to keep it or regenerate from the source video."
+                    "Timing edits do not change this audio file."
                 )
         finally:
             self._syncing = False

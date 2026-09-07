@@ -10,6 +10,7 @@ from PySide6.QtCore import QPoint, QSettings, Qt
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
+    QFormLayout,
     QLineEdit,
     QMessageBox,
     QSplitter,
@@ -24,6 +25,7 @@ from choicer_voicer_pack_creator.analysis import (
     AnalysisSuggestion,
     detect_hardware,
 )
+from choicer_voicer_pack_creator.captions import SOURCE_HEAD_PADDING, SOURCE_TAIL_PADDING
 from choicer_voicer_pack_creator.diagnostics import analysis_log_path
 from choicer_voicer_pack_creator.jobs import JobManager
 from choicer_voicer_pack_creator.models import (
@@ -613,6 +615,25 @@ def installed_whisper(tmp_path, monkeypatch):
         ),
     )
     return runtime
+
+
+@pytest.mark.parametrize("source_choice", [False, True])
+def test_analysis_help_is_contextual_instead_of_an_intro(
+    qtbot, tmp_path, installed_whisper, source_choice,
+):
+    dialog = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        source_captions=[SourceCaption(1, 2, "Original", "YouTube")] if source_choice else None,
+    )
+    qtbot.addWidget(dialog)
+    assert isinstance(dialog.layout().itemAt(0).layout(), QFormLayout)
+    for table in (dialog.local_table, dialog.refined_table):
+        assert f"{SOURCE_HEAD_PADDING:.2f}s" in table.horizontalHeaderItem(1).toolTip()
+        assert f"{SOURCE_TAIL_PADDING:.2f}s" in table.horizontalHeaderItem(2).toolTip()
+        assert "mishear names" in table.horizontalHeaderItem(3).toolTip()
+        assert "not accuracy guarantees" in table.horizontalHeaderItem(5).toolTip()
+    dialog.whisper_check.setChecked(True)
+    assert dialog.setup_label.text() == "Model installed. Audio and transcripts stay local."
 
 
 @pytest.mark.parametrize("stylesheet", ["", APP_STYLESHEET], ids=["native", "themed"])
