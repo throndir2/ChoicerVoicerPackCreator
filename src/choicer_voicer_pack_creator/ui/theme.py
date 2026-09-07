@@ -58,8 +58,9 @@ QToolButton#sectionToggle {
     border-bottom: 1px solid #233246;
     border-top-left-radius: 7px;
     border-top-right-radius: 7px;
-    padding: 7px 9px;
-    font-weight: 700;
+    padding: 2px 7px;
+    font-size: 9pt;
+    font-weight: 600;
     text-align: left;
 }
 QToolButton#sectionToggle:hover { background: #192a3d; color: #d9e7f6; }
@@ -133,13 +134,13 @@ QSplitter::handle:horizontal {
 QSplitter::handle:vertical:hover { border-top-color: #55cfe0; }
 QSplitter::handle:horizontal:hover { border-left-color: #55cfe0; }
 QSplitter#editorSplitter::handle, QSplitter#transcriptSplitter::handle,
-QSplitter#playbackSplitter::handle {
+QSplitter#playbackSplitter::handle, QSplitter#inspectorSplitter::handle {
     margin: 0;
     border: 0;
     background: #2b3d52;
 }
 QSplitter#editorSplitter::handle:hover, QSplitter#transcriptSplitter::handle:hover,
-QSplitter#playbackSplitter::handle:hover {
+QSplitter#playbackSplitter::handle:hover, QSplitter#inspectorSplitter::handle:hover {
     background: #55cfe0;
 }
 QLabel#muted { color: #7f91a8; }

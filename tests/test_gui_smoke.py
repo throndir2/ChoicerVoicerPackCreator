@@ -310,7 +310,7 @@ def test_inspector_sections_resize_collapse_and_restore(qtbot, tmp_path: Path) -
     assert after_collapse[1] > before_collapse[1]
     assert after_collapse[1] > after_collapse[0]
     assert window.editor_splitter.handleWidth() == 1
-    assert window.inspector_splitter.handleWidth() == 9
+    assert window.inspector_splitter.handleWidth() == 1
     window._save_layout_state()
     window.close()
 
@@ -458,11 +458,11 @@ def test_delete_shortcuts_use_existing_segment_confirmation(
     window._refresh_table()
     questions: list[str] = []
 
-    def confirm(_parent, _title, message):
-        questions.append(message)
+    def confirm(box):
+        questions.append(box.text())
         return QMessageBox.StandardButton.Yes if confirmed else QMessageBox.StandardButton.No
 
-    monkeypatch.setattr(QMessageBox, "question", confirm)
+    monkeypatch.setattr(QMessageBox, "exec", confirm)
     widget = getattr(window, widget_name)
     widget.setFocus()
     qtbot.waitUntil(widget.hasFocus)
@@ -491,7 +491,7 @@ def test_backspace_remains_available_in_editors(
     window, _calls = playback_window
     selected = window.selected_segment()
     monkeypatch.setattr(
-        QMessageBox, "question", lambda *_args: pytest.fail("Editing must not delete a segment")
+        QMessageBox, "exec", lambda *_args: pytest.fail("Editing must not delete a segment")
     )
     editor = getattr(window, widget_name)
     editor.setFocus()
@@ -513,7 +513,7 @@ def test_backspace_does_not_delete_without_an_available_action(
     window, _calls = playback_window
     segments = list(window.project.segments)
     monkeypatch.setattr(
-        QMessageBox, "question", lambda *_args: pytest.fail("Deletion should be unavailable")
+        QMessageBox, "exec", lambda *_args: pytest.fail("Deletion should be unavailable")
     )
     if blocked == "no-selection":
         window.selected_segment_id = ""
@@ -536,11 +536,11 @@ def test_holding_backspace_does_not_repeat_confirmation(
     window, _calls = playback_window
     questions: list[str] = []
 
-    def decline(_parent, _title, message):
-        questions.append(message)
+    def decline(box):
+        questions.append(box.text())
         return QMessageBox.StandardButton.No
 
-    monkeypatch.setattr(QMessageBox, "question", decline)
+    monkeypatch.setattr(QMessageBox, "exec", decline)
     window.timeline.setFocus()
     qtbot.waitUntil(window.timeline.hasFocus)
 
@@ -567,7 +567,7 @@ def test_backspace_in_a_dialog_does_not_delete_a_segment(
     window, _calls = playback_window
     selected = window.selected_segment()
     monkeypatch.setattr(
-        QMessageBox, "question", lambda *_args: pytest.fail("Dialogs must not delete a segment")
+        QMessageBox, "exec", lambda *_args: pytest.fail("Dialogs must not delete a segment")
     )
     dialog = QDialog(window)
     qtbot.addWidget(dialog)
@@ -1022,16 +1022,16 @@ def test_overlap_review_is_visible_but_does_not_block_export_readiness(
     )
 
     qtbot.waitUntil(lambda: not window.project_checks.pending)
-    assert "Ready to export" in window.validation_label.text()
-    assert "1 potential overlap" in window.validation_label.text()
-    assert "overlap by 0.500s" in window.validation_label.toolTip()
+    assert "Ready to export" in window.processing_status.accessibleName()
+    assert "1 potential overlap" in window.processing_status.accessibleName()
+    assert "overlap by 0.500s" in window.processing_status.toolTip()
     assert window.segment_table.item(0, 0).background().color() == QColor("#49351d")
 
     second.start = 3
     window._refresh_table(second.id)
     qtbot.waitUntil(lambda: not window.project_checks.pending)
-    assert "potential overlap" not in window.validation_label.text()
-    assert window.validation_label.toolTip() == ""
+    assert "potential overlap" not in window.processing_status.accessibleName()
+    assert "overlap by" not in window.processing_status.toolTip()
     window.dirty = False
     window.close()
 

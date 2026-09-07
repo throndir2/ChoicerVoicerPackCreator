@@ -6,7 +6,11 @@ from dataclasses import dataclass
 
 from choicer_voicer_pack_creator.models import AudioMode, PackProject, Segment
 from choicer_voicer_pack_creator.operations import check_cancelled
-from choicer_voicer_pack_creator.timeline_audit import TimelineOverlap, audit_timeline_overlaps
+from choicer_voicer_pack_creator.timeline_audit import (
+    TimelineOverlap,
+    audit_timeline_overlaps,
+    describe_timeline_overlaps,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,17 +86,7 @@ def check_project(
     errors = project.validate()
     check_cancelled()
     overlaps = audit_timeline_overlaps(project.segments)
-    indexes = {segment.id: (index, segment) for index, segment in enumerate(project.segments, 1)}
-    details = []
-    for warning in overlaps:
-        check_cancelled()
-        first_index, first = indexes[warning.first_id]
-        second_index, second = indexes[warning.second_id]
-        details.append(
-            f"Segments {first_index:03d} ({first.primary_character}) and "
-            f"{second_index:03d} ({second.primary_character}) overlap by "
-            f"{warning.seconds:.3f}s."
-        )
+    details = describe_timeline_overlaps(project.segments, overlaps)
     return ProjectChecksResult(
         tuple(errors), tuple(overlaps), tuple(details), len(segments),
         len({name for segment in segments for name in segment.characters if name}),

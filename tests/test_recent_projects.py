@@ -257,6 +257,9 @@ def test_save_suggests_safe_filename_without_renaming_the_project(
     assert window.project.title == title
     assert window.title_edit.text() == title
     assert ProjectStore.load(destination).title == title
+    assert window.statusBar().currentMessage() == "Project saved"
+    assert str(destination) in window.statusBar().toolTip()
+    assert "Saved revision" in window.processing_dialog.project_details.toPlainText()
     if save_as:
         assert ProjectStore.load(original).title == "Original"
 
@@ -283,6 +286,7 @@ def test_save_remembers_completed_snapshot_without_clearing_newer_edits(
     assert ProjectStore.load(path).title == "Saved revision"
     assert window.project.title == "Newer edits"
     assert window.dirty
+    assert window.statusBar().currentMessage() == "Project snapshot saved; newer edits are unsaved"
     assert window.project_path == path
     assert window._recent_project_paths() == [path]
 

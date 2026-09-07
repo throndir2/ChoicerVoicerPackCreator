@@ -3,6 +3,7 @@ from __future__ import annotations
 import getpass
 import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -45,13 +46,11 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
-    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSlider,
     QSplitter,
-    QStatusBar,
     QTabBar,
     QTableWidget,
     QTableWidgetItem,
@@ -82,6 +81,7 @@ from choicer_voicer_pack_creator.project_session import ProjectSession, canonica
 from choicer_voicer_pack_creator.scene_editing import SceneEditMode, execute_scene_edit
 from choicer_voicer_pack_creator.timeline_audit import (
     TimelineOverlap,
+    describe_timeline_overlaps,
 )
 from choicer_voicer_pack_creator.ui.analysis_dialog import (
     AnalysisDialog,
@@ -94,6 +94,7 @@ from choicer_voicer_pack_creator.ui.commands import action_button, command_icon,
 from choicer_voicer_pack_creator.ui.derived_work import DerivedWorkCoordinator
 from choicer_voicer_pack_creator.ui.export_dialog import ExportProgressDialog
 from choicer_voicer_pack_creator.ui.export_options_dialog import ExportOptions, ExportOptionsDialog
+from choicer_voicer_pack_creator.ui.history import EditHistoryController
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.ui.layout_state import (
     DEFAULT_WINDOW_SIZE,
@@ -101,6 +102,7 @@ from choicer_voicer_pack_creator.ui.layout_state import (
     read_layout_bytes,
 )
 from choicer_voicer_pack_creator.ui.processing import (
+    ACTIVE_STATES,
     PROCESSING_KINDS,
     ProcessingDialog,
     ProcessingModel,
@@ -114,6 +116,7 @@ from choicer_voicer_pack_creator.ui.speaker_matching import (
     SpeakerMatchingControls,
     update_speaker_item,
 )
+from choicer_voicer_pack_creator.ui.status_bar import ProjectStatusBar
 from choicer_voicer_pack_creator.ui.subtitles import SubtitleVideoWidget
 from choicer_voicer_pack_creator.ui.tasks_window import TasksWindow
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
@@ -212,7 +215,7 @@ class ProjectEditor(QWidget):
         self._document_layout = QVBoxLayout(self)
         self._document_layout.setContentsMargins(0, 0, 0, 0)
         self._document_layout.setSpacing(0)
-        self._status_bar = QStatusBar(self)
+        self._status_bar = ProjectStatusBar(self)
         self.media = media
         self.importer = PackImporter(media)
         self.settings = settings or QSettings(
@@ -286,8 +289,10 @@ class ProjectEditor(QWidget):
         )
         self.processing.publication_guard = self._derived_status_current
         self.project_checks = ProjectChecks(self)
+        self.edit_history = EditHistoryController(self)
         self._build_actions()
         self._build_ui()
+        self.edit_history.bind_text_shortcuts()
         self._connect_player()
         self._set_project(self.project, self.project_path, mark_dirty=session.dirty)
         self._document_layout.addWidget(self._status_bar)
@@ -296,11 +301,8 @@ class ProjectEditor(QWidget):
         super().showEvent(event)
         QTimer.singleShot(0, self._restore_layout_state)
 
-    def statusBar(self) -> QStatusBar:  # noqa: N802
+    def statusBar(self) -> ProjectStatusBar:  # noqa: N802
         return self._status_bar
-
-    def addToolBar(self, toolbar: QToolBar) -> None:  # noqa: N802
-        self._document_layout.addWidget(toolbar)
 
     def setCentralWidget(self, widget: QWidget) -> None:  # noqa: N802
         scroll = QScrollArea(self)
@@ -340,6 +342,8 @@ class ProjectEditor(QWidget):
             self.workspace._exit_discarded.discard(self.session.id)
         else:
             self.session.saved_revision = self.session.revision
+            if hasattr(self, "edit_history") and not self.edit_history.suspended:
+                self.edit_history.history.mark_saved()
 
     @property
     def updater(self) -> UpdateController:
@@ -369,6 +373,9 @@ class ProjectEditor(QWidget):
         self.action_save_as = QAction("Save Project As…", self)
         self.action_save_as.setShortcut(QKeySequence.StandardKey.SaveAs)
         self.action_save_as.triggered.connect(lambda: self.save_project(save_as=True))
+        self.action_undo = self.edit_history.undo_action
+        self.action_redo = self.edit_history.redo_action
+        self.action_history = self.edit_history.show_action
         self.action_restore_previous = QAction("Restore Previous Save…", self)
         self.action_restore_previous.triggered.connect(self.restore_previous_save)
         self.action_export = QAction("Export Pack + ZIP…", self)
@@ -427,6 +434,7 @@ class ProjectEditor(QWidget):
             self.action_save, self.action_save_as, self.action_restore_previous, self.action_export,
         ]
         self.project_actions = [
+            self.action_undo, self.action_redo, self.action_history,
             self.action_analyze, self.action_backing,
             self.action_cut_video, self.action_extract_scene,
             self.action_clear_speaker_autofill,
@@ -447,14 +455,14 @@ class ProjectEditor(QWidget):
             (self.action_backing, "backing", "Backing", "Generate music/effects backing for this project without changing the source."),
             (self.action_cut_video, "split", None, "Remove an In/Out range from the video and close the gap, keeping later dialogue and backing in sync. Original media is preserved."),
             (self.action_extract_scene, "new", None, "Copy the In/Out range and its dialogue into a separate scene project. Select a segment first to use its range."),
-            (self.action_processing, "tasks", None, "View transcript, voice, and backing progress or manage processing for this project."),
+            (self.action_processing, "tasks", None, "View project readiness, waveform, transcript, voice, and backing status, or manage processing and notices."),
             (self.action_clear_speaker_autofill, "restore", None, "Clear unchanged names from the last automatic batch in this tab and keep those segments unassigned. Subsequent manual edits are preserved."),
             (self.action_add, "add", "Add", "Create a new segment using the current In/Out times. Existing segments are not changed."),
             (self.action_split, "split", "Split", "Cut the selected segment into two at the white playback line (playhead). Move the playhead inside the segment first."),
             (self.action_combine, "combine", "Combine", "Select multiple rows with Ctrl or Shift, then combine their ranges and lines."),
             (self.action_duplicate, "duplicate", "Duplicate", "Duplicate the selected segment at the same timestamp."),
             (self.action_next_unassigned, "next-unassigned", "Next Unassigned", "Select the next line without a speaker and seek to its start, wrapping to the beginning if needed."),
-            (self.action_delete, "delete", "Delete", "Delete the selected segment after confirmation."),
+            (self.action_delete, "delete", "Delete", "Delete the selected segment. Undo is available in Project > Undo."),
             (self.action_apply_range, "apply", "Update Timing", "Update Segment Timing: replace the selected segment's start and end with the In/Out times. Does not create a new segment. Preserved audio is only regenerated with your approval."),
             (self.action_preview, "play", "Preview", "Play Selected Segment: play its saved range, then pause. For preserved audio, listen to the prompt recording instead of the video. Does not use pending changes in the In/Out fields."),
         ):
@@ -478,12 +486,18 @@ class ProjectEditor(QWidget):
             if button is not None:
                 button.setAccessibleName(action.text().replace("&&", "&"))
         self.project_toolbar = toolbar
-        self.addToolBar(toolbar)
 
         self.processing_dialog = ProcessingDialog(self.processing, self)
         self.processing_dialog.action_requested.connect(self._processing_action)
-        self.processing_status = ProcessingStatus(self.processing, self.action_processing, self)
-        self.statusBar().addPermanentWidget(self.processing_status)
+        self.processing_dialog.acknowledge_requested.connect(self.statusBar().acknowledge_issues)
+        self.processing_status = ProcessingStatus(
+            self.processing, self.action_processing, self.statusBar(),
+        )
+        self.statusBar().set_readiness_widget(self.processing_status)
+        self._validation_details = "Export requirements: Checks pending"
+        self._validation_summary = "No segments"
+        self.statusBar().details_changed.connect(self._refresh_status_details)
+        self.processing.changed.connect(self._refresh_processing_activity)
 
         root = QWidget(self)
         root.setObjectName("projectEditorContent")
@@ -508,6 +522,7 @@ class ProjectEditor(QWidget):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(7, 7, 7, 7)
         left_layout.setSpacing(7)
+        left_layout.addWidget(toolbar)
 
         self.playback_splitter = QSplitter(Qt.Orientation.Vertical, left)
         self.playback_splitter.setObjectName("playbackSplitter")
@@ -667,8 +682,9 @@ class ProjectEditor(QWidget):
         right_layout.setSpacing(8)
 
         self.inspector_splitter = QSplitter(Qt.Orientation.Vertical, right)
+        self.inspector_splitter.setObjectName("inspectorSplitter")
         self.inspector_splitter.setChildrenCollapsible(False)
-        self.inspector_splitter.setHandleWidth(9)
+        self.inspector_splitter.setHandleWidth(1)
         right_layout.addWidget(self.inspector_splitter, 1)
 
         self.project_section = CollapsibleSection("PACK DETAILS", self.inspector_splitter)
@@ -815,30 +831,12 @@ class ProjectEditor(QWidget):
             self.inspector_splitter.setStretchFactor(index, 1 if index == 1 else 0)
         self.inspector_splitter.splitterMoved.connect(self._schedule_layout_save)
 
-        self.validation_label = QLabel()
-        self.validation_label.setWordWrap(True)
-        self.validation_label.setObjectName("muted")
-        right_layout.addWidget(self.validation_label)
-
         splitter.addWidget(left)
         splitter.addWidget(right)
         splitter.setCollapsible(0, True)
         splitter.setStretchFactor(0, 7)
         splitter.setStretchFactor(1, 3)
         splitter.splitterMoved.connect(self._schedule_layout_save)
-
-        progress_row = QHBoxLayout()
-        self.progress_label = QLabel("Ready")
-        self.progress_label.setObjectName("muted")
-        progress_row.addWidget(self.progress_label)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 1)
-        self.progress_bar.setValue(1)
-        self.progress_bar.setMaximumWidth(280)
-        self.progress_bar.hide()
-        progress_row.addWidget(self.progress_bar)
-        root_layout.addLayout(progress_row)
-        self.statusBar().showMessage("Ready")
 
     def _time_spin(self) -> QDoubleSpinBox:
         spin = QDoubleSpinBox()
@@ -1024,8 +1022,9 @@ class ProjectEditor(QWidget):
             read_paths=(path,) if path else (),
             source_snapshot={"revision": self.session.revision},
         )
-        job.failed.connect(lambda message: self.statusBar().showMessage(
-            f"Could not update recovery snapshot: {message}"
+        job.completed.connect(lambda _value: self.statusBar().clear_issue("recovery"))
+        job.failed.connect(lambda message: self.statusBar().set_issue(
+            "recovery", "Could not update recovery snapshot", details=message,
         ))
 
     def _clear_recovery_snapshot(self) -> None:
@@ -1040,8 +1039,9 @@ class ProjectEditor(QWidget):
             resource_keys=(f"document-save:{self.session.id}",),
             write_paths=(store.path, store.previous_path),
         )
-        job.failed.connect(lambda message: self.statusBar().showMessage(
-            f"Could not remove recovery snapshot: {message}"
+        job.completed.connect(lambda _value: self.statusBar().clear_issue("recovery"))
+        job.failed.connect(lambda message: self.statusBar().set_issue(
+            "recovery", "Could not remove recovery snapshot", details=message,
         ))
 
     def restore_previous_save(self) -> None:
@@ -1218,10 +1218,20 @@ class ProjectEditor(QWidget):
         if not isinstance(value, AnalysisReview):
             QMessageBox.critical(self, "Could not keep analysis draft", "Analysis review data was invalid.")
             return
+        if self.edit_history.busy:
+            dialog, token = self._analysis_dialog, self.session.source_token()
+            QTimer.singleShot(
+                100, lambda: self._save_analysis_review(value)
+                if dialog is self._analysis_dialog and token == self.session.source_token() else None,
+            )
+            return
         if value != self.project.analysis_review:
             self.project.analysis_review = value
             self.session.draft_revision += 1
-            self._set_dirty(True)
+            self._set_dirty(
+                True, history_label="Edit analysis draft", history_merge="analysis-draft",
+                fields_only=True,
+            )
             self.speaker_matching.prepare_if_enabled()
 
     @Slot(float, float)
@@ -1275,7 +1285,7 @@ class ProjectEditor(QWidget):
             return
         self.project.sort_segments()
         diagnostic_event("analysis_suggestions_applied", added=len(added), requested=len(value))
-        self._set_dirty(True)
+        self._set_dirty(True, history_label="Add analysis suggestions")
         self.segments_section.set_collapsed(False)
         self.selected_section.set_collapsed(False)
         self._refresh_table(added[0].id)
@@ -1334,6 +1344,8 @@ class ProjectEditor(QWidget):
         mark_dirty: bool,
         *,
         preserve_view: bool = False,
+        history_label: str | None = None,
+        history_replay: bool = False,
     ) -> None:
         self.derived_work.invalidate(ProjectChecks.key)
         if self._discard_recovery_on_transition:
@@ -1342,6 +1354,8 @@ class ProjectEditor(QWidget):
             self.project.video_path == project.video_path
             and self.project.video_duration == project.video_duration
         )
+        if history_replay:
+            self._source_request += 1
         if project.backing_track_path != self.project.backing_track_path:
             self.session.backing_revision += 1
         if project.analysis_review != self.project.analysis_review:
@@ -1366,10 +1380,16 @@ class ProjectEditor(QWidget):
                 self._reset_transport_state()
                 self.player.stop()
         self.project = project
-        self.project.sort_segments()
+        if not history_replay:
+            self.project.sort_segments()
         if self.project_path != project_path:
             self._saved_project_hash = None
         self.project_path = project_path
+        if not preserve_view:
+            self.statusBar().clearMessage()
+            self.statusBar().set_detail(
+                "save", f"Project file: {project_path}" if project_path else "Project: Not saved yet.",
+            )
         if not preserve_view or project.segment_by_id(self.selected_segment_id) is None:
             self.selected_segment_id = ""
         self._syncing = True
@@ -1391,10 +1411,11 @@ class ProjectEditor(QWidget):
             self.timeline.set_duration(duration)
             if not preserve_view:
                 self.timeline.set_waveform([])
-            self.timeline.set_segments(project.segments)
-            self.timeline.set_marks(self.mark_in_spin.value(), self.mark_out_spin.value())
-            self._refresh_table(self.selected_segment_id)
-            self._sync_selected_editor()
+            if not history_replay:
+                self.timeline.set_segments(project.segments)
+                self.timeline.set_marks(self.mark_in_spin.value(), self.mark_out_spin.value())
+                self._refresh_table(self.selected_segment_id)
+                self._sync_selected_editor()
         finally:
             self._syncing = False
         if not preserve_view:
@@ -1403,13 +1424,20 @@ class ProjectEditor(QWidget):
                 self._start_waveform(project.video_path, project.video_duration)
             else:
                 self.player.setSource(QUrl())
-        self.video_widget.set_position(self.current_position())
-        self.speaker_matching.project_replaced(preserve_view=preserve_view)
+        if not history_replay:
+            self.video_widget.set_position(self.current_position())
+            self.speaker_matching.project_replaced(preserve_view=preserve_view)
         if not preserve_view:
             self.processing.reset()
-        self._set_dirty(mark_dirty)
+        if not history_replay:
+            if history_label is None:
+                self.edit_history.reset(dirty=mark_dirty)
+            else:
+                self.edit_history.record(history_label)
+        self._set_dirty(mark_dirty, record_history=False)
         self._refresh_scene_actions()
-        self.project_checks.changed(force=True)
+        if not history_replay:
+            self.project_checks.changed(force=True)
 
     # ---------- Video cuts and scene projects ----------
 
@@ -1501,9 +1529,10 @@ class ProjectEditor(QWidget):
         )
         self._scene_job = job
         self._refresh_scene_actions()
-        self.statusBar().showMessage("Video edit queued.")
+        self.statusBar().clear_issue("scene")
+        self.statusBar().set_activity("scene", "Video edit queued.")
         job.progress.connect(
-            lambda message, _fraction: self.statusBar().showMessage(message)
+            lambda message, _fraction: self.statusBar().set_activity("scene", message)
         )
 
         def completed(project: PackProject) -> None:
@@ -1516,7 +1545,9 @@ class ProjectEditor(QWidget):
                 and self.session.id not in self.workspace._closed_ids
             )
             if mode == "cut" and unchanged:
-                self._set_project(project, self.project_path, mark_dirty=True)
+                self._set_project(
+                    project, self.project_path, mark_dirty=True, history_label="Cut video range",
+                )
                 self.seek(min(start, project.video_duration))
                 self.statusBar().showMessage("Video range removed. Save Project to keep this edit.")
             else:
@@ -1532,11 +1563,14 @@ class ProjectEditor(QWidget):
                 self.statusBar().showMessage(f"Scene project saved: {path}")
 
         def failed(message: str) -> None:
-            self.statusBar().showMessage("Video edit failed; the original project was not changed.")
+            self.statusBar().set_issue(
+                "scene", "Video edit failed; the original project was not changed.", details=message,
+            )
             self.workspace.notice("Could not edit video", message)
 
         def finished() -> None:
             self._scene_job = None
+            self.statusBar().clear_activity("scene")
             self._refresh_scene_actions()
             if job.record.state == "cancelled":
                 self.statusBar().showMessage("Video edit cancelled; the original project was not changed.")
@@ -1562,11 +1596,16 @@ class ProjectEditor(QWidget):
         worker.completed.connect(self._waveform_ready)
         worker.failed.connect(self._waveform_failed)
         worker.finished.connect(self._retire_waveform_worker)
-        self.progress_label.setText("Reading waveform…")
+        self.statusBar().set_detail("waveform", "Waveform: Reading source audio.")
+        self.statusBar().set_activity("waveform", "Reading waveform…")
         worker.start()
 
     def _cancel_waveform_workers(self) -> None:
         self._waveform_request_id += 1
+        self.statusBar().clear_activity("waveform")
+        self.statusBar().clear_issue("waveform")
+        self.statusBar().clear_issue("preview")
+        self.statusBar().set_detail("waveform", "Waveform: No source waveform loaded.")
         for worker in tuple(self._waveform_workers):
             worker.requestInterruption()
 
@@ -1590,13 +1629,17 @@ class ProjectEditor(QWidget):
             self.mark_in_spin.setMaximum(duration)
             self.mark_out_spin.setMaximum(duration)
             self.timeline.set_waveform(peaks)
-            self.progress_label.setText(f"Waveform ready · {len(peaks):,} peaks")
+            self.statusBar().clear_activity("waveform")
+            self.statusBar().clear_issue("waveform")
+            self.statusBar().set_detail("waveform", f"Waveform: Ready · {len(peaks):,} peaks")
+            self.statusBar().showMessage("Waveform ready")
 
     @Slot(int, str, str)
     def _waveform_failed(self, request_id: int, path: str, message: str) -> None:
         if request_id == self._waveform_request_id and path == self.project.video_path:
-            self.progress_label.setText("Waveform unavailable")
-            self.statusBar().showMessage(message)
+            self.statusBar().clear_activity("waveform")
+            self.statusBar().set_detail("waveform", "Waveform: Unavailable")
+            self.statusBar().set_issue("waveform", "Waveform unavailable", details=message)
 
     def toggle_playback(self) -> None:
         self.workspace.pause_other_previews(self)
@@ -1669,6 +1712,7 @@ class ProjectEditor(QWidget):
         self.audio_output.setMuted(self._stopped_seek_audio_was_muted)
         self.timeline.set_playhead(target_ms / 1000.0)
         self.video_widget.set_position(target_ms / 1000.0)
+        self.statusBar().clear_issue("preview")
         self._playback_state_changed(self.player.playbackState())
 
     @Slot()
@@ -1678,7 +1722,8 @@ class ProjectEditor(QWidget):
         target_ms = self._stopped_seek_target_ms
         self.player.pause()
         self._cancel_stopped_seek(restore_audio=True)
-        self.statusBar().showMessage(
+        self.statusBar().set_issue(
+            "preview",
             f"Could not decode the preview frame at {target_ms / 1000:.3f}s. Try seeking nearby."
         )
 
@@ -1720,6 +1765,7 @@ class ProjectEditor(QWidget):
             or self._preview_end is not None
             or self._range_edit_record is not None
             or self._syncing
+            or self.edit_history.busy
             or len(self._selected_table_ids()) > 1
         ):
             return
@@ -1755,7 +1801,7 @@ class ProjectEditor(QWidget):
         diagnostic_event("video_player_error", error_code=_error.name, message=message)
         self._reset_transport_state()
         if message:
-            self.statusBar().showMessage(f"Video preview error: {message}")
+            self.statusBar().set_issue("preview", f"Video preview error: {message}")
 
     def _seek_slider_moved(self, value: int) -> None:
         if self.project.video_duration > 0:
@@ -1799,7 +1845,7 @@ class ProjectEditor(QWidget):
             characters=[] if self.project.auto_speaker_matching else [existing_speaker],
         )
         self.project.add_segment(segment)
-        self._set_dirty(True)
+        self._set_dirty(True, history_label="Add segment")
         self._refresh_table(segment.id)
         self.select_segment(segment.id)
         self.caption_edit.setFocus()
@@ -1817,13 +1863,14 @@ class ProjectEditor(QWidget):
         original_start, original_end = segment.start, segment.end
         was_dirty = self.dirty
         segment.start, segment.end = start, end
-        self._complete_segment_range_edit(
-            segment,
-            original_start,
-            original_end,
-            was_dirty,
-            review_file_audio=True,
-        )
+        with self._range_decision():
+            self._complete_segment_range_edit(
+                segment,
+                original_start,
+                original_end,
+                was_dirty,
+                review_file_audio=True,
+            )
 
     def split_segment(self) -> None:
         segment = self.selected_segment()
@@ -1849,7 +1896,7 @@ class ProjectEditor(QWidget):
         second.start = split_at
         second.image_path = ""
         self.project.add_segment(second)
-        self._set_dirty(True)
+        self._set_dirty(True, history_label="Split segment")
         self._refresh_table(second.id)
         self.select_segment(second.id)
         self.statusBar().showMessage("Segment split.")
@@ -1861,7 +1908,7 @@ class ProjectEditor(QWidget):
             return
         duplicate = segment.clone()
         self.project.add_segment(duplicate)
-        self._set_dirty(True)
+        self._set_dirty(True, history_label="Duplicate segment")
         self._refresh_table(duplicate.id)
         self.select_segment(duplicate.id)
         self.speakers_edit.setFocus()
@@ -1899,7 +1946,7 @@ class ProjectEditor(QWidget):
         except ValueError as error:
             QMessageBox.information(self, "Cannot combine segments", str(error))
             return
-        self._set_dirty(True)
+        self._set_dirty(True, history_label="Combine segments")
         self._refresh_table(combined.id)
         self.select_segment(combined.id)
         self.statusBar().showMessage(f"Combined {len(selected)} segments.")
@@ -1908,18 +1955,11 @@ class ProjectEditor(QWidget):
         segment = self.selected_segment()
         if segment is None:
             return
-        if (
-            QMessageBox.question(
-                self,
-                "Delete segment",
-                f"Delete {segment.primary_character}: “{segment.caption or 'Untitled line'}”?",
-            )
-            != QMessageBox.StandardButton.Yes
-        ):
+        if not self.edit_history.confirm_delete(segment):
             return
         self.project.remove_segment(segment.id)
         self.selected_segment_id = ""
-        self._set_dirty(True)
+        self._set_dirty(True, history_label="Delete segment")
         self._refresh_table()
         self._sync_selected_editor()
 
@@ -1967,6 +2007,9 @@ class ProjectEditor(QWidget):
         self.statusBar().showMessage("No other lines without a speaker.", 5000)
 
     def _show_selected_segment(self, segment: Segment) -> None:
+        if self.selected_segment_id != segment.id:
+            self.edit_history.history.break_merge()
+        self.edit_history.selected_id = segment.id
         self.selected_segment_id = segment.id
         self.timeline.set_selected(segment.id)
         self._select_table_row(segment.id)
@@ -1986,6 +2029,7 @@ class ProjectEditor(QWidget):
     def _timeline_range_edit_started(
         self, segment_id: str, original_start: float, original_end: float
     ) -> None:
+        self.edit_history.history.break_merge()
         self._range_edit_record = (
             segment_id,
             original_start,
@@ -2013,8 +2057,14 @@ class ProjectEditor(QWidget):
         self._set_dirty(True, segment=segment)
         row = self._row_for_segment(segment_id)
         if row >= 0:
-            self.segment_table.item(row, 1).setText(format_time(start))
-            self.segment_table.item(row, 2).setText(format_time(end))
+            values = format_time(start), format_time(end)
+            items = self.segment_table.item(row, 1), self.segment_table.item(row, 2)
+            if tuple(item.text() for item in items) != values:
+                model = self.segment_table.model()
+                with QSignalBlocker(model):
+                    for item, value in zip(items, values, strict=True):
+                        item.setText(value)
+                model.dataChanged.emit(model.index(row, 1), model.index(row, 2), [])
         self._validation_timer.start()
 
     def _timeline_range_edit_finished(
@@ -2039,8 +2089,7 @@ class ProjectEditor(QWidget):
             self.derived_work.wake()
             return
         segment.start, segment.end = final_start, final_end
-        self._range_decision_active = True
-        try:
+        with self._range_decision():
             self._complete_segment_range_edit(
                 segment,
                 original_start,
@@ -2051,6 +2100,13 @@ class ProjectEditor(QWidget):
                     or abs(final_end - original_end) > 0.0005
                 ),
             )
+
+    @contextmanager
+    def _range_decision(self):
+        self._range_decision_active = True
+        self.derived_work.suspend()
+        try:
+            yield
         finally:
             self._range_decision_active = False
             self.derived_work.wake()
@@ -2064,6 +2120,8 @@ class ProjectEditor(QWidget):
         *,
         review_file_audio: bool,
     ) -> bool:
+        self.project_checks.changed(segment)
+        self.speaker_matching.changed(segment=segment)
         changed = (
             abs(segment.start - original_start) > 0.0005
             or abs(segment.end - original_end) > 0.0005
@@ -2130,7 +2188,9 @@ class ProjectEditor(QWidget):
                 )
 
         self.project.sort_segments()
-        self._set_dirty(True, segment=segment)
+        self._set_dirty(
+            True, segment=segment, history_label="Change segment timing", full_history=True,
+        )
         self._refresh_timing_row(segment)
         if segment.audio_mode == "video":
             self.statusBar().showMessage(
@@ -2153,17 +2213,22 @@ class ProjectEditor(QWidget):
             return
         vertical = table.verticalScrollBar().value()
         horizontal = table.horizontalScrollBar().value()
+        model = table.model()
         with QSignalBlocker(table):
             if row != destination:
                 selected = set(self._selected_table_ids())
                 current = table.currentItem()
-                items = [table.takeItem(row, column) for column in range(table.columnCount())]
+                # takeItem emits dataChanged for each cell; coalesce those notices,
+                # but preserve structural row signals so the view tracks its indexes.
+                with QSignalBlocker(model):
+                    items = [table.takeItem(row, column) for column in range(table.columnCount())]
                 table.removeRow(row)
                 table.insertRow(destination)
-                for column, item in enumerate(items):
-                    table.setItem(destination, column, item)
-                for index in range(min(row, destination), max(row, destination) + 1):
-                    table.item(index, 0).setText(f"{index + 1:03d}")
+                with QSignalBlocker(model):
+                    for column, item in enumerate(items):
+                        table.setItem(destination, column, item)
+                    for index in range(min(row, destination), max(row, destination) + 1):
+                        table.item(index, 0).setText(f"{index + 1:03d}")
                 table.clearSelection()
                 for index in range(table.rowCount()):
                     if table.item(index, 0).data(Qt.ItemDataRole.UserRole) in selected:
@@ -2174,11 +2239,16 @@ class ProjectEditor(QWidget):
                         )
                 if current is not None:
                     table.setCurrentItem(current, QItemSelectionModel.SelectionFlag.NoUpdate)
-            table.item(destination, 1).setText(format_time(segment.start))
-            table.item(destination, 2).setText(format_time(segment.end))
-            audio = "Video" if segment.audio_mode == "video" else Path(segment.audio_path).name
-            table.item(destination, 5).setText(audio)
-            table.item(destination, 5).setToolTip(audio)
+            with QSignalBlocker(model):
+                table.item(destination, 1).setText(format_time(segment.start))
+                table.item(destination, 2).setText(format_time(segment.end))
+                audio = "Video" if segment.audio_mode == "video" else Path(segment.audio_path).name
+                table.item(destination, 5).setText(audio)
+                table.item(destination, 5).setToolTip(audio)
+            model.dataChanged.emit(
+                model.index(min(row, destination), 0),
+                model.index(max(row, destination), table.columnCount() - 1), [],
+            )
         table.verticalScrollBar().setValue(vertical)
         table.horizontalScrollBar().setValue(horizontal)
         self.timeline.set_segments(self.project.segments)
@@ -2210,23 +2280,7 @@ class ProjectEditor(QWidget):
             self.segment_table.clearSelection()
             self.segment_table.setRowCount(len(self.project.segments))
             for row, segment in enumerate(self.project.segments):
-                values = (
-                    f"{row + 1:03d}",
-                    format_time(segment.start),
-                    format_time(segment.end),
-                    ", ".join(segment.characters),
-                    segment.caption,
-                    "Video" if segment.audio_mode == "video" else Path(segment.audio_path).name,
-                )
-                for column, value in enumerate(values):
-                    item = QTableWidgetItem(value)
-                    if column == 0:
-                        item.setData(Qt.ItemDataRole.UserRole, segment.id)
-                    if column in {4, 5}:
-                        item.setToolTip(value)
-                    if column == 3:
-                        update_speaker_item(item, segment)
-                    self.segment_table.setItem(row, column, item)
+                self._populate_table_row(row, segment)
                 if segment.id in selected:
                     self.segment_table.selectionModel().select(
                         self.segment_table.model().index(row, 0),
@@ -2243,6 +2297,27 @@ class ProjectEditor(QWidget):
             self._table_selection_changed()
         self._update_combine_action()
         self._refresh_validation_label()
+
+    def _populate_table_row(self, row: int, segment: Segment, *, warned: bool = False) -> None:
+        values = (
+            f"{row + 1:03d}", format_time(segment.start), format_time(segment.end),
+            ", ".join(segment.characters), segment.caption,
+            "Video" if segment.audio_mode == "video" else Path(segment.audio_path).name,
+        )
+        for column, value in enumerate(values):
+            item = QTableWidgetItem(value)
+            if column == 0:
+                item.setData(Qt.ItemDataRole.UserRole, segment.id)
+            if column in {4, 5}:
+                item.setToolTip(value)
+            if column == 3:
+                update_speaker_item(item, segment)
+            if warned:
+                item.setBackground(QBrush(QColor("#49351d")))
+                item.setToolTip(
+                    f"{item.toolTip()}\n\nPotential timeline overlap — review against the source.".strip()
+                )
+            self.segment_table.setItem(row, column, item)
 
     def _apply_timeline_review_highlights(self, warnings: list[TimelineOverlap]) -> None:
         warning_ids = {
@@ -2271,19 +2346,7 @@ class ProjectEditor(QWidget):
                         item.setToolTip(tooltip)
 
     def _timeline_review_details(self, warnings: list[TimelineOverlap]) -> list[str]:
-        indexes = {segment.id: index for index, segment in enumerate(self.project.segments, 1)}
-        details: list[str] = []
-        for warning in warnings:
-            first = self.project.segment_by_id(warning.first_id)
-            second = self.project.segment_by_id(warning.second_id)
-            if not first or not second:
-                continue
-            details.append(
-                f"Segments {indexes[first.id]:03d} ({first.primary_character}) and "
-                f"{indexes[second.id]:03d} ({second.primary_character}) overlap by "
-                f"{warning.seconds:.3f}s."
-            )
-        return details
+        return describe_timeline_overlaps(self.project.segments, warnings)
 
     def _select_table_row(self, segment_id: str) -> None:
         for row in range(self.segment_table.rowCount()):
@@ -2382,7 +2445,10 @@ class ProjectEditor(QWidget):
             names = [item.strip() for item in self.speakers_edit.text().split(",") if item.strip()]
             segment.characters = list(dict.fromkeys(names))
             self.speaker_matching.name_typed(segment)
-            self._set_dirty(True, segment=segment)
+            self._set_dirty(
+                True, segment=segment, history_label="Edit speakers",
+                history_merge=f"speakers:{segment.id}",
+            )
         self.speaker_matching._refresh_names([segment])
         self.speaker_matching.name_committed()
 
@@ -2405,7 +2471,10 @@ class ProjectEditor(QWidget):
         if row >= 0:
             update_speaker_item(self.segment_table.item(row, 3), segment)
         self.video_widget.set_segments(self.project.segments)
-        self._set_dirty(True, segment=segment)
+        self._set_dirty(
+            True, segment=segment, history_label="Edit speakers",
+            history_merge=f"speakers:{segment.id}",
+        )
         self._validation_timer.start()
         self._sync_speaker_exclusion()
 
@@ -2435,7 +2504,7 @@ class ProjectEditor(QWidget):
         row = self._row_for_segment(segment.id)
         if row >= 0:
             update_speaker_item(self.segment_table.item(row, 3), segment)
-        self._set_dirty(True)
+        self._set_dirty(True, segment=segment, history_label="Change speaker exclusion")
         if not excluded:
             self.speaker_matching.name_committed(force=True)
 
@@ -2447,7 +2516,10 @@ class ProjectEditor(QWidget):
             return
         segment.caption = self.caption_edit.toPlainText()
         self.video_widget.set_segments(self.project.segments)
-        self._set_dirty(True)
+        self._set_dirty(
+            True, segment=segment, history_label="Edit caption",
+            history_merge=f"caption:{segment.id}",
+        )
         row = self._row_for_segment(segment.id)
         if row >= 0:
             self.segment_table.item(row, 4).setText(segment.caption)
@@ -2469,7 +2541,7 @@ class ProjectEditor(QWidget):
             self.choose_segment_audio()
             return
         segment.audio_mode = mode
-        self._set_dirty(True)
+        self._set_dirty(True, segment=segment, history_label="Change prompt audio")
         self._refresh_table(segment.id)
 
     def _row_for_segment(self, segment_id: str) -> int:
@@ -2487,9 +2559,9 @@ class ProjectEditor(QWidget):
         self._refresh_validation_label()
 
     def _commit_editors(self) -> None:
-        if self._syncing:
+        if self._syncing or self.edit_history.busy:
             return
-        before = self.project.to_dict()
+        before = (self.project.title, tuple(self.project.authors), self.project.readme)
         if self.title_edit.text() != self.project.title:
             self.project.title = self.title_edit.text().strip()
         if self.authors_edit.text() != ", ".join(self.project.authors):
@@ -2499,6 +2571,7 @@ class ProjectEditor(QWidget):
         self.project.readme = self.readme_edit.toPlainText()
         segment = self.selected_segment()
         names_changed = False
+        caption_changed = False
         if segment:
             if self.speakers_edit.text() != ", ".join(segment.characters):
                 segment.characters = list(
@@ -2510,10 +2583,30 @@ class ProjectEditor(QWidget):
                 )
                 self.speaker_matching.name_typed(segment)
                 names_changed = True
+            caption_changed = segment.caption != self.caption_edit.toPlainText()
             segment.caption = self.caption_edit.toPlainText()
-        if self.project.to_dict() != before:
+        after = (
+            self.project.title, tuple(self.project.authors), self.project.readme,
+        )
+        details_changed = before != after
+        if details_changed or names_changed or caption_changed:
             self.video_widget.set_segments(self.project.segments)
-            self._set_dirty(True)
+            label, key = "Edit pack details", "pack-details"
+            fields = [
+                name for name, old, new in zip(("title", "authors", "notes"), before, after, strict=True)
+                if old != new
+            ]
+            if len(fields) == 1:
+                label, key = f"Edit pack {fields[0]}", f"pack-{fields[0]}"
+            if names_changed and not details_changed:
+                label, key = "Edit speakers", f"speakers:{segment.id}"
+            elif caption_changed and not details_changed:
+                label, key = "Edit caption", f"caption:{segment.id}"
+            self._set_dirty(
+                True, segment=segment if names_changed or caption_changed else None,
+                history_label=label, history_merge=key,
+                fields_only=not (names_changed or caption_changed),
+            )
         if names_changed:
             self.speaker_matching.name_committed()
 
@@ -2588,7 +2681,7 @@ class ProjectEditor(QWidget):
         self._start_waveform(str(source), info.duration)
         self.speaker_matching.project_replaced(preserve_view=False)
         self.processing.reset()
-        self._set_dirty(True)
+        self._set_dirty(True, history_label="Replace source video", fields_only=True)
         self._refresh_validation_label()
         invalid = [item for item in self.project.segments if item.end > info.duration + 0.05]
         if invalid:
@@ -2634,7 +2727,7 @@ class ProjectEditor(QWidget):
         self.video_path_label.setToolTip("")
         self.timeline.set_waveform([])
         self.timeline.set_duration(0.1)
-        self._set_dirty(True)
+        self._set_dirty(True, history_label="Clear source video", fields_only=True)
         self._refresh_validation_label()
 
     def choose_backing_track(self) -> None:
@@ -2649,14 +2742,14 @@ class ProjectEditor(QWidget):
             self.project.backing_track_path = str(Path(path).resolve())
             self._refresh_backing_controls()
             self.processing.set_status("backing", "ready", "Using the project's selected backing track.")
-            self._set_dirty(True)
+            self._set_dirty(True, history_label="Choose backing track", fields_only=True)
 
     def clear_backing_track(self) -> None:
         self.session.backing_revision += 1
         self.project.backing_track_path = ""
         self._refresh_backing_controls()
         self.processing.set_status("backing", "idle", "No backing track selected.")
-        self._set_dirty(True)
+        self._set_dirty(True, history_label="Clear backing track", fields_only=True)
 
     def _refresh_backing_controls(self) -> None:
         path = self.project.backing_track_path
@@ -2712,6 +2805,9 @@ class ProjectEditor(QWidget):
         def apply_result() -> None:
             if self.session.id in self.workspace._closed_ids:
                 return
+            if self.edit_history.busy:
+                QTimer.singleShot(100, apply_result)
+                return
             result = dialog.backing_path
             current = (
                 self.session.source_token(), self.session.backing_revision,
@@ -2727,7 +2823,7 @@ class ProjectEditor(QWidget):
             self.project.backing_track_path = str(result)
             self.session.backing_revision += 1
             self._refresh_backing_controls()
-            self._set_dirty(True)
+            self._set_dirty(True, history_label="Generate backing track", fields_only=True)
             self.statusBar().showMessage("Backing generated; dialogue and prompts preserved.")
             if after_success is not None:
                 QTimer.singleShot(0, after_success)
@@ -2750,13 +2846,13 @@ class ProjectEditor(QWidget):
             self.project.icon_path = str(Path(path).resolve())
             self.icon_path_label.setText(Path(path).name)
             self.icon_path_label.setToolTip(path)
-            self._set_dirty(True)
+            self._set_dirty(True, history_label="Choose pack icon", fields_only=True)
 
     def clear_icon(self) -> None:
         self.project.icon_path = ""
         self.icon_path_label.setText("Generated from video")
         self.icon_path_label.setToolTip("")
-        self._set_dirty(True)
+        self._set_dirty(True, history_label="Clear pack icon", fields_only=True)
 
     def choose_segment_audio(self) -> None:
         segment = self.selected_segment()
@@ -2773,7 +2869,7 @@ class ProjectEditor(QWidget):
             return
         segment.audio_mode = "file"
         segment.audio_path = str(Path(path).resolve())
-        self._set_dirty(True)
+        self._set_dirty(True, segment=segment, history_label="Choose prompt audio")
         self._sync_selected_editor()
         self._refresh_table(segment.id)
 
@@ -2793,7 +2889,7 @@ class ProjectEditor(QWidget):
             return
         segment.audio_mode = "video"
         segment.audio_path = ""
-        self._set_dirty(True)
+        self._set_dirty(True, segment=segment, history_label="Use source-video audio")
         self._sync_selected_editor()
         self._refresh_table(segment.id)
 
@@ -2806,7 +2902,7 @@ class ProjectEditor(QWidget):
         )
         if path:
             segment.image_path = str(Path(path).resolve())
-            self._set_dirty(True)
+            self._set_dirty(True, segment=segment, history_label="Choose prompt image")
             self._sync_selected_editor()
 
     def clear_segment_image(self) -> None:
@@ -2814,7 +2910,7 @@ class ProjectEditor(QWidget):
         if not segment:
             return
         segment.image_path = ""
-        self._set_dirty(True)
+        self._set_dirty(True, segment=segment, history_label="Clear prompt image")
         self._sync_selected_editor()
 
     # ---------- Export and status ----------
@@ -2823,7 +2919,7 @@ class ProjectEditor(QWidget):
         if options == ExportOptions.from_project(self.project):
             return
         options.apply_to(self.project)
-        self._set_dirty(True)
+        self._set_dirty(True, history_label="Change export options", fields_only=True)
         self._refresh_validation_label()
 
     def export_pack(self) -> None:
@@ -2947,7 +3043,7 @@ class ProjectEditor(QWidget):
 
     @Slot(object)
     def _export_progress(self, update: ExportProgress) -> None:
-        self.progress_label.setText(update.message.splitlines()[0])
+        self.statusBar().set_activity("export", update.message.splitlines()[0])
 
     def _confirm_backing_export(self) -> bool:
         if self.project.backing_track_path:
@@ -2977,25 +3073,28 @@ class ProjectEditor(QWidget):
             return
         if self._export_dialog is not None:
             self._export_dialog.show_result(result)
+        self.statusBar().clear_activity("export")
         self.statusBar().showMessage(f"Exported {result.pack_path.name}")
 
     @Slot(str)
     def _export_failed(self, message: str) -> None:
         if self._export_dialog is not None:
             self._export_dialog.show_error(message)
-        self.statusBar().showMessage("Export failed")
+        self.statusBar().clear_activity("export")
+        self.statusBar().set_issue("export", "Export failed", details=message)
 
     @Slot()
     def _export_cancelled(self) -> None:
         if self._export_dialog is not None:
             self._export_dialog.show_cancelled()
+        self.statusBar().clear_activity("export")
         self.statusBar().showMessage("Export cancelled")
 
     @Slot()
     def _export_finished(self) -> None:
         if self._export_dialog is not None:
             self._export_dialog.worker_finished()
-            self._set_busy(False, self._export_dialog.progress_label.text())
+        self._set_busy(False)
         self._export_worker = None
 
     @Slot(int)
@@ -3003,19 +3102,29 @@ class ProjectEditor(QWidget):
         if self._export_worker is None:
             self._export_dialog = None
 
-    def _set_busy(self, busy: bool, message: str) -> None:
-        self.progress_label.setText(message)
-        self.progress_bar.setRange(0, 0 if busy else 1)
-        self.progress_bar.setValue(0 if busy else 1)
-        self.progress_bar.setVisible(busy)
+    def _set_busy(self, busy: bool, message: str = "") -> None:
+        if busy:
+            self.statusBar().clear_issue("export")
+            self.statusBar().set_activity("export", message)
+        else:
+            self.statusBar().clear_activity("export")
         self.action_export.setEnabled(not busy and not self.session.loading)
         self._update_combine_action()
 
-    def _set_loading(self, loading: bool) -> None:
+    def _set_loading(self, loading: bool, *, message: str = "Opening project…") -> None:
         self.session.loading = loading
+        if loading:
+            self.project_checks.changed(force=True)
+            self.statusBar().set_activity("loading", message)
+        else:
+            self.statusBar().clear_activity("loading")
+            self.project_checks.request()
         self.editor_splitter.setEnabled(not loading)
         self.processing_dialog.setEnabled(not loading)
         self.processing_status.setEnabled(not loading)
+        for dialog in (self._analysis_dialog, self._backing_dialog, self._scene_dialog):
+            if dialog is not None:
+                dialog.setEnabled(not loading)
         for action in (
             self.action_save, self.action_save_as, self.action_restore_previous,
             self.action_analyze, self.action_backing, self.action_processing, self.action_add,
@@ -3030,11 +3139,13 @@ class ProjectEditor(QWidget):
         self.speaker_matching._update_actions()
         if loading:
             self.action_combine.setEnabled(False)
+        self.edit_history.refresh()
 
     def _derived_publication_blocked(self) -> bool:
         return (
             self._range_edit_record is not None or self._range_decision_active
             or self.session.loading or self.workspace._closing
+            or self.edit_history.busy
             or self.session.id in self.workspace._closed_ids
             or QApplication.activeModalWidget() is not None
             or any(
@@ -3043,6 +3154,11 @@ class ProjectEditor(QWidget):
                 for box in self.workspace._decisions
             )
         )
+
+    def _close_derived_work(self) -> None:
+        self.project_checks.close()
+        self.speaker_matching.close_processing()
+        self.derived_work.close()
 
     def _derived_status_current(self, record: JobRecord) -> bool:
         key = record.source_snapshot.get("derived_key")
@@ -3055,73 +3171,145 @@ class ProjectEditor(QWidget):
             and not self._derived_publication_blocked()
         )
 
-    def _refresh_validation_label(self, *, refresh_highlights: bool = False) -> None:
+    def _refresh_validation_label(
+        self, *, refresh_highlights: bool = False,
+        prepared: tuple[list[str], list[TimelineOverlap], list[str]] | None = None,
+    ) -> None:
         self._validation_timer.stop()
-        if self._range_edit_record is not None:
+        if prepared is not None:
+            errors, warnings, details = prepared
+            self.project_checks.changed(prepared=ProjectChecksResult(
+                tuple(errors), tuple(warnings), tuple(details), len(self.project.segments),
+                len({name for segment in self.project.segments for name in segment.characters if name}),
+            ))
+            return
+        if self._range_edit_record is not None or self.edit_history.busy:
             return
         self.project_checks.changed()
 
     def _validation_pending(self) -> None:
-        text = self.validation_label.text()
+        text = self._validation_summary
         if "Ready to export" in text:
             text = text.replace("Ready to export", "Checks pending")
         elif "Checks pending" not in text:
             text = f"{text} · Checks pending" if text else "Checks pending"
-        self.validation_label.setText(text)
-        self.validation_label.setStyleSheet("color: #ffbf69;")
+        if text == self._validation_summary:
+            return
+        self._validation_summary = text
+        self._validation_details = (
+            "Checks pending; previous warnings are retained until current checks finish.\n"
+            + self._validation_details.replace("Ready to export", "Checks pending")
+        )
+        self.processing_status.set_validation(text, self._validation_details, "#ffbf69")
+        self._refresh_status_details()
 
     def _validation_activity(self, message: str) -> None:
-        self.statusBar().showMessage(message, 1000)
+        self.statusBar().clear_issue("validation")
+        self.statusBar().set_activity("validation", message)
 
     def _validation_failed(self, message: str) -> None:
-        self.validation_label.setText(message)
-        self.validation_label.setStyleSheet("color: #ffad7a;")
+        self.statusBar().clear_activity("validation")
+        self.statusBar().set_issue("validation", message, details=self._validation_details)
 
     def _publish_validation_result(self, result: ProjectChecksResult) -> None:
+        self.statusBar().clear_activity("validation")
+        self.statusBar().clear_issue("validation")
         self._present_validation(
             list(result.errors), list(result.overlaps), refresh_highlights=True,
-            details=list(result.details), speaker_count=result.speaker_count,
+            warning_details=list(result.details), speaker_count=result.speaker_count,
         )
 
     def _present_validation(
         self, errors: list[str], timeline_warnings: list[TimelineOverlap], *,
-        refresh_highlights: bool = False, details: list[str] | None = None,
+        refresh_highlights: bool = False, warning_details: list[str] | None = None,
         speaker_count: int | None = None,
     ) -> None:
         if refresh_highlights:
             self._apply_timeline_review_highlights(timeline_warnings)
-        warning_details = (
-            details if details is not None else self._timeline_review_details(timeline_warnings)
-        )
-        self.validation_label.setToolTip("\n".join(warning_details))
+        if warning_details is None:
+            warning_details = self._timeline_review_details(timeline_warnings)
+        if speaker_count is None:
+            speaker_count = len({
+                name for segment in self.project.segments for name in segment.characters if name
+            })
+        self._validation_details = "\n".join([
+            f"Export requirements: {'Needs attention' if errors else 'Ready to export'}",
+            f"{len(self.project.segments)} segments · {speaker_count} speakers",
+            *errors, *warning_details,
+        ])
         if not self.project.segments:
-            self.validation_label.setText("No segments yet. Set In/Out points, then add a segment.")
-            self.validation_label.setStyleSheet("color: #7f91a8;")
+            summary, color = "No segments", "#7f91a8"
         elif errors:
-            self.validation_label.setText(
-                f"{len(self.project.segments)} segments · {len(errors)} item(s) need attention"
+            summary = (
+                f"{len(self.project.segments)} segments · {len(errors)} issues"
                 + (
                     f" · {len(timeline_warnings)} overlap(s) to review"
                     if timeline_warnings
                     else ""
                 )
             )
-            self.validation_label.setStyleSheet("color: #ffad7a;")
+            color = "#ffad7a"
         elif timeline_warnings:
-            self.validation_label.setText(
+            summary = (
                 f"Ready to export · {len(self.project.segments)} segments · "
                 f"{len(timeline_warnings)} potential overlap(s) to review"
             )
-            self.validation_label.setStyleSheet("color: #ffbf69;")
+            color = "#ffbf69"
         else:
-            self.validation_label.setText(
-                f"Ready to export · {len(self.project.segments)} segments · "
-                f"{speaker_count if speaker_count is not None else len(self.project.speakers)} speakers"
-            )
-            self.validation_label.setStyleSheet("color: #66ddb0;")
+            summary = f"Ready to export · {len(self.project.segments)} segments"
+            color = "#66ddb0"
+        self._validation_summary = summary
+        self.processing_status.set_validation(summary, self._validation_details, color)
+        self._refresh_status_details()
 
-    def _set_dirty(self, dirty: bool, *, segment: Segment | None = None) -> None:
+    def _refresh_processing_activity(self) -> None:
+        summary = self.processing.status_summary()
+        if self.processing.has_active_work():
+            if not any(
+                self.processing.group_state(group).state in ACTIVE_STATES - {"consent"}
+                for group in ("transcript", "backing")
+            ):
+                summary = (
+                    "Waiting for edits" if self._derived_publication_blocked()
+                    else "Preparing voice"
+                )
+            self.statusBar().set_activity("processing", summary)
+        else:
+            self.statusBar().clear_activity("processing")
+
+    def _refresh_status_details(self) -> None:
+        bar = self.statusBar()
+        self.processing_status.set_issue_count(bar.issue_count)
+        self.processing_dialog.set_project_details(
+            bar.details_text() + "\n\n" + self._validation_details,
+            has_notices=bool(bar.issue_count),
+        )
+
+    def _set_dirty(
+        self, dirty: bool, *, segment: Segment | None = None,
+        history_label: str | None = None, history_merge: str | None = None,
+        fields_only: bool = False, record_history: bool = True,
+        full_history: bool = False,
+    ) -> None:
+        was_dirty = self.dirty
+        recording = (
+            dirty and record_history and self._range_edit_record is None
+            and not self.edit_history.suspended
+        )
+        if recording:
+            changed = self.edit_history.record(
+                history_label or "Edit project", segment=None if full_history else segment,
+                merge_key=history_merge, fields_only=fields_only,
+            )
+            if not changed and history_label is None and self.edit_history.history.is_clean:
+                # Explicit dirty baselines (imports/recovery) have no saved history state.
+                self.edit_history.history.mark_saved(-1)
         self.dirty = dirty
+        if recording:
+            self.edit_history._sync_clean()
+            dirty = self.dirty
+        if was_dirty and not dirty:
+            self._clear_recovery_snapshot()
         if dirty and self.recovery_store:
             self._discard_recovery_on_transition = False
             self._recovery_timer.start()
@@ -3130,8 +3318,9 @@ class ProjectEditor(QWidget):
             f"{'*' if dirty else ''}{name} — Choicer Voicer Pack Creator"
         )
         self.workspace.refresh_tabs()
-        self.project_checks.changed(segment)
-        if hasattr(self, "speaker_matching"):
+        if not self.edit_history.suspended:
+            self.project_checks.changed(segment)
+        if hasattr(self, "speaker_matching") and not self.edit_history.suspended:
             self.speaker_matching.changed(segment=segment)
 
     def _maybe_save(self) -> bool:
@@ -3302,7 +3491,7 @@ class MainWindow(QMainWindow):
     def editor_for_project(self, project_id: str) -> ProjectEditor:
         return self.editors[project_id]
 
-    def statusBar(self) -> QStatusBar:  # noqa: N802
+    def statusBar(self) -> ProjectStatusBar:  # noqa: N802
         return self.active_editor.statusBar()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -3750,10 +3939,13 @@ class MainWindow(QMainWindow):
             self.settings.setValue("lastProjectDir", str(path.parent))
             if warnings:
                 editor.session.attention = "\n".join(warnings)
-                editor.statusBar().showMessage(editor.session.attention)
+                editor.statusBar().set_issue(
+                    "import", "Imported pack needs attention", details=editor.session.attention,
+                )
 
         def failed(message: str) -> None:
             editor.session.attention = message
+            editor.statusBar().set_issue("open", "Could not open project", details=message)
             self.notice("Could not open project", message)
             if path.suffix.casefold() == ".json":
                 self.offer_previous_save(editor, path, message)
@@ -3835,6 +4027,11 @@ class MainWindow(QMainWindow):
         self, editor: ProjectEditor, *, save_as: bool = False,
         destination: Path | None = None, on_saved: Callable[[], None] | None = None,
     ) -> bool:
+        try:
+            self._ensure_save_ready(editor)
+        except ValueError as error:
+            self.notice("Could not save project", str(error))
+            return False
         editor._commit_editors()
         destination = destination or (None if save_as else editor.project_path)
         if destination is None:
@@ -3856,6 +4053,7 @@ class MainWindow(QMainWindow):
             self.notice("Could not save project", str(error))
             return False
         snapshot, revision = editor.session.snapshot(), editor.session.revision
+        editor.edit_history.saving(revision)
 
         def save(_context):
             ProjectStore.save(snapshot, destination)
@@ -3880,6 +4078,7 @@ class MainWindow(QMainWindow):
         def failed(message):
             self._closing = False
             self.updater.cancel_close_update()
+            editor.statusBar().set_issue("save", "Could not save project", details=message)
             self.notice("Could not save project", message)
 
         def finished():
@@ -3892,10 +4091,16 @@ class MainWindow(QMainWindow):
         job.finished.connect(finished)
         return True
 
+    @staticmethod
+    def _ensure_save_ready(editor: ProjectEditor) -> None:
+        if editor.session.loading:
+            raise ValueError("Wait for this project to finish opening or restoring history before saving it.")
+        if editor._range_edit_record is not None or editor._range_decision_active:
+            raise ValueError("Finish the current timing edit before saving the project.")
+
     def reserve_project_save(self, project_id: str, destination: Path) -> str:
         editor = self.editor_for_project(project_id)
-        if editor.session.loading:
-            raise ValueError("Wait for this project to finish opening before saving it.")
+        self._ensure_save_ready(editor)
         key = canonical_project_path(destination)
         owner = self._save_targets.get(key)
         if owner is None:
@@ -3932,6 +4137,7 @@ class MainWindow(QMainWindow):
         editor.project_path = destination
         editor._saved_project_hash = saved_hash
         editor.session.saved_revision = revision
+        editor.edit_history.saved(revision)
         self.settings.setValue("lastProjectDir", str(destination.parent))
         editor._remember_recent_project(destination)
         if project_id in self._closed_ids:
@@ -3940,7 +4146,13 @@ class MainWindow(QMainWindow):
             editor._clear_recovery_snapshot()
         else:
             editor._write_recovery_snapshot()
-        editor.statusBar().showMessage(f"Saved revision {revision} to {destination}")
+        save_details = f"Saved revision {revision} to {destination}"
+        editor.statusBar().clear_issue("save")
+        editor.statusBar().set_detail("save", save_details)
+        editor.statusBar().showMessage(
+            "Project saved" if not editor.dirty else "Project snapshot saved; newer edits are unsaved",
+            details=save_details,
+        )
         self.refresh_tabs()
 
     def offer_previous_save(self, editor: ProjectEditor, path: Path, message: str = "") -> None:
@@ -3963,8 +4175,8 @@ class MainWindow(QMainWindow):
             )
             self._show_decision(box)
         job.completed.connect(offer)
-        job.failed.connect(lambda error: editor.statusBar().showMessage(
-            f"No readable previous save: {error}"
+        job.failed.connect(lambda error: editor.statusBar().set_issue(
+            "previous-save", "No readable previous save", details=error,
         ))
 
     def _view_state(self, editor: ProjectEditor) -> dict:
@@ -4123,9 +4335,7 @@ class MainWindow(QMainWindow):
             editor._write_recovery_snapshot()
         else:
             editor._source_request += 1
-            editor.project_checks.close()
-            editor.derived_work.close()
-            editor.speaker_matching.close_processing()
+            editor._close_derived_work()
             self._closed_ids.add(editor.session.id)
             self.setup_consent.cancel_project(editor.session.id)
         self.tabs.removeTab(self.tabs.indexOf(editor))
@@ -4235,6 +4445,7 @@ class MainWindow(QMainWindow):
             self.setup_consent.cancel_all()
             self.tasks_window.close()
             for editor in self.editors.values():
+                editor._close_derived_work()
                 editor._layout_save_timer.stop()
                 editor._reset_transport_state()
                 editor.player.stop()
@@ -4330,6 +4541,7 @@ class MainWindow(QMainWindow):
             return
         self._save_window_layout()
         for editor in self.editors.values():
+            editor._close_derived_work()
             editor._layout_save_timer.stop()
             editor._reset_transport_state()
             editor.player.stop()

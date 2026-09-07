@@ -5,7 +5,8 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, Signal
+from shiboken6 import isValid
 
 from choicer_voicer_pack_creator.jobs import JobManager, JobRecord
 from choicer_voicer_pack_creator.ui import derived_work
@@ -14,6 +15,7 @@ from choicer_voicer_pack_creator.ui.derived_work import DerivedWorkCoordinator
 
 class Handle(QObject):
     finished = Signal()
+    state_changed = Signal(str)
 
     def __init__(self, generation: int, *, immediate_cancel: bool = False):
         super().__init__()
@@ -22,14 +24,21 @@ class Handle(QObject):
         )
         self.immediate_cancel = immediate_cancel
         self.cancelled = False
+        self.cancel_calls = 0
 
     def cancel(self):
         self.cancelled = True
+        self.cancel_calls += 1
+        self.record = replace(self.record, cancel_requested=True)
         if self.immediate_cancel:
             self.finish("cancelled")
+        else:
+            self.record = replace(self.record, state="cancelling")
+            self.state_changed.emit("cancelling")
 
     def finish(self, state="succeeded"):
         self.record = replace(self.record, state=state, error="old error" if state == "failed" else None)
+        self.state_changed.emit(state)
         self.finished.emit()
 
 
@@ -54,6 +63,11 @@ def scheduler(qapp, monkeypatch):
     state.coordinator, state.start, state.pump = coordinator, start, pump
     yield state
     coordinator.close()
+    coordinator.deleteLater()
+    QCoreApplication.sendPostedEvents(coordinator, QEvent.Type.DeferredDelete)
+    for handle in state.handles:
+        handle.deleteLater()
+        QCoreApplication.sendPostedEvents(handle, QEvent.Type.DeferredDelete)
 
 
 def request(state, *, delay=250):
@@ -97,12 +111,98 @@ def test_active_and_pending_remain_bounded_with_late_cancellation(scheduler):
     c = request(scheduler, delay=0)
     scheduler.pump()
     assert scheduler.started == [a]
+    assert scheduler.handles[0].cancel_calls == 1
     scheduler.handles[0].finish("cancelled")
     scheduler.pump()
     assert scheduler.started == [a, c]
     assert not scheduler.coordinator._states["checks"].paused
     scheduler.handles[-1].finish()
     assert [record.id for record in scheduler.published] == [str(c)]
+
+
+def test_parent_destruction_disconnects_late_worker_completion(qapp):
+    parent = QObject()
+    coordinator = DerivedWorkCoordinator(parent)
+    handle = Handle(0)
+    published = []
+    coordinator.request("checks", lambda _generation: handle, published.append, delay_ms=0)
+    coordinator._pump()
+    parent.deleteLater()
+    QCoreApplication.sendPostedEvents(parent, QEvent.Type.DeferredDelete)
+    assert not isValid(coordinator)
+    handle.finish()
+    assert published == []
+
+
+def test_direct_handle_cancel_pauses_before_editing_and_late_completion(scheduler):
+    request(scheduler, delay=0)
+    scheduler.pump()
+    cancelled = []
+    scheduler.coordinator.cancelled.connect(lambda key, record: cancelled.append((key, record.id)))
+    old = scheduler.handles[0]
+    old.cancel()
+    assert scheduler.coordinator._states["checks"].paused
+    assert cancelled == [("checks", old.record.id)]
+    latest = request(scheduler, delay=0)
+    old.finish()
+    scheduler.pump()
+    assert len(scheduler.started) == 1
+    assert scheduler.published == []
+    scheduler.coordinator.resume("checks")
+    scheduler.pump()
+    assert scheduler.started[-1] == latest
+
+
+@pytest.mark.parametrize("immediate", [False, True])
+def test_same_generation_supersession_revokes_status_before_cancellation(scheduler, immediate):
+    old_generation = request(scheduler, delay=0)
+    scheduler.pump()
+    old = scheduler.handles[0]
+    old.immediate_cancel = immediate
+    cancel = old.cancel
+    guards = []
+
+    def cancel_with_status():
+        guards.append(scheduler.coordinator.current("checks", old_generation))
+        cancel()
+
+    old.cancel = cancel_with_status
+    scheduler.coordinator.request("checks", scheduler.start, scheduler.published.append, delay_ms=0)
+    latest = scheduler.coordinator.generation("checks")
+    assert latest > old_generation
+    assert guards == [False]
+    if not immediate:
+        old.finish("cancelled")
+    scheduler.pump()
+    assert scheduler.started == [old_generation, latest]
+    # A consumer holding the old record remains stale after its replacement starts.
+    assert not scheduler.coordinator.current("checks", old_generation)
+    old.finish("failed")
+    assert scheduler.published == []
+    scheduler.handles[-1].finish()
+    assert [record.id for record in scheduler.published] == [str(latest)]
+
+
+def test_completion_continuation_keeps_generation_and_reports_deferred_delivery(scheduler):
+    deliveries = []
+
+    def publish(record):
+        deliveries.append(scheduler.coordinator.publication_was_deferred("checks"))
+        scheduler.coordinator.request(
+            "checks", scheduler.start, scheduler.published.append, delay_ms=0,
+        )
+
+    scheduler.coordinator.request("checks", scheduler.start, publish, delay_ms=0)
+    scheduler.pump()
+    scheduler.blocked = True
+    scheduler.handles[0].finish()
+    scheduler.blocked = False
+    scheduler.pump()
+    assert deliveries == [True]
+    assert not scheduler.coordinator.publication_was_deferred("checks")
+    assert scheduler.started == [0, 0]
+    scheduler.handles[-1].finish()
+    assert len(scheduler.published) == 1
 
 
 def test_synchronous_queued_cancellation_cannot_publish_or_erase_replacement(scheduler):
@@ -280,3 +380,7 @@ def test_coordinator_respects_shared_job_capacity(qtbot):
         release.set()
         qtbot.waitUntil(lambda: not manager.active_jobs())
         manager.shutdown(wait=True)
+        coordinator.deleteLater()
+        manager.deleteLater()
+        QCoreApplication.sendPostedEvents(coordinator, QEvent.Type.DeferredDelete)
+        QCoreApplication.sendPostedEvents(manager, QEvent.Type.DeferredDelete)

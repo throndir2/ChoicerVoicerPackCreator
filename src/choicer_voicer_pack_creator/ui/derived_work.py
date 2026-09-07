@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PySide6.QtCore import QObject, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
 from choicer_voicer_pack_creator.jobs import JobHandle, JobRecord
 
@@ -33,6 +33,7 @@ class _State:
     suspended: bool = False
     blocked: bool = False
     starting: bool = False
+    publishing_deferred: bool = False
 
 
 class DerivedWorkCoordinator(QObject):
@@ -42,6 +43,8 @@ class DerivedWorkCoordinator(QObject):
     Factories run on the Qt thread and return a started JobManager/JobWorker handle
     (or None for no work). Only current terminal records reach ``publish``.
     ``current`` also guards progress/errors consumed outside this coordinator.
+    Replacing live work without an intervening ``invalidate`` advances its
+    generation too: use the generation passed to the factory for job metadata.
 
     ``pause`` is an explicit cancel-and-pause until ``resume``; supersession never
     pauses. ``suspend`` / ``resume_suspended`` instead hold starts and publication
@@ -52,6 +55,7 @@ class DerivedWorkCoordinator(QObject):
 
     changed = Signal()
     resumed = Signal()
+    cancelled = Signal(str, object)
 
     def __init__(
         self, parent: QObject | None = None, *, blocked: Callable[[], bool] = lambda: False,
@@ -77,6 +81,10 @@ class DerivedWorkCoordinator(QObject):
         state = self._state(key)
         return not self._closed and not state.paused and state.generation == generation
 
+    def publication_was_deferred(self, key: str) -> bool:
+        """During publish, indicate that a terminal result waited behind a blocker."""
+        return self._state(key).publishing_deferred
+
     def invalidate(self, key: str) -> int:
         state = self._state(key)
         # Queued-job cancellation emits finished synchronously. Revoke publication
@@ -86,7 +94,7 @@ class DerivedWorkCoordinator(QObject):
         state.pending = None
         state.publication = None
         active = state.active
-        if active is not None:
+        if active is not None and not active[1].record.cancel_requested:
             active[1].cancel()
         self.changed.emit()
         self._wake()
@@ -101,6 +109,13 @@ class DerivedWorkCoordinator(QObject):
         state = self._state(key)
         if self._closed:
             return
+        if state.starting or any(
+            item is not None and item[0].generation == state.generation
+            for item in (state.active, state.publication)
+        ):
+            # A serial alone cannot guard external consumers with key/generation
+            # metadata. Revoke it before cancel(), which may finish synchronously.
+            state.generation += 1
         state.serial += 1
         delay = delay_ms / 1000
         state.pending = _Request(
@@ -108,7 +123,7 @@ class DerivedWorkCoordinator(QObject):
         )
         state.publication = None
         active = state.active
-        if active is not None:
+        if active is not None and not active[1].record.cancel_requested:
             active[1].cancel()
         self.changed.emit()
         self._wake()
@@ -176,11 +191,44 @@ class DerivedWorkCoordinator(QObject):
         state.active = None
         if self._valid(state, request):
             if not self._blocked() and not self._suspended and not state.suspended:
-                request.publish(handle.record)
+                self._deliver(state, request, handle.record, deferred=False)
             else:
                 state.publication = request, handle.record
         self.changed.emit()
         self._wake()
+
+    @Slot()
+    def _handle_finished(self) -> None:
+        handle = self.sender()
+        for key, state in tuple(self._states.items()):
+            if state.active is not None and state.active[1] is handle:
+                self._finished(key, *state.active)
+                return
+
+    @Slot(str)
+    def _handle_state_changed(self, _status: str) -> None:
+        handle = self.sender()
+        for key, state in tuple(self._states.items()):
+            if state.active is None or state.active[1] is not handle:
+                continue
+            request, active = state.active
+            if active.record.cancel_requested and self._valid(state, request):
+                # Internal supersession revokes the generation before cancel().
+                # A still-current handle was cancelled directly (e.g. Tasks).
+                self.pause(key)
+                self.cancelled.emit(key, active.record)
+            return
+
+    @staticmethod
+    def _deliver(
+        state: _State, request: _Request, record: JobRecord, *, deferred: bool,
+    ) -> None:
+        previous = state.publishing_deferred
+        state.publishing_deferred = deferred
+        try:
+            request.publish(record)
+        finally:
+            state.publishing_deferred = previous
 
     def _pump(self) -> None:
         if self._closed:
@@ -200,7 +248,7 @@ class DerivedWorkCoordinator(QObject):
             if publication is not None:
                 request, record = publication
                 if self._valid(state, request):
-                    request.publish(record)
+                    self._deliver(state, request, record, deferred=True)
                     self.changed.emit()
             if self._blocked() or self._suspended or state.suspended:
                 state.blocked = True
@@ -221,7 +269,7 @@ class DerivedWorkCoordinator(QObject):
             state.starting = True
             try:
                 handle = request.start(request.generation)
-            except Exception as error:
+            except (OSError, RuntimeError, ValueError) as error:
                 handle = None
                 if self._valid(state, request):
                     state.publication = request, JobRecord(
@@ -234,10 +282,8 @@ class DerivedWorkCoordinator(QObject):
                 state.starting = False
             if handle is not None:
                 state.active = request, handle
-                handle.finished.connect(
-                    lambda key=key, request=request, handle=handle:
-                    self._finished(key, request, handle),
-                )
+                handle.state_changed.connect(self._handle_state_changed)
+                handle.finished.connect(self._handle_finished)
                 if not self._valid(state, request):
                     handle.cancel()
                 if not handle.record.active:

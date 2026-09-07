@@ -4,7 +4,7 @@ import pytest
 from PySide6.QtCore import QPoint, Qt
 
 from choicer_voicer_pack_creator.models import Segment
-from choicer_voicer_pack_creator.ui.timeline import TimelineWidget
+from choicer_voicer_pack_creator.ui.timeline import TimelineWidget, segment_lanes
 
 
 def _point(widget: TimelineWidget, timestamp: float, y: int) -> QPoint:
@@ -28,6 +28,41 @@ def test_segment_release_applies_final_pointer_after_last_move(qtbot):
     qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 5, y))
     assert (segment.start, segment.end) == (4, 6)
     assert finished == [(segment.id, 2, 4, 4, 6)]
+
+
+def test_lane_layout_reuses_lowest_available_lane_and_accepts_prepared_layout(qtbot):
+    segments = [
+        Segment(0, 5), Segment(1, 2), Segment(2, 3),
+        Segment(5 - 0.0009, 6), Segment(5, 7),
+    ]
+    lanes = segment_lanes(list(reversed(segments)))
+    assert [lanes[segment.id] for segment in segments] == [0, 1, 1, 0, 1]
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.set_segments(segments, lanes=lanes)
+    assert timeline._segment_lanes is lanes
+    assert timeline.minimumHeight() == 188
+
+
+def test_paint_skips_offscreen_geometry_but_keeps_minimum_width_edge(qtbot, monkeypatch):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 220)
+    timeline.set_duration(100)
+    timeline.set_playhead(50)
+    timeline.set_zoom(5, anchor_time=50)
+    segments = [Segment(1, 2), Segment(39.98, 39.99), Segment(41, 43), Segment(80, 90)]
+    timeline.set_segments(segments)
+    measured = []
+    original = timeline._segment_rect
+
+    def rectangle(segment):
+        measured.append(segment.id)
+        return original(segment)
+
+    monkeypatch.setattr(timeline, "_segment_rect", rectangle)
+    timeline.grab()
+    assert measured == [segments[1].id, segments[2].id]
 
 
 @pytest.mark.parametrize("y", [4, 65, 210])

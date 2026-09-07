@@ -163,14 +163,18 @@ its edits. `open_project` requires a `.cvpack.json` project with an explicit sup
 `schema_version`.
 
 Every project result includes a process-local stable `project_id` and opaque `revision`.
-`loading` identifies an initial open/probe placeholder: inspection is allowed, but mutations
-and saving are refused until its real project finishes loading.
+`loading` identifies an initial open/probe placeholder or an in-progress history restore:
+inspection is allowed, but mutations and saving are refused until it finishes.
 Pass `project_id` to project inspection, editing, saving, export/analysis, previews and
 `show_in_editor`. Omitting it captures the active document **at request start**, not whichever
 tab is active when an operation finishes. Revisions include document identity; stale revisions
 or unknown IDs fail without applying an edit. `activate_project` takes a required `project_id`.
 `list_projects` returns `{active_project_id, projects:[{project_id,title,project_path,dirty,revision}]}`.
 IDs identify an open document/session, not a globally portable file identifier.
+
+Live assistant edits participate in the editor's per-project, 100-edit undo/redo history
+under **Project > Edit History**. Closing the project clears that history. Undo/redo does not
+roll back saved/exported files or downloads and is not available in headless mode.
 
 In live mode prefer `start_export(output_parent, expected_revision, project_id?, overwrite=false)`
 and `start_analysis(expected_revision, project_id?, use_whisper=false, allow_download=false,

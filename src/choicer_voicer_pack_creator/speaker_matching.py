@@ -37,6 +37,7 @@ EMBEDDING_DIMENSIONS = 256
 PREPROCESSING_VERSION = "wespeaker-knf-2"
 MIN_ACTIVE_SECONDS = 0.75
 MAX_CLIP_SECONDS = 12.0
+PREPARATION_BATCH_SIZE = 16
 ACTIVITY_WINDOW_SECONDS = 0.02
 MIN_RMS = 0.005
 # Training-matched WeSpeaker scores are not probabilities; keep stricter open-set evidence.

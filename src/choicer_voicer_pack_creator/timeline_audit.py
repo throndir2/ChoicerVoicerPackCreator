@@ -15,6 +15,23 @@ class TimelineOverlap:
     seconds: float
 
 
+def describe_timeline_overlaps(
+    segments: list[Segment], warnings: list[TimelineOverlap],
+) -> list[str]:
+    indexed = {segment.id: (index, segment) for index, segment in enumerate(segments, 1)}
+    details = []
+    for warning in warnings:
+        check_cancelled()
+        first, second = indexed.get(warning.first_id), indexed.get(warning.second_id)
+        if first is not None and second is not None:
+            details.append(
+                f"Segments {first[0]:03d} ({first[1].primary_character}) and "
+                f"{second[0]:03d} ({second[1].primary_character}) overlap by "
+                f"{warning.seconds:.3f}s."
+            )
+    return details
+
+
 def audit_timeline_overlaps(
     segments: list[Segment],
     *,

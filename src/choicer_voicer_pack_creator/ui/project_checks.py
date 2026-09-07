@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QTimer
+from PySide6.QtCore import QObject, QTimer, Slot
 
 from choicer_voicer_pack_creator.jobs import JobContext, JobHandle, JobRecord
 from choicer_voicer_pack_creator.models import Segment
@@ -45,13 +45,19 @@ class ProjectChecks(QObject):
         self._indicator.setSingleShot(True)
         self._indicator.setInterval(250)
         self._indicator.timeout.connect(self._show_pending)
+        editor.derived_work.cancelled.connect(self._cancelled)
 
-    def changed(self, segment: Segment | None = None, *, force: bool = False) -> None:
+    def changed(
+        self, segment: Segment | None = None, *, force: bool = False,
+        prepared: ProjectChecksResult | None = None,
+    ) -> None:
         if self._closed:
             return
         metadata = ProjectChecksInput.capture(self.editor.project)
         token = self.editor.session.source_token()
-        changed = force or metadata != self._metadata or token != self._source_token
+        changed = (
+            force or prepared is not None or metadata != self._metadata or token != self._source_token
+        )
         self._metadata, self._source_token = metadata, token
         if segment is None or segment.id not in self._segments or self._duplicates:
             values = tuple(SegmentChecksInput.capture(item) for item in self.editor.project.segments)
@@ -71,10 +77,19 @@ class ProjectChecks(QObject):
             self._segments[segment.id] = value
         if not changed:
             return
-        self.editor.derived_work.invalidate(self.key)
+        generation = self.editor.derived_work.invalidate(self.key)
+        if prepared is not None:
+            self._indicator.stop()
+            self.pending = False
+            self.result = prepared
+            self.editor._publish_validation_result(prepared)
+            return
         self.pending = True
         self.editor._validation_pending()
-        if not self._indicator.isActive():
+        if (
+            self.editor.derived_work.current(self.key, generation)
+            and not self._indicator.isActive()
+        ):
             self._indicator.start()
         self.request()
 
@@ -86,7 +101,12 @@ class ProjectChecks(QObject):
         )
 
     def _show_pending(self) -> None:
-        if self.pending and not self._closed:
+        if (
+            self.pending and not self._closed
+            and self.editor.derived_work.current(
+                self.key, self.editor.derived_work.generation(self.key),
+            )
+        ):
             self.editor._validation_activity(
                 "Waiting for edits" if self.editor._derived_publication_blocked()
                 else "Updating checks"
@@ -119,6 +139,7 @@ class ProjectChecks(QObject):
             self.result = record.result
             self.pending = False
             self.editor._publish_validation_result(record.result)
+            self.editor.workspace.job_manager.release_result(record.id)
         else:
             # Cancel is an explicit pause, not a successful/ready validation result.
             if record.state == "cancelled":
@@ -127,11 +148,23 @@ class ProjectChecks(QObject):
                 "Checks paused" if record.state == "cancelled"
                 else f"Checks failed: {record.error or record.message}"
             )
-            tasks = self.editor.workspace.tasks_window
-            tasks.register_retry(
-                record.id, self.retry, available=lambda: not self._closed,
-            )
-            self.destroyed.connect(lambda: tasks.unregister_retry(record.id))
+            self._register_retry(record)
+
+    @Slot(str, object)
+    def _cancelled(self, key: str, record: JobRecord) -> None:
+        if key != self.key or self._closed:
+            return
+        self._indicator.stop()
+        self.pending = True
+        self.editor._validation_failed("Checks paused")
+        self._register_retry(record)
+
+    def _register_retry(self, record: JobRecord) -> None:
+        tasks = self.editor.workspace.tasks_window
+        tasks.register_retry(
+            record.id, self.retry, available=lambda: not self._closed,
+        )
+        self.destroyed.connect(lambda: tasks.unregister_retry(record.id))
 
     def retry(self) -> None:
         self.editor.derived_work.resume(self.key)

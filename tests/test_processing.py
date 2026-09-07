@@ -173,6 +173,7 @@ def test_summary_counts_groups_and_keeps_attention_during_parallel_work(qtbot):
     model.set_status("speaker-preparation", "failed", "Model missing.")
     model.set_status("speakers", "running", "Comparing cached voices.")
     model.set_status("backing", "waiting", "Waiting for CPU.")
+    qtbot.waitUntil(lambda: model._voice_visible)
     assert model.status_summary() == "Background: 3 active, 2 need attention"
     model.set_status("analysis", "ready", "Ready.")
     model.set_status("refinement", "ready", "Ready.")
@@ -180,4 +181,27 @@ def test_summary_counts_groups_and_keeps_attention_during_parallel_work(qtbot):
     model.set_status("speakers", "cancelled", "Paused.")
     model.set_status("backing", "ready", "Ready.")
     assert model.status_summary() == ""
+    manager.shutdown(wait=True)
+
+
+def test_voice_activity_is_delayed_but_details_and_errors_are_immediate(qtbot):
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    manager = JobManager(parent)
+    model = ProcessingModel(manager, ProjectSession(PackProject()), parent)
+    model.set_status("speakers", "queued", "Waiting for edits")
+    assert model.group_state("voices").state == "queued"
+    assert model.status_summary() == ""
+    assert not model.has_active_work()
+    assert model._voice_timer.interval() == 250
+    model.set_status("speakers", "ready", "Finished before indicator")
+    assert not model._voice_timer.isActive()
+    assert model.status_summary() == ""
+    model.set_status("speaker-preparation", "running", "Preparing voice")
+    model._voice_timer.timeout.emit()
+    assert model.status_summary() == "Background: 1 active"
+    assert model.has_active_work()
+    model.set_status("speaker-preparation", "failed", "Current failure")
+    assert model.status_summary() == "Background: 1 needs attention"
+    assert not model.has_active_work()
     manager.shutdown(wait=True)

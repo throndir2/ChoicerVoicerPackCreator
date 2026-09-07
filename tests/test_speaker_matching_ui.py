@@ -18,6 +18,7 @@ from choicer_voicer_pack_creator.models import (
 from choicer_voicer_pack_creator.operations import SourceSnapshot
 from choicer_voicer_pack_creator.project_io import RecoveryStore
 from choicer_voicer_pack_creator.speaker_matching import (
+    PREPARATION_BATCH_SIZE,
     SpeakerDownloadRequired,
     SpeakerMatch,
     SpeakerMatchingCancelled,
@@ -227,14 +228,15 @@ def test_matching_failure_remains_visible_and_can_be_retried_in_processing(match
     qtbot.waitUntil(lambda: matching.controls.worker is None)
     assert "Voice model unavailable" in editor.processing.group_state("voices").message
     assert not editor.processing_status.isHidden()
-    assert "attention" in editor.processing_status.text()
+    assert "attention" in editor.processing_status.accessibleName()
     assert not editor.processing_dialog.isVisible()
     assert control.text() == "Retry"
     matching.state.match_error = ""
     start(matching, qtbot)
     finish(matching, qtbot)
     assert matching.target.characters == ["Alice"]
-    assert editor.processing_status.isHidden()
+    assert not editor.processing_status.isHidden()
+    assert "Background:" not in editor.processing_status.accessibleName()
 
 
 def test_background_matching_preserves_caption_cursor_selection_and_playhead(matching, qtbot):
@@ -371,7 +373,31 @@ def test_undo_preserves_manual_correction_and_excludes_restored_blanks(matching,
     assert matching.other.characters == []
     assert matching.other.speaker_assignment == "excluded"
     assert not matching.editor.action_clear_speaker_autofill.isEnabled()
-    assert matching.editor.statusBar().currentMessage() == "Cleared 1 auto-filled name(s)."
+    assert "Latest notice: Cleared 1 auto-filled name(s)." in (
+        matching.editor.statusBar().details_text()
+    )
+    assert matching.editor.edit_history.history.undo_label == "Clear last speaker auto-fill"
+
+
+def test_shared_history_restores_speaker_batches_without_immediate_refill(matching, qtbot):
+    start(matching, qtbot)
+    finish(matching, qtbot)
+    editor, controls = matching.editor, matching.controls
+    assert editor.edit_history.history.undo_label == "Auto-fill speakers"
+    after = editor.project.to_dict()
+    editor.action_undo.trigger()
+    qtbot.waitUntil(lambda: not editor.edit_history.busy)
+    assert editor.project.segment_by_id(matching.target.id).characters == []
+    assert controls._paused
+    assert not controls._timer.isActive()
+    assert not editor.action_clear_speaker_autofill.isEnabled()
+    calls = len(matching.state.calls)
+    controls._start()
+    assert len(matching.state.calls) == calls
+    editor.action_redo.trigger()
+    qtbot.waitUntil(lambda: not editor.edit_history.busy)
+    assert editor.project.to_dict() == after
+    assert controls._paused
 
 
 def test_only_manual_single_speaker_references_and_eligible_targets_are_submitted(matching, qtbot):
@@ -413,7 +439,9 @@ def test_matching_completion_reports_only_the_applied_count(matching, qtbot, cou
         matching.other.speaker_assignment = "excluded"
     start(matching, qtbot)
     finish(matching, qtbot)
-    assert matching.editor.statusBar().currentMessage() == f"Filled {count} speaker name(s)."
+    assert f"Latest notice: Filled {count} speaker name(s)." in (
+        matching.editor.statusBar().details_text()
+    )
     assert f"Filled {count} speaker name(s)." in matching.editor.processing.group_state("voices").message
     assert matching.target.characters == (["Alice"] if count else [])
     assert matching.other.characters == (["Alice"] if count == 2 else [])
@@ -558,7 +586,7 @@ def test_new_segment_drag_observes_only_its_state_and_validates_once_on_release(
     assert segment.audio_path == ""
     assert segment.source_range_known
     assert segment.characters == []
-    assert "overlap" in editor.validation_label.text()
+    assert "overlap" in editor.processing_status.accessibleName()
     row = editor._row_for_segment(segment.id)
     assert editor.segment_table.item(row, 0).background().style() != Qt.BrushStyle.NoBrush
 
@@ -584,7 +612,7 @@ def test_voice_jobs_wait_for_drag_release_even_when_the_mouse_pauses(matching, q
         finish(matching, qtbot)
     else:
         qtbot.waitUntil(lambda: bool(matching.state.preparations))
-        qtbot.waitUntil(lambda: len(matching.state.preparations) == 3 and controls.worker is None)
+        wait_prepared(matching, qtbot)
         clips = prepared_clips(matching)
     assert (4.5, 7.5) in {(clip.start, clip.end) for clip in clips}
     assert (4.25, 7.25) not in {(clip.start, clip.end) for clip in clips}
@@ -653,7 +681,7 @@ def test_rapid_committed_names_are_coalesced_and_unchanged_focus_does_not_rematc
     qtbot.waitUntil(matching.state.started.is_set)
     finish(matching, qtbot)
     assert len(matching.state.calls) == 1
-    assert len(matching.state.preparations) == 3
+    assert len(matching.state.preparations) == 1
     assert matching.target.characters == ["Bobby"]
     editor._selected_speakers_changed()
     assert not controls._timer.isActive()
@@ -851,7 +879,7 @@ def test_unnamed_segments_are_prepared_before_any_name_is_entered(matching, qtbo
     qtbot.waitUntil(matching.state.started.is_set)
     assert matching.controls.worker.job_handle.record.resource_class == "io"
     finish(matching, qtbot)
-    assert len(matching.state.preparations) == 3
+    assert len(matching.state.preparations) == 1
     assert matching.target.characters == ["Alice"]
 
 
@@ -868,7 +896,7 @@ def test_draft_ranges_are_prepared_before_becoming_segments(matching, qtbot):
     matching.controls.prepare()
     wait_prepared(matching, qtbot, 2)
     assert not editor.project.segments
-    qtbot.waitUntil(lambda: len(matching.state.preparations) == 2 and matching.controls.worker is None)
+    wait_prepared(matching, qtbot, 2)
     assert [(clip.start, clip.end) for clip in prepared_clips(matching)] == [
         (0.0, 3.0), (4.0, 7.0),
     ]
@@ -877,7 +905,7 @@ def test_draft_ranges_are_prepared_before_becoming_segments(matching, qtbot):
     editor._set_dirty(True)
     start(matching, qtbot)
     finish(matching, qtbot)
-    assert len(matching.state.preparations) == 2
+    assert len(matching.state.preparations) == 1
     assert editor.project.segments[1].characters == ["Alice"]
 
 
@@ -910,7 +938,7 @@ def test_cached_name_matching_does_not_wait_for_backing_cpu_job(matching, qtbot)
         finish(matching, qtbot)
         assert job.record.state == "running"
         assert matching.target.characters == ["Alice"]
-        assert len(matching.state.preparations) == 3
+        assert len(matching.state.preparations) == 1
     finally:
         release.set()
         qtbot.waitUntil(lambda: not job.record.active)
@@ -921,27 +949,27 @@ def test_missing_cached_signature_returns_to_cpu_preparation(matching, qtbot):
     wait_prepared(matching, qtbot)
     matching.state.cache_misses = 1
     start(matching, qtbot)
-    assert len(matching.state.preparations) == 6
+    assert len(matching.state.preparations) == 2
     finish(matching, qtbot)
     assert matching.target.characters == ["Alice"]
     assert matching.editor.processing.group_state("voices").state == "ready"
 
 
-def test_editing_one_range_does_not_cancel_unrelated_active_preparation(matching, qtbot):
+def test_editing_a_range_in_a_batch_retains_other_work_and_its_old_range_cache(matching, qtbot):
     controls, state = matching.controls, matching.state
     state.hold_preparation = True
     controls.prepare()
     qtbot.waitUntil(state.preparation_started.is_set)
     handle = controls.worker.job_handle
-    assert len(state.preparations[0][0]) == 1
+    assert len(state.preparations[0][0]) == 3
     assert state.preparations[0][0][0].start == matching.reference.start
     matching.target.start = 4.5
     matching.editor._set_dirty(True, segment=matching.target)
     assert not handle.record.cancel_requested
     state.preparation_release.set()
-    qtbot.waitUntil(lambda: len(controls._prepared_ranges) == 3 and controls.worker is None)
+    wait_prepared(matching, qtbot, 4)
     assert [(clip.start, clip.end) for clip in prepared_clips(matching)] == [
-        (0, 3), (4.5, 7), (8, 11),
+        (0, 3), (4, 7), (8, 11), (4.5, 7),
     ]
     assert not controls._paused
 
@@ -962,7 +990,7 @@ def test_reference_rename_does_not_cancel_preparation_or_discard_cached_audio(ma
     controls.retry()
     qtbot.waitUntil(state.started.is_set)
     finish(matching, qtbot)
-    assert len(state.preparations) == 3
+    assert len(state.preparations) == 1
     assert matching.target.characters == ["Alicia"]
 
 
@@ -976,6 +1004,41 @@ def test_editing_a_prepared_range_reuses_all_unrelated_fingerprints(matching, qt
     assert [(clip.start, clip.end) for clip in prepared_clips(matching)] == [
         (0, 3), (4, 7), (8, 11), (4.5, 7),
     ]
+
+
+def test_preparation_uses_bounded_batches_and_keeps_unrelated_active_batch(matching, qtbot):
+    editor, controls, state = matching.editor, matching.controls, matching.state
+    count = PREPARATION_BATCH_SIZE * 2 + 3
+    added = [
+        Segment(12 + index * 3, 14 + index * 3, caption="More dialogue")
+        for index in range(count - len(editor.project.segments))
+    ]
+    editor.project.segments.extend(added)
+    editor.project.video_duration = added[-1].end
+    editor._set_dirty(True)
+    state.hold_preparation = True
+    counts = []
+    matching.window.job_manager.changed.connect(lambda _record: counts.append(sum(
+        record.kind == "speaker-preparation"
+        for record in matching.window.job_manager.active_jobs(editor.session.id)
+    )))
+    controls.prepare()
+    qtbot.waitUntil(state.preparation_started.is_set)
+    handle = controls.worker.job_handle
+    last = added[-1]
+    old_start = last.start
+    last.start += 0.25
+    editor._set_dirty(True, segment=last)
+    assert not handle.record.cancel_requested
+    assert all(clip.start != old_start for clip in state.preparations[0][0])
+    state.preparation_release.set()
+    wait_prepared(matching, qtbot, count)
+    assert [len(clips) for clips, _consent in state.preparations] == [
+        PREPARATION_BATCH_SIZE, PREPARATION_BATCH_SIZE, 3,
+    ]
+    assert max(counts) == 1
+    assert not any(clip.start == old_start for clip in prepared_clips(matching))
+    assert (editor.project.video_path, last.start, last.end) in controls._prepared_ranges
 
 
 @pytest.mark.parametrize("late_error", ["", "Superseded model failed"])
@@ -1033,6 +1096,54 @@ def test_source_identity_is_reverified_off_thread_after_modal_wait(
     assert "Source audio changed" in matching.editor.processing.group_state("voices").message
 
 
+@pytest.mark.parametrize("source_changed", [False, True])
+def test_verification_completed_behind_modal_requires_another_source_check(
+    matching, qtbot, monkeypatch, source_changed,
+):
+    checked, finish_verification = threading.Event(), threading.Event()
+    verified_threads = []
+    run = speaker_matching.SpeakerWorker.run
+
+    def controlled_run(worker):
+        verification = worker.verification is not None
+        run(worker)
+        if verification:
+            verified_threads.append(threading.get_ident())
+            if len(verified_threads) == 1:
+                checked.set()
+                assert finish_verification.wait(10)
+
+    monkeypatch.setattr(speaker_matching.SpeakerWorker, "run", controlled_run)
+    dialog = QDialog(matching.editor)
+    qtbot.addWidget(dialog)
+    dialog.setModal(True)
+    try:
+        start(matching, qtbot)
+        matching.state.release.set()
+        qtbot.waitUntil(checked.is_set)
+        # The second source check has succeeded, but its JobRecord cannot finish
+        # until this barrier opens. Make that completion wait behind a new modal.
+        dialog.show()
+        finish_verification.set()
+        qtbot.waitUntil(lambda: matching.controls.worker is None)
+        assert matching.controls._publication is not None
+        assert matching.target.characters == []
+        if source_changed:
+            matching.video.write_bytes(b"Source changed after verification, before publication")
+        dialog.reject()
+        if source_changed:
+            qtbot.waitUntil(lambda: matching.editor.processing.group_state("voices").state == "failed")
+            assert matching.target.characters == matching.other.characters == []
+            assert "Source audio changed" in matching.editor.processing.group_state("voices").message
+        else:
+            qtbot.waitUntil(lambda: matching.target.characters == ["Alice"])
+        assert len(verified_threads) == 2
+        assert threading.get_ident() not in verified_threads
+    finally:
+        finish_verification.set()
+        dialog.reject()
+
+
 def test_history_replay_pauses_until_name_edit_or_explicit_resume(matching, qtbot):
     controls = matching.controls
     start(matching, qtbot)
@@ -1071,3 +1182,24 @@ def test_task_window_cancellation_is_an_explicit_voice_pause(matching, qtbot):
     assert not matching.controls._timer.isActive()
     assert matching.editor.processing.group_state("voices").state == "cancelled"
     assert matching.target.characters == []
+
+
+@pytest.mark.parametrize("late_error", ["", "Cancelled inference failed late"])
+def test_task_cancel_then_edit_stays_paused_through_late_completion(matching, qtbot, late_error):
+    matching.state.ignore_cancel = True
+    start(matching, qtbot)
+    matching.controls.worker.job_handle.cancel()
+    assert matching.controls._paused
+    matching.reference.characters = ["New name"]
+    matching.editor._set_dirty(True, segment=matching.reference)
+    matching.state.late_error = late_error
+    matching.state.release.set()
+    qtbot.waitUntil(lambda: matching.controls.worker is None)
+    assert matching.controls._paused
+    assert not matching.controls._timer.isActive()
+    assert len(matching.state.calls) == 1
+    assert matching.editor.processing.group_state("voices").state == "cancelled"
+    assert matching.target.characters == []
+    matching.state.late_error = ""
+    matching.controls.retry()
+    qtbot.waitUntil(lambda: matching.target.characters == ["New name"], timeout=10000)

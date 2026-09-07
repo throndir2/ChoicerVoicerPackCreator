@@ -17,6 +17,7 @@ from choicer_voicer_pack_creator.models import Segment
 from choicer_voicer_pack_creator.operations import SourceChangedError
 from choicer_voicer_pack_creator.speaker_matching import (
     MIN_ACTIVE_SECONDS,
+    PREPARATION_BATCH_SIZE,
     SpeakerClip,
     SpeakerDownloadRequired,
     SpeakerMatchingCancelled,
@@ -192,6 +193,7 @@ class SpeakerMatchingControls(QWidget):
         self._timer.timeout.connect(self._start)
         self.derived_work.changed.connect(self._update_actions)
         self.derived_work.resumed.connect(self._gesture_finished)
+        self.derived_work.cancelled.connect(self._derived_cancelled)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 0)
@@ -286,37 +288,17 @@ class SpeakerMatchingControls(QWidget):
         self.changed()
 
     def changed(self, *, segment: Segment | None = None) -> None:
-        previous = self._observed.copy() if segment is None else {
-            segment.id: self._observed.get(segment.id),
-        }
         changed = self._observe(segment)
         self._update_actions()
         if not changed or self._applying:
             return
         self._invalidate_comparison()
-        request = self._request
-        if request is not None and request.preparing:
-            affected = {
-                self._state_range(state)
-                for identity, state in previous.items()
-                if state is not None and (
-                    self._state_range(state)
-                    != self._state_range(self._observed.get(identity))
-                )
-            }
-            if any(_audio_range(clip) in affected for clip in request.clips):
-                self.derived_work.invalidate("speaker-preparation")
+        # Preparation labels no live segments: its immutable old ranges remain
+        # useful, source-verified cache entries even if a range changes mid-batch.
         if self.worker is not None:
             self._pending = True
         if (self._activated or self._preprocess) and not self._paused:
             self._timer.start(900)
-
-    def _state_range(self, state: _SegmentState | None) -> tuple | None:
-        if state is None:
-            return None
-        if state.audio_mode == "video":
-            return self.editor.project.video_path, state.start, state.end
-        return state.audio_path, 0.0, None
 
     def _gesture_finished(self) -> None:
         if not self._paused and self._timer.isActive():
@@ -336,14 +318,21 @@ class SpeakerMatchingControls(QWidget):
             )
 
     def history_replayed(self) -> None:
+        self._source_token = self.editor.session.source_token()
         self._history_paused = True
         self._paused = True
+        self._typing = False
+        self._undo.clear()
         self._timer.stop()
         self._pending = False
         self._invalidate_comparison()
         self.derived_work.pause("speakers")
         self.derived_work.pause("speaker-preparation")
         self._generation = self.derived_work.generation("speakers")
+        with QSignalBlocker(self.enabled_check):
+            self.enabled_check.setChecked(self.editor.project.auto_speaker_matching)
+        if self._consent_callback is not None:
+            self.editor.workspace.setup_consent.cancel_request(self._consent_callback)
         self._observe()
         for kind in ("speaker-preparation", "speakers"):
             self.editor.processing.set_status(
@@ -391,7 +380,9 @@ class SpeakerMatchingControls(QWidget):
     @Slot(bool)
     def _enabled_changed(self, enabled: bool) -> None:
         self.editor.project.auto_speaker_matching = enabled
-        self.editor._set_dirty(True)
+        self.editor._set_dirty(
+            True, history_label="Change automatic speaker matching", fields_only=True,
+        )
         if enabled:
             self.retry()
         else:
@@ -528,9 +519,8 @@ class SpeakerMatchingControls(QWidget):
                 )
             return
         if preparing:
-            # Short independent units retain already completed cache writes and avoid
-            # cancelling unrelated clips when one range changes during inference.
-            clips = preparation[:1]
+            # Amortize model setup while yielding shared CPU capacity between batches.
+            clips = preparation[:PREPARATION_BATCH_SIZE]
         key = "speaker-preparation" if preparing else "speakers"
         request = _Request(
             self.derived_work.generation(key), self.editor.session.source_token(),
@@ -545,10 +535,22 @@ class SpeakerMatchingControls(QWidget):
             diagnostic_exception("speaker_matching_setup_failed", error)
             self._failed(f"Speaker matching could not start: {error}")
             return
+        self._enqueue(manager, request)
+
+    def _enqueue(
+        self, manager: SpeakerMatchingManager, request: _Request,
+        verification: SpeakerResult | None = None,
+    ) -> None:
+        def start(generation: int) -> JobHandle:
+            nonlocal request
+            request = replace(request, generation=generation)
+            self._request = request
+            if request.key == "speakers":
+                self._generation = generation
+            return self._launch(manager, request, verification)
+
         self.derived_work.request(
-            key, lambda _generation: self._launch(manager, request),
-            lambda record: self._publish(record, request),
-            delay_ms=0,
+            request.key, start, lambda record: self._publish(record, request), delay_ms=0,
         )
 
     def _launch(
@@ -662,7 +664,10 @@ class SpeakerMatchingControls(QWidget):
                 )
                 self._pending = True
             elif isinstance(record.result, SpeakerResult):
-                if request.verifying:
+                if (
+                    request.verifying
+                    and not self.derived_work.publication_was_deferred(request.key)
+                ):
                     self._apply(record.result, request)
                 else:
                     # Publication may have waited behind a long modal/gesture. Check
@@ -670,14 +675,7 @@ class SpeakerMatchingControls(QWidget):
                     verification_request = replace(request, verifying=True)
                     self._request = verification_request
                     self._publication = record.result, verification_request
-                    self.derived_work.request(
-                        request.key,
-                        lambda _generation: self._launch(
-                            worker.manager, verification_request, record.result,
-                        ),
-                        lambda verified: self._publish(verified, verification_request),
-                        delay_ms=0,
-                    )
+                    self._enqueue(worker.manager, verification_request, record.result)
             else:
                 self._failed("Speaker matching returned an invalid result.")
         elif worker.outcome == "canceled" or record.state == "cancelled":
@@ -758,7 +756,7 @@ class SpeakerMatchingControls(QWidget):
                 segment.speaker_assignment = "automatic"
                 applied.append(segment)
             if applied:
-                self.editor._set_dirty(True)
+                self.editor._set_dirty(True, history_label="Auto-fill speakers")
                 self._refresh_names(applied)
                 self._undo = {
                     segment.id: (segment.characters[0], self._versions[segment.id])
@@ -810,7 +808,7 @@ class SpeakerMatchingControls(QWidget):
                     restored.append(segment)
             self._undo.clear()
             if restored:
-                self.editor._set_dirty(True)
+                self.editor._set_dirty(True, history_label="Clear last speaker auto-fill")
                 self._refresh_names(restored)
         finally:
             self._applying = False
@@ -840,6 +838,11 @@ class SpeakerMatchingControls(QWidget):
             for kind in ("speaker-preparation", "speakers"):
                 self.editor.processing.set_status(kind, state, message)
         self._update_actions()
+
+    @Slot(str, object)
+    def _derived_cancelled(self, key: str, _record: JobRecord) -> None:
+        if key in {"speakers", "speaker-preparation"}:
+            self.cancel()
 
     def close_processing(self) -> None:
         self._closed = True
