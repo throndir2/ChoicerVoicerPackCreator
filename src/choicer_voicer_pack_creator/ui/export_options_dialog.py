@@ -100,8 +100,8 @@ class ExportOptionsDialog(QDialog):
         self.preserve_check.setObjectName("exportPreserveVideo")
         self.preserve_check.setChecked(project.preserve_source_video)
         self.preserve_check.setToolTip(
-            "Only copies OGV with compatible codecs/audio and matching height/FPS. "
-            "Compatibility is checked during export; otherwise the video is converted."
+            "Recommended: check this for faster exports without losing video quality "
+            "when the imported video is already game-ready."
         )
         layout.addWidget(self.preserve_check)
         self.preserve_note = QLabel()
