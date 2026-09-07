@@ -536,6 +536,8 @@ class SpeakerMatchingControls(QWidget):
             self._failed(f"Speaker matching could not start: {error}")
             return
         self._enqueue(manager, request)
+        # Reserve queue priority before the transcript completion releases CPU capacity.
+        self.derived_work.dispatch_ready()
 
     def _enqueue(
         self, manager: SpeakerMatchingManager, request: _Request,
