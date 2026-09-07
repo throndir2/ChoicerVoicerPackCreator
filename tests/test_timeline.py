@@ -477,3 +477,58 @@ def test_minimum_width_segment_center_is_clickable_and_blank_lane_seeks(qtbot) -
     assert selected == []
     assert seeks == [pytest.approx(timeline._x_to_time(blank_x), abs=0.01)]
     assert (segment.start, segment.end) == (200, 200.1)
+
+
+@pytest.mark.parametrize("modifier", [
+    Qt.KeyboardModifier.ShiftModifier, Qt.KeyboardModifier.ControlModifier,
+])
+@pytest.mark.parametrize("edge", ["start", "center", "end"])
+def test_modifier_click_and_motion_select_without_dragging_or_seeking(qtbot, modifier, edge):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 220)
+    timeline.set_duration(10)
+    first, second = Segment(1, 2), Segment(3, 4)
+    timeline.set_segments([first, second])
+    timeline.set_selected(first.id)
+    timeline.show()
+    rect = timeline._segment_rect(second)
+    x = {"start": rect.left() + 1, "center": rect.center().x(), "end": rect.right() - 1}[edge]
+    point = QPoint(round(x), round(rect.center().y()))
+    selections, seeks, edits = [], [], []
+    timeline.selection_changed.connect(selections.append)
+    timeline.seek_requested.connect(seeks.append)
+    timeline.range_edit_started.connect(lambda *args: edits.append(args))
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, modifier, pos=point)
+    qtbot.mouseMove(timeline, point + QPoint(50, 0))
+    qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, modifier, pos=point + QPoint(50, 0))
+    assert selections == [[first.id, second.id]]
+    assert timeline.selected_ids == {first.id, second.id}
+    assert timeline.selected_id == ""
+    assert not timeline._drag_kind
+    assert not seeks
+    assert not edits
+    assert (second.start, second.end) == (3, 4)
+
+
+def test_all_selected_blocks_are_highlighted_and_removed_ids_are_cleared(qtbot):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 220)
+    timeline.set_duration(10)
+    segments = [Segment(1, 2), Segment(3, 4), Segment(5, 6)]
+    timeline.set_segments(segments)
+    timeline.show()
+    points = [
+        timeline._segment_rect(segment).bottomRight().toPoint() - QPoint(10, 5)
+        for segment in segments
+    ]
+    unselected = timeline.grab().toImage()
+    timeline.set_selection([segments[0].id, segments[2].id])
+    selected = timeline.grab().toImage()
+    assert selected.pixelColor(points[0]) != unselected.pixelColor(points[0])
+    assert selected.pixelColor(points[1]) == unselected.pixelColor(points[1])
+    assert selected.pixelColor(points[2]) != unselected.pixelColor(points[2])
+    timeline.set_segments([segments[1]])
+    assert timeline.selected_ids == set()
+    assert timeline.selected_id == ""

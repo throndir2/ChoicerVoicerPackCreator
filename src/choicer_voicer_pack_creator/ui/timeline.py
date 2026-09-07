@@ -3,8 +3,17 @@ from __future__ import annotations
 import math
 from heapq import heappop, heappush
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QKeyEvent, QMouseEvent, QPainter, QPen, QWheelEvent
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QContextMenuEvent,
+    QFont,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+    QPen,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import QApplication, QToolTip, QWidget
 
 from choicer_voicer_pack_creator.models import Segment
@@ -34,6 +43,8 @@ def segment_lanes(segments: list[Segment]) -> dict[str, int]:
 class TimelineWidget(QWidget):
     seek_requested = Signal(float)
     segment_selected = Signal(str)
+    selection_changed = Signal(list)
+    segment_context_menu_requested = Signal(str, QPoint)
     boundary_changed = Signal(str, float, float)
     range_edit_started = Signal(str, float, float)
     range_changed = Signal(str, float, float)
@@ -50,6 +61,7 @@ class TimelineWidget(QWidget):
         self.peaks: list[float] = []
         self.segments: list[Segment] = []
         self.selected_id = ""
+        self.selected_ids: set[str] = set()
         self.zoom = 1.0
         self.offset = 0.0
         self.mark_in = 0.0
@@ -87,6 +99,7 @@ class TimelineWidget(QWidget):
         self, segments: list[Segment], *, lanes: dict[str, int] | None = None,
     ) -> None:
         self.segments = segments
+        self.set_selection(list(self.selected_ids))
         self._segment_lanes = segment_lanes(segments) if lanes is None else lanes
         visible_lanes = max(1, min(5, max(self._segment_lanes.values(), default=0) + 1))
         self.setMinimumHeight(max(176, 126 + visible_lanes * 31))
@@ -97,10 +110,15 @@ class TimelineWidget(QWidget):
 
     def set_selected(self, segment_id: str) -> None:
         changed = self.selected_id != segment_id
-        self.selected_id = segment_id
+        self.set_selection([segment_id] if segment_id else [])
         segment = next((item for item in self.segments if item.id == segment_id), None)
         if segment and changed:
             self.ensure_visible(segment.start)
+        self.update()
+
+    def set_selection(self, segment_ids: list[str]) -> None:
+        self.selected_ids = set(segment_ids).intersection(segment.id for segment in self.segments)
+        self.selected_id = next(iter(self.selected_ids)) if len(self.selected_ids) == 1 else ""
         self.update()
 
     def set_playhead(self, seconds: float) -> None:
@@ -240,9 +258,10 @@ class TimelineWidget(QWidget):
                 continue
             rect = self._segment_rect(segment)
             color = QColor(SEGMENT_COLORS[index % len(SEGMENT_COLORS)])
-            alpha = 115 if segment.id == self.selected_id else 58
+            selected = segment.id in self.selected_ids
+            alpha = 115 if selected else 58
             painter.fillRect(rect, QColor(color.red(), color.green(), color.blue(), alpha))
-            painter.setPen(QPen(color if segment.id == self.selected_id else color.darker(120), 2 if segment.id == self.selected_id else 1))
+            painter.setPen(QPen(color if selected else color.darker(120), 2 if selected else 1))
             painter.drawRect(rect)
             painter.setPen(color.lighter(130))
             painter.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold))
@@ -270,6 +289,10 @@ class TimelineWidget(QWidget):
         return not any(self._segment_rect(segment).contains(position) for segment in self.segments)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.RightButton:
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            event.accept()
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             return
         self.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -283,6 +306,16 @@ class TimelineWidget(QWidget):
         for segment in reversed(self.segments):
             rect = self._segment_rect(segment)
             if rect.contains(event.position()):
+                if event.modifiers() & (
+                    Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier
+                ):
+                    selected = self.selected_ids.symmetric_difference({segment.id})
+                    identifiers = [item.id for item in self.segments if item.id in selected]
+                    self.set_selection(identifiers)
+                    self.selection_changed.emit(identifiers)
+                    event.accept()
+                    return
+                self.selected_ids = {segment.id}
                 edge_width = min(7.0, rect.width() / 3.0) if rect.width() >= 6.0 else 0.0
                 if x <= rect.left() + edge_width:
                     self._prepare_drag("segment-start", segment.id, segment.start, segment.end, x)
@@ -319,6 +352,27 @@ class TimelineWidget(QWidget):
             self._prepare_drag("mark-new", "", self.mark_in, self.mark_out, x)
             return
         self.seek_requested.emit(self._x_to_time(x))
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802
+        if self._drag_kind:
+            event.accept()
+            return
+        keyboard = event.reason() == QContextMenuEvent.Reason.Keyboard
+        segment = next(
+            (
+                item for item in (self.segments if keyboard else reversed(self.segments))
+                if (item.id in self.selected_ids if keyboard
+                    else self._segment_rect(item).contains(QPointF(event.pos())))
+            ),
+            None,
+        )
+        if segment is not None:
+            position = (
+                self.mapToGlobal(self._segment_rect(segment).center().toPoint())
+                if keyboard else event.globalPos()
+            )
+            self.segment_context_menu_requested.emit(segment.id, position)
+        event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._drag_kind:
@@ -360,6 +414,7 @@ class TimelineWidget(QWidget):
                     event.globalPosition().toPoint(),
                     f"{segment.primary_character}\n{segment.start:.3f}–{segment.end:.3f}s\n"
                     f"Click to cue the start; drag the center to move; drag an edge to trim.\n"
+                    "Shift/Ctrl-click to add or remove a selection; right-click for segment actions.\n"
                     f"{segment.caption}",
                     self,
                 )

@@ -385,12 +385,19 @@ class EditHistoryController(QObject):
                 "The deletion preference could not be saved to application settings.",
             )
 
-    def confirm_delete(self, segment: Segment) -> bool:
+    def confirm_delete(self, segments: list[Segment]) -> bool:
         if not self.editor.settings.value(CONFIRM_DELETE_SETTING, True, type=bool):
             return True
+        segment = segments[0]
+        multiple = len(segments) > 1
         box = QMessageBox(
-            QMessageBox.Icon.Question, "Delete segment",
-            f"Delete {segment.primary_character}: \"{segment.caption or 'Untitled line'}\"?",
+            QMessageBox.Icon.Question, "Delete segments" if multiple else "Delete segment",
+            (
+                f"Delete the {len(segments)} selected segments?\n\n"
+                "Media files will not be deleted. You can undo this edit."
+                if multiple else
+                f"Delete {segment.primary_character}: \"{segment.caption or 'Untitled line'}\"?"
+            ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self.editor,
         )
         box.setDefaultButton(QMessageBox.StandardButton.No)

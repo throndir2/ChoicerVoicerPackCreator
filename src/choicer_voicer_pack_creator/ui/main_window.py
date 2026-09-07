@@ -10,6 +10,7 @@ from PySide6.QtCore import (
     QEvent,
     QItemSelectionModel,
     QObject,
+    QPoint,
     QSettings,
     QSignalBlocker,
     QSize,
@@ -44,6 +45,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -109,8 +111,8 @@ from choicer_voicer_pack_creator.ui.processing import (
     ProcessingStatus,
 )
 from choicer_voicer_pack_creator.ui.project_checks import ProjectChecks
-from choicer_voicer_pack_creator.ui.readable_table import ReadableTableWidget
 from choicer_voicer_pack_creator.ui.scene_dialog import SceneEditDialog
+from choicer_voicer_pack_creator.ui.segment_table import SegmentTableWidget
 from choicer_voicer_pack_creator.ui.setup_consent import SetupConsent
 from choicer_voicer_pack_creator.ui.speaker_matching import (
     SpeakerMatchingControls,
@@ -408,7 +410,7 @@ class ProjectEditor(QWidget):
         self.action_split = QAction("Split at Playhead", self)
         self.action_split.setShortcut(QKeySequence("Ctrl+Shift+S"))
         self.action_split.triggered.connect(self.split_segment)
-        self.action_combine = QAction("Combine Selected Segments", self)
+        self.action_combine = QAction("Merge Selected Segments", self)
         self.action_combine.setShortcut(QKeySequence("Ctrl+Shift+M"))
         self.action_combine.triggered.connect(self.combine_segments)
         self.action_delete = QAction("Delete Segment", self)
@@ -459,10 +461,10 @@ class ProjectEditor(QWidget):
             (self.action_clear_speaker_autofill, "restore", None, "Clear unchanged names from the last automatic batch in this tab and keep those segments unassigned. Subsequent manual edits are preserved."),
             (self.action_add, "add", "Add", "Create a new segment using the current In/Out times. Existing segments are not changed."),
             (self.action_split, "split", "Split", "Cut the selected segment into two at the white playback line (playhead). Move the playhead inside the segment first."),
-            (self.action_combine, "combine", "Combine", "Select multiple rows with Ctrl or Shift, then combine their ranges and lines."),
-            (self.action_duplicate, "duplicate", "Duplicate", "Duplicate the selected segment at the same timestamp."),
+            (self.action_combine, "combine", "Merge", "Merge selected segments from the earliest In to the latest Out, including gaps, and join their lines in timeline order."),
+            (self.action_duplicate, "duplicate", "Duplicate", "Duplicate each selected segment at its original timestamp."),
             (self.action_next_unassigned, "next-unassigned", "Next Unassigned", "Select the next line without a speaker and seek to its start, wrapping to the beginning if needed."),
-            (self.action_delete, "delete", "Delete", "Delete the selected segment. Undo is available in Project > Undo."),
+            (self.action_delete, "delete", "Delete", "Delete the selected segments without deleting media files. Undo is available in Project > Undo."),
             (self.action_apply_range, "apply", "Update Timing", "Update Segment Timing: replace the selected segment's start and end with the In/Out times. Does not create a new segment. Preserved audio is only regenerated with your approval."),
             (self.action_preview, "play", "Preview", "Play Selected Segment: play its saved range, then pause. For preserved audio, listen to the prompt recording instead of the video. Does not use pending changes in the In/Out fields."),
         ):
@@ -585,6 +587,8 @@ class ProjectEditor(QWidget):
         self.timeline = TimelineWidget(playback_controls)
         self.timeline.setToolTip(
             "Drag the white playback line or its top arrow to scrub.\n"
+            "Shift/Ctrl-click segment blocks to add or remove individual selections. "
+            "Right-click a segment for actions on it or the selected group.\n"
             "Drag a segment block or its highlighted waveform range to move it; "
             "drag its edges or IN/OUT handles to trim. These edits update the segment directly.\n"
             "Drag across empty waveform space to mark a new In/Out range, then use "
@@ -593,6 +597,8 @@ class ProjectEditor(QWidget):
         )
         self.timeline.seek_requested.connect(self.seek)
         self.timeline.segment_selected.connect(self.select_segment)
+        self.timeline.selection_changed.connect(self._select_segments)
+        self.timeline.segment_context_menu_requested.connect(self._show_segment_context_menu)
         self.timeline.range_edit_started.connect(self._timeline_range_edit_started)
         self.timeline.range_changed.connect(self._timeline_range_changed)
         self.timeline.range_edit_finished.connect(self._timeline_range_edit_finished)
@@ -730,14 +736,17 @@ class ProjectEditor(QWidget):
         segment_content = QWidget(self.segments_section)
         segment_layout = QVBoxLayout(segment_content)
         segment_layout.setContentsMargins(0, 0, 0, 0)
-        self.segment_table = ReadableTableWidget(0, 6)
+        self.segment_table = SegmentTableWidget(0, 6)
         self.segment_table.setObjectName("segmentsTable")
         self.segment_table.setHorizontalHeaderLabels(
             ["#", "In", "Out", "Speaker(s)", "Line", "Audio"]
         )
         self.segment_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.segment_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
-        self.segment_table.setToolTip("Use Ctrl-click or Shift-click to select segments to combine.")
+        self.segment_table.setToolTip(
+            "Ctrl-click individual segments or Shift-click a range. "
+            "Right-click a segment for actions on it or the selected group."
+        )
         self.segment_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.segment_table.setAlternatingRowColors(True)
         self.segment_table.verticalHeader().hide()
@@ -749,10 +758,19 @@ class ProjectEditor(QWidget):
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.segment_table.itemSelectionChanged.connect(self._table_selection_changed)
+        self.segment_table.segment_context_menu_requested.connect(self._show_segment_context_menu)
         self.segment_table.cellClicked.connect(
             lambda _row, _column: self.select_segment(self.selected_segment_id)
         )
         self.segment_table.cellDoubleClicked.connect(lambda _row, _column: self.preview_segment())
+        self._segment_context_menu = QMenu(self)
+        self._segment_context_menu.setObjectName("segmentContextMenu")
+        self._segment_context_menu.setToolTipsVisible(True)
+        self._segment_context_menu.addActions([self.action_preview, self.action_split])
+        self._segment_context_menu.addSeparator()
+        self._segment_context_menu.addActions([
+            self.action_combine, self.action_duplicate, self.action_delete,
+        ])
         segment_layout.addWidget(self.segment_table, 1)
         row_buttons = QHBoxLayout()
         row_buttons.addWidget(action_button(self.action_add, self))
@@ -1347,6 +1365,7 @@ class ProjectEditor(QWidget):
         history_label: str | None = None,
         history_replay: bool = False,
     ) -> None:
+        self._segment_context_menu.hide()
         self.derived_work.invalidate(ProjectChecks.key)
         if self._discard_recovery_on_transition:
             self._clear_recovery_snapshot()
@@ -1766,6 +1785,7 @@ class ProjectEditor(QWidget):
             or self._range_edit_record is not None
             or self._syncing
             or self.edit_history.busy
+            or self._segment_context_menu.isVisible()
             or len(self._selected_table_ids()) > 1
         ):
             return
@@ -1902,20 +1922,30 @@ class ProjectEditor(QWidget):
         self.statusBar().showMessage("Segment split.")
 
     def duplicate_segment(self) -> None:
-        segment = self.selected_segment()
-        if segment is None:
+        self._commit_editors()
+        identifiers = set(self._selected_table_ids())
+        segments = [segment for segment in self.project.segments if segment.id in identifiers]
+        if not segments:
             QMessageBox.information(self, "No segment", "Select a segment to duplicate.")
             return
-        duplicate = segment.clone()
-        self.project.add_segment(duplicate)
-        self._set_dirty(True, history_label="Duplicate segment")
-        self._refresh_table(duplicate.id)
-        self.select_segment(duplicate.id)
-        self.speakers_edit.setFocus()
-        self.speakers_edit.selectAll()
-        self.statusBar().showMessage("Segment duplicated at the same timestamp.")
+        duplicates = [segment.clone() for segment in segments]
+        self.project.segments.extend(duplicates)
+        self.project.sort_segments()
+        self._set_dirty(
+            True, history_label="Duplicate segment" if len(duplicates) == 1 else "Duplicate segments",
+        )
+        self._refresh_table("")
+        self._select_segments([segment.id for segment in duplicates], cue=len(duplicates) == 1)
+        if len(duplicates) == 1:
+            self.speakers_edit.setFocus()
+            self.speakers_edit.selectAll()
+        self.statusBar().showMessage(
+            "Segment duplicated at the same timestamp." if len(duplicates) == 1
+            else f"Duplicated {len(duplicates)} segments at their original timestamps."
+        )
 
     def combine_segments(self) -> None:
+        self._commit_editors()
         identifiers = self._selected_table_ids()
         selected = sorted(
             (segment for segment in self.project.segments if segment.id in identifiers),
@@ -1952,16 +1982,26 @@ class ProjectEditor(QWidget):
         self.statusBar().showMessage(f"Combined {len(selected)} segments.")
 
     def delete_segment(self) -> None:
-        segment = self.selected_segment()
-        if segment is None:
+        self._commit_editors()
+        identifiers = set(self._selected_table_ids())
+        segments = [segment for segment in self.project.segments if segment.id in identifiers]
+        if not segments:
+            self.statusBar().showMessage("Select a segment to delete.", 5000)
             return
-        if not self.edit_history.confirm_delete(segment):
+        if not self.edit_history.confirm_delete(segments):
             return
-        self.project.remove_segment(segment.id)
+        self.project.segments = [
+            segment for segment in self.project.segments if segment.id not in identifiers
+        ]
         self.selected_segment_id = ""
-        self._set_dirty(True, history_label="Delete segment")
+        self._set_dirty(
+            True, history_label="Delete segment" if len(segments) == 1 else "Delete segments",
+        )
         self._refresh_table()
         self._sync_selected_editor()
+        self.statusBar().showMessage(
+            "Segment deleted." if len(segments) == 1 else f"Deleted {len(segments)} segments."
+        )
 
     def preview_segment(self) -> None:
         self.workspace.pause_other_previews(self)
@@ -2013,7 +2053,7 @@ class ProjectEditor(QWidget):
         self.selected_segment_id = segment.id
         self.timeline.set_selected(segment.id)
         self._select_table_row(segment.id)
-        self._update_combine_action()
+        self._update_segment_actions()
         self._sync_selected_editor()
         self._syncing = True
         try:
@@ -2292,10 +2332,11 @@ class ProjectEditor(QWidget):
         finally:
             self.segment_table.blockSignals(False)
         self.timeline.set_segments(self.project.segments)
+        self.timeline.set_selection(self._selected_table_ids())
         self.video_widget.set_segments(self.project.segments)
         if selected_id is None:
             self._table_selection_changed()
-        self._update_combine_action()
+        self._update_segment_actions()
         self._refresh_validation_label()
 
     def _populate_table_row(self, row: int, segment: Segment, *, warned: bool = False) -> None:
@@ -2361,19 +2402,60 @@ class ProjectEditor(QWidget):
                 self.segment_table.scrollToItem(item)
                 return
 
-    def _table_selection_changed(self) -> None:
+    def _select_segments(self, identifiers: list[str], *, cue: bool = False) -> None:
+        selected = set(identifiers)
+        with QSignalBlocker(self.segment_table):
+            selection = self.segment_table.selectionModel()
+            selection.clearSelection()
+            first = True
+            for row in range(self.segment_table.rowCount()):
+                item = self.segment_table.item(row, 0)
+                if item.data(Qt.ItemDataRole.UserRole) in selected:
+                    index = self.segment_table.model().index(row, 0)
+                    selection.select(
+                        index, QItemSelectionModel.SelectionFlag.Select
+                        | QItemSelectionModel.SelectionFlag.Rows,
+                    )
+                    if first:
+                        selection.setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
+                        first = False
+        self._table_selection_changed(cue=cue)
+
+    def _show_segment_context_menu(self, segment_id: str, position: QPoint) -> None:
+        if self.session.loading:
+            self.statusBar().showMessage("Wait for the project to finish loading.", 5000)
+            return
+        segment = self.project.segment_by_id(segment_id)
+        if segment is None:
+            self.statusBar().showMessage("That segment no longer exists.", 5000)
+            return
+        self._commit_editors()
+        if segment_id not in self._selected_table_ids():
+            self._show_selected_segment(segment)
+        self._update_segment_actions()
+        self._segment_context_menu.popup(position)
+
+    def _table_selection_changed(self, *, cue: bool = True) -> None:
         if self._syncing:
             return
         identifiers = self._selected_table_ids()
-        self._update_combine_action()
+        self._update_segment_actions()
         if len(identifiers) == 1:
             if identifiers[0] != self.selected_segment_id:
-                self.select_segment(identifiers[0])
+                segment = self.project.segment_by_id(identifiers[0])
+                if segment is None:
+                    self.statusBar().showMessage("That segment no longer exists.", 5000)
+                    self._select_segments([])
+                    return
+                if cue:
+                    self.select_segment(identifiers[0])
+                else:
+                    self._show_selected_segment(segment)
         else:
             self.prompt_player.stop()
             self._preview_end = None
             self.selected_segment_id = ""
-            self.timeline.set_selected("")
+            self.timeline.set_selection(identifiers)
             self.timeline.set_marks(self.mark_in_spin.value(), self.mark_out_spin.value())
             self._sync_selected_editor()
 
@@ -2383,10 +2465,14 @@ class ProjectEditor(QWidget):
             for index in self.segment_table.selectionModel().selectedRows()
         ]
 
-    def _update_combine_action(self) -> None:
-        self.action_combine.setEnabled(
-            self.editor_splitter.isEnabled() and len(self._selected_table_ids()) >= 2
-        )
+    def _update_segment_actions(self) -> None:
+        count = len(self._selected_table_ids())
+        enabled = self.editor_splitter.isEnabled() and not self.session.loading
+        self.action_combine.setEnabled(enabled and count >= 2)
+        for action, verb in ((self.action_duplicate, "Duplicate"), (self.action_delete, "Delete")):
+            action.setEnabled(enabled and count > 0)
+            action.setText(f"{verb} {count} Segments" if count > 1 else f"{verb} Segment")
+            action.setIconText(verb)
 
     def _sync_selected_editor(self) -> None:
         segment = self.selected_segment()
@@ -3109,11 +3195,12 @@ class ProjectEditor(QWidget):
         else:
             self.statusBar().clear_activity("export")
         self.action_export.setEnabled(not busy and not self.session.loading)
-        self._update_combine_action()
+        self._update_segment_actions()
 
     def _set_loading(self, loading: bool, *, message: str = "Opening project…") -> None:
         self.session.loading = loading
         if loading:
+            self._segment_context_menu.hide()
             self.project_checks.changed(force=True)
             self.statusBar().set_activity("loading", message)
         else:
@@ -3135,7 +3222,7 @@ class ProjectEditor(QWidget):
         self._sync_selected_editor()
         self._refresh_scene_actions()
         self.action_export.setEnabled(not loading and self._export_worker is None)
-        self._update_combine_action()
+        self._update_segment_actions()
         self.speaker_matching._update_actions()
         if loading:
             self.action_combine.setEnabled(False)

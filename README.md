@@ -35,7 +35,16 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
   Select a segment or mark an In/Out range first, then repeat to make multiple scene packs
   from the same video without changing the original project.
 - Adds, previews, splits, combines, duplicates, deletes, and re-times segments.
-  Press **Backspace** (or **Ctrl+Delete**) to delete the selected segment after confirmation;
+- Shift-click or Ctrl-click segment blocks below the waveform to add/remove individual
+  selections. In the segment list, Shift-click selects a range and Ctrl-click toggles a row.
+  Both views highlight the same selection. Right-click either view's segment for **Merge
+  Selected Segments**, **Duplicate**, or **Delete**; a single segment also offers **Play**
+  and **Split at Playhead**. Right-click keeps an existing group selected and does not seek.
+  Merge spans the earliest In through the latest Out (including gaps), joining lines and
+  speakers in timeline order. Preserved prompt recordings must be explicitly regenerated
+  from source-video ranges before merging. Duplicates keep their original timing and media;
+  group duplication or deletion is one undoable edit, with one confirmation for deletion.
+  Press **Backspace** (or **Ctrl+Delete**) to delete the selected segments after confirmation;
   check **Don't ask again** to skip future segment confirmations. Backspace still works
   normally when editing text or numbers.
 - Keeps the latest **100 project edits** per open tab. Use **Ctrl+Z** to undo and
