@@ -305,6 +305,160 @@ def test_typing_does_not_start_model_until_name_is_committed(matching, qtbot):
     assert matching.target.characters == ["Alicia"]
 
 
+def test_name_commit_updates_existing_cells_without_rebuilding_the_table(matching, monkeypatch):
+    editor = matching.editor
+    table = editor.segment_table
+    items = [
+        [table.item(row, column) for column in range(table.columnCount())]
+        for row in range(table.rowCount())
+    ]
+    selection = editor._selected_table_ids()
+    scroll = table.verticalScrollBar().value()
+    playhead = editor.current_position()
+
+    def unexpected_refresh(*_args):
+        pytest.fail("Naming a segment must not rebuild the segment table")
+
+    monkeypatch.setattr(editor, "_refresh_table", unexpected_refresh)
+    editor.speakers_edit.setText("Bob")
+    editor._selected_speakers_typed()
+    editor.speakers_edit.setCursorPosition(1)
+    editor._selected_speakers_changed()
+
+    assert matching.target.characters == ["Bob"]
+    assert items[1][3].text() == "Bob"
+    assert editor.speakers_edit.cursorPosition() == 1
+    assert editor._selected_table_ids() == selection
+    assert table.verticalScrollBar().value() == scroll
+    assert editor.current_position() == playhead
+    assert all(
+        table.item(row, column) is item
+        for row, cells in enumerate(items)
+        for column, item in enumerate(cells)
+    )
+
+
+def test_typing_observes_only_the_edited_segment_and_defers_validation(
+    matching, qtbot, monkeypatch,
+):
+    editor = matching.editor
+    observed = []
+    validations = []
+    capture = speaker_matching._SegmentState.capture
+    validate = PackProject.validate
+
+    def record_capture(cls, segment):
+        observed.append(segment.id)
+        return capture(segment)
+
+    def record_validation(project):
+        if project is editor.project:
+            validations.append(True)
+        return validate(project)
+
+    monkeypatch.setattr(speaker_matching._SegmentState, "capture", classmethod(record_capture))
+    monkeypatch.setattr(PackProject, "validate", record_validation)
+    for text in ("B", "Bo", "Bob"):
+        editor.speakers_edit.setText(text)
+        editor._selected_speakers_typed()
+    assert observed == [matching.target.id] * 3
+    assert validations == []
+    assert matching.target.characters == ["Bob"]
+    assert editor.dirty
+    qtbot.waitUntil(lambda: len(validations) == 1)
+    editor.speakers_edit.setText("Bobby")
+    editor._selected_speakers_typed()
+    editor._selected_speakers_changed()
+    assert validations == [True, True]
+    assert not editor._validation_timer.isActive()
+
+
+def test_rapid_committed_names_are_coalesced_and_unchanged_focus_does_not_rematch(
+    matching, qtbot,
+):
+    editor, controls = matching.editor, matching.controls
+    controls.prepare()
+    qtbot.waitUntil(lambda: bool(matching.state.preparations) and controls.worker is None)
+    editor.select_segment(matching.reference.id)
+    for text in ("Bob", "Bobby"):
+        editor.speakers_edit.setText(text)
+        editor._selected_speakers_typed()
+        editor._selected_speakers_changed()
+        assert controls._timer.isActive()
+        assert controls._timer.interval() == 900
+        qtbot.wait(100)
+        assert matching.state.calls == []
+    qtbot.waitUntil(matching.state.started.is_set)
+    finish(matching, qtbot)
+    assert len(matching.state.calls) == 1
+    assert len(matching.state.preparations) == 1
+    assert matching.target.characters == ["Bobby"]
+    editor._selected_speakers_changed()
+    assert not controls._timer.isActive()
+
+
+def test_large_match_batch_and_undo_do_not_search_the_project_or_table_per_name(
+    matching, qtbot, monkeypatch,
+):
+    editor = matching.editor
+    added = [Segment(12 + index * 3, 14 + index * 3, caption="Dialogue") for index in range(400)]
+    editor.project.segments.extend(added)
+    editor.project.video_duration = added[-1].end
+    editor._set_dirty(True)
+    editor._refresh_table(matching.target.id)
+    start(matching, qtbot)
+    lookups = []
+    segment_by_id = PackProject.segment_by_id
+
+    def record_lookup(project, identity):
+        if project is editor.project:
+            lookups.append(identity)
+        return segment_by_id(project, identity)
+
+    def unexpected_row_search(*_args):
+        pytest.fail("A batch should scan table rows once, not search them for each name")
+
+    monkeypatch.setattr(PackProject, "segment_by_id", record_lookup)
+    monkeypatch.setattr(editor, "_row_for_segment", unexpected_row_search)
+    finish(matching, qtbot)
+    assert len(lookups) < 10
+    assert all(segment.characters == ["Alice"] for segment in added)
+    assert all(editor.segment_table.item(row, 3).font().italic() for row in range(1, 403))
+    lookups.clear()
+    matching.controls.undo()
+    assert len(lookups) < 10
+    assert all(not segment.characters and segment.speaker_assignment == "excluded" for segment in added)
+    assert all(editor.segment_table.item(row, 3).text() == "" for row in range(1, 403))
+
+
+def test_name_commit_refreshes_overlap_highlights_without_replacing_cells(matching):
+    editor = matching.editor
+    matching.target.start, matching.target.end = matching.reference.start, matching.reference.end
+    editor._set_dirty(True)
+    editor._refresh_table(matching.target.id)
+    item = editor.segment_table.item(1, 3)
+    assert item.background().style() != Qt.BrushStyle.NoBrush
+    for name, warned in (("Bob", False), ("Alice", True)):
+        editor.speakers_edit.setText(name)
+        editor._selected_speakers_typed()
+        editor._selected_speakers_changed()
+        assert editor.segment_table.item(1, 3) is item
+        assert (item.background().style() != Qt.BrushStyle.NoBrush) == warned
+        assert ("Potential timeline overlap" in item.toolTip()) == warned
+
+
+def test_changing_a_reference_name_back_still_invalidates_an_inflight_result(matching, qtbot):
+    editor = matching.editor
+    editor.select_segment(matching.reference.id)
+    start(matching, qtbot)
+    for name in ("Bob", "Alice"):
+        editor.speakers_edit.setText(name)
+        editor._selected_speakers_typed()
+    finish(matching, qtbot)
+    assert matching.target.characters == []
+    assert "Reference speakers changed" in matching.controls.status.text()
+
+
 def test_short_reference_prepares_targets_but_does_not_match(matching, qtbot):
     matching.reference.end = 0.5
     matching.controls.retry()

@@ -700,6 +700,10 @@ file, or Still image to relink the missing asset.
 With **Auto-fill matching speakers in the background** enabled in the Segments panel, finish
 typing a speaker name (Enter or move focus out of the field) to compare that voice with eligible
 unassigned segments. You can keep editing captions, timings, and other projects while it runs.
+Rapid name edits are coalesced with a short delay before comparison; **Match now** skips that
+delay. Typing updates only the edited name and defers whole-project validation until a brief
+pause or commit. Committing a name and applying automatic matches update existing table cells
+without rebuilding the segment list or disturbing its selection and scroll position.
 For the best reference, name a clear, single-speaker dialogue line of about 2 seconds or more,
 rather than an isolated name or reaction. Naming other characters helps reject competing voices;
 you can also manually name more clean lines for the same character to strengthen its reference.

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QSignalBlocker, QTimer, Signal, Slot
+from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -228,7 +228,14 @@ class SpeakerMatchingControls(QWidget):
             and self.editor.session.id not in self.editor.workspace._closed_ids
         )
 
-    def _observe(self) -> bool:
+    def _observe(self, segment: Segment | None = None) -> bool:
+        if segment is not None:
+            state = _SegmentState.capture(segment)
+            if self._observed.get(segment.id) == state:
+                return False
+            self._observed[segment.id] = state
+            self._versions[segment.id] = self._versions.get(segment.id, 0) + 1
+            return True
         current = {
             segment.id: _SegmentState.capture(segment) for segment in self.editor.project.segments
         }
@@ -281,8 +288,8 @@ class SpeakerMatchingControls(QWidget):
             self._activated = True
         self.changed()
 
-    def changed(self) -> None:
-        changed = self._observe()
+    def changed(self, *, segment: Segment | None = None) -> None:
+        changed = self._observe(segment)
         self._update_buttons()
         if not changed or self._applying:
             return
@@ -313,14 +320,15 @@ class SpeakerMatchingControls(QWidget):
         else:
             self._timer.stop()
 
-    def name_committed(self) -> None:
+    def name_committed(self, *, force: bool = False) -> None:
+        if not self._typing and not force:
+            return
         self._typing = False
         self._activated = True
         self._preprocess = True
-        self._observe()
         if not self._paused:
             self._pending = self.worker is not None
-            self._timer.start(0)
+            self._timer.start(900)
 
     @Slot(bool)
     def _enabled_changed(self, enabled: bool) -> None:
@@ -575,7 +583,7 @@ class SpeakerMatchingControls(QWidget):
         elif self._outcome != "failed":
             self._failed("The task stopped without returning a result.")
         self._update_buttons()
-        if self._pending and not self._paused:
+        if self._pending and not self._paused and not self._timer.isActive():
             self._timer.start(0 if request.preparing else 900)
 
     def _request_download(self, manager: SpeakerMatchingManager) -> None:
@@ -638,10 +646,11 @@ class SpeakerMatchingControls(QWidget):
             self.status.setText("Source audio changed. Use Match now to analyze the new audio.")
             return
         applied = []
+        segments = {segment.id: segment for segment in self.editor.project.segments}
         self._applying = True
         try:
             for match in result.matches:
-                segment = self.editor.project.segment_by_id(match.segment_id)
+                segment = segments.get(match.segment_id)
                 expected = request.targets.get(match.segment_id)
                 if (
                     segment is None or expected is None
@@ -692,26 +701,35 @@ class SpeakerMatchingControls(QWidget):
             self._timer.start(900)
 
     def _refresh_names(self, segments: list[Segment]) -> None:
-        for segment in segments:
-            row = self.editor._row_for_segment(segment.id)
-            if row >= 0:
-                update_speaker_item(self.editor.segment_table.item(row, 3), segment)
-            if segment.id == self.editor.selected_segment_id:
+        by_id = {segment.id: segment for segment in segments}
+        table = self.editor.segment_table
+        # Walk the table once, rather than searching every row for every match.
+        with QSignalBlocker(table):
+            for row in range(table.rowCount()):
+                identity = table.item(row, 0)
+                segment = by_id.get(identity.data(Qt.ItemDataRole.UserRole)) if identity else None
+                if segment is not None:
+                    update_speaker_item(table.item(row, 3), segment)
+        selected = by_id.get(self.editor.selected_segment_id)
+        if selected is not None:
+            text = ", ".join(selected.characters)
+            if self.editor.speakers_edit.text() != text:
                 with QSignalBlocker(self.editor.speakers_edit):
-                    self.editor.speakers_edit.setText(", ".join(segment.characters))
-                self.editor._sync_speaker_exclusion()
+                    self.editor.speakers_edit.setText(text)
+            self.editor._sync_speaker_exclusion()
         self.editor.video_widget.set_segments(self.editor.project.segments)
         self.editor.timeline.update()
-        self.editor._refresh_validation_label()
+        self.editor._refresh_validation_label(refresh_highlights=True)
 
     @Slot()
     def undo(self) -> None:
         self._observe()
         restored = []
+        segments = {segment.id: segment for segment in self.editor.project.segments}
         self._applying = True
         try:
             for identity, (character, version) in self._undo.items():
-                segment = self.editor.project.segment_by_id(identity)
+                segment = segments.get(identity)
                 if (
                     segment is not None and segment.speaker_assignment == "automatic"
                     and segment.characters == [character] and self._versions.get(identity) == version
