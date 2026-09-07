@@ -364,7 +364,7 @@ creation (when requested), final validation, and cleanup. Estimates can move bac
 change; an unmeasured step that outlasts its estimate shows **re-estimating** instead of a false
 zero-second countdown. Only a successful export reaches 100%. The current-step bar shows measured
 video or completed-prompt progress separately and stays indeterminate for operations without measurable progress.
-The details window is nonmodal and can be closed while the export continues in the background. It retains
+The nonmodal details window has a **Hide** button while export runs and **Close** when it finishes. It retains
 output locations, cleanup notes, and failures for later inspection. Export uses a snapshot; edits
 made during export affect the next export, not the one already running.
 

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from PySide6.QtCore import QSettings, Qt, QTimer
-from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QDialog, QFileDialog, QLabel, QMessageBox
 
 from choicer_voicer_pack_creator.jobs import JobManager
 from choicer_voicer_pack_creator.models import SourceCaption
@@ -25,6 +25,20 @@ from choicer_voicer_pack_creator.youtube import (
 
 class UnusedMedia:
     pass
+
+
+def test_import_copy_keeps_automatic_processing_and_media_requirements(qtbot, tmp_path):
+    dialog = youtube_dialog.YouTubeDialog(UnusedMedia(), str(tmp_path))
+    qtbot.addWidget(dialog)
+    labels = [label.text() for label in dialog.findChildren(QLabel)]
+    assert (
+        "YouTube captions and a separate local Whisper transcript are prepared automatically. "
+        "Model downloads require permission."
+    ) in labels
+    assert "Keep downloaded media with the saved project." in labels
+    assert not any("overwrite" in text.lower() for text in labels)
+    assert "permission to use" in dialog.url_edit.toolTip()
+    assert "Playlists, live streams, and restricted videos" in dialog.url_edit.toolTip()
 
 
 def test_workspace_youtube_hides_without_cancel_and_emits_async_completion(
@@ -188,6 +202,10 @@ def test_existing_import_choice_runs_after_worker_and_does_not_block_jobs(
         assert dialog.worker is None
         assert not prompt.isModal()
         assert prompt.reuse_button.isEnabled()
+        assert any(
+            "Overwrite replaces source download files and may affect projects using them."
+            in label.text() for label in prompt.findChildren(QLabel)
+        )
         assert not accepted
         assert calls == [(None, False)]
         if jobs:

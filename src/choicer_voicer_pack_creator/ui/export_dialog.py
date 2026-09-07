@@ -87,16 +87,13 @@ class ExportProgressDialog(QDialog):
         self.details.setReadOnly(True)
         self.details.setMaximumBlockCount(2000)
         layout.addWidget(self.details, 1)
-        self.note_label = QLabel(
-            ("You can close these details and keep editing. Track or cancel export via Tools > Tasks. "
-             if background else "Please keep this window open until export finishes. ")
-            +
-            "Existing output is kept as a rollback backup during publishing."
-        )
-        self.note_label.setWordWrap(True)
-        layout.addWidget(self.note_label)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         self.close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
+        if background:
+            self.close_button.setText("Hide")
+            self.close_button.setToolTip(
+                "Export continues in the background. View or cancel it in Tools > Tasks."
+            )
         self.close_button.setEnabled(background)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -127,8 +124,7 @@ class ExportProgressDialog(QDialog):
                 f"{estimate.step_title or 'Current step'}: {format_remaining(estimate.step_remaining)}"
             )
             self.overall_eta_label.setText(
-                f"Whole export: {format_remaining(estimate.total_remaining)} "
-                "(estimate adjusts as work completes)"
+                f"Whole export: {format_remaining(estimate.total_remaining)}"
             )
             if estimate.total_fraction is None:
                 self.overall_bar.setRange(0, 0)
@@ -246,12 +242,8 @@ class ExportProgressDialog(QDialog):
         self._running = False
         self._update_elapsed()
         self._timer.stop()
-        self.note_label.setText(
-            "Export cancelled; existing output was preserved." if self._cancelled else
-            "Export finished. Output locations and any cleanup notes are listed above."
-            if self._outcome
-            else "Export did not complete. Review the error details above before trying again."
-        )
+        self.close_button.setText("Close")
+        self.close_button.setToolTip("")
         self.close_button.setEnabled(True)
         if self.isVisible() and not self.background:
             self.close_button.setFocus()
