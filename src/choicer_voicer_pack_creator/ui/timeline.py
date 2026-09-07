@@ -230,10 +230,15 @@ class TimelineWidget(QWidget):
         painter.drawText(QPointF(x2 + 5, 36), "OUT")
 
     def _paint_segments(self, painter: QPainter) -> None:
+        visible_end = self.offset + self.visible_duration
+        minimum_span = 3 * self.visible_duration / max(1, self.width())
         for index, segment in enumerate(self.segments):
-            rect = self._segment_rect(segment)
-            if rect.right() < 0 or rect.left() > self.width():
+            if (
+                segment.start > visible_end
+                or max(segment.end, segment.start + minimum_span) < self.offset
+            ):
                 continue
+            rect = self._segment_rect(segment)
             color = QColor(SEGMENT_COLORS[index % len(SEGMENT_COLORS)])
             alpha = 115 if segment.id == self.selected_id else 58
             painter.fillRect(rect, QColor(color.red(), color.green(), color.blue(), alpha))
@@ -367,6 +372,7 @@ class TimelineWidget(QWidget):
         if self._drag_kind == "playhead":
             self._update_drag(event.position().x())
         elif self._drag_active:
+            self._update_drag(event.position().x())
             final_start, final_end = self._current_drag_range()
             self.range_edit_finished.emit(
                 self._drag_id,

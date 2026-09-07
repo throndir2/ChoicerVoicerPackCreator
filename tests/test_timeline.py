@@ -11,6 +11,25 @@ def _point(widget: TimelineWidget, timestamp: float, y: int) -> QPoint:
     return QPoint(round(widget._time_to_x(timestamp)), y)
 
 
+def test_segment_release_applies_final_pointer_after_last_move(qtbot):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 220)
+    timeline.set_duration(10)
+    segment = Segment(2, 4, "Line", ["Speaker"])
+    timeline.set_segments([segment])
+    timeline.show()
+    y = round(timeline._segment_rect(segment).center().y())
+    finished = []
+    timeline.range_edit_finished.connect(lambda *values: finished.append(values))
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 3, y))
+    qtbot.mouseMove(timeline, _point(timeline, 4, y))
+    assert (segment.start, segment.end) == (3, 5)
+    qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 5, y))
+    assert (segment.start, segment.end) == (4, 6)
+    assert finished == [(segment.id, 2, 4, 4, 6)]
+
+
 def test_lane_layout_reuses_lowest_available_lane_and_accepts_prepared_layout(qtbot):
     segments = [
         Segment(0, 5), Segment(1, 2), Segment(2, 3),
@@ -23,6 +42,27 @@ def test_lane_layout_reuses_lowest_available_lane_and_accepts_prepared_layout(qt
     timeline.set_segments(segments, lanes=lanes)
     assert timeline._segment_lanes is lanes
     assert timeline.minimumHeight() == 188
+
+
+def test_paint_skips_offscreen_geometry_but_keeps_minimum_width_edge(qtbot, monkeypatch):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 220)
+    timeline.set_duration(100)
+    timeline.set_playhead(50)
+    timeline.set_zoom(5, anchor_time=50)
+    segments = [Segment(1, 2), Segment(39.98, 39.99), Segment(41, 43), Segment(80, 90)]
+    timeline.set_segments(segments)
+    measured = []
+    original = timeline._segment_rect
+
+    def rectangle(segment):
+        measured.append(segment.id)
+        return original(segment)
+
+    monkeypatch.setattr(timeline, "_segment_rect", rectangle)
+    timeline.grab()
+    assert measured == [segments[1].id, segments[2].id]
 
 
 @pytest.mark.parametrize("y", [4, 65, 210])

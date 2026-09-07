@@ -807,6 +807,40 @@ def test_worker_reuses_probe_and_avoids_loading_model_for_silence(monkeypatch, t
     }
 
 
+def test_preparation_batch_loads_one_model_and_probes_source_once(monkeypatch, tmp_path):
+    loads, probes, inferences = [], [], []
+    session = SimpleNamespace(
+        get_inputs=lambda: [SimpleNamespace(name="features")],
+        run=lambda _outputs, inputs: inferences.append(inputs) or [vector(1)[None, :]],
+    )
+    monkeypatch.setattr(worker, "load_session", lambda model: loads.append(model) or session)
+    monkeypatch.setattr(worker, "source_duration", lambda *args: probes.append(args) or 1000)
+    monkeypatch.setattr(worker, "decode_clip", lambda *args: np.ones(32000, dtype=np.float32))
+    monkeypatch.setattr(worker, "fbank_features", lambda samples: samples[:8])
+    requests = tuple(
+        (str(index), clip(str(index), start=index * 3, end=index * 3 + 2))
+        for index in range(speaker.PREPARATION_BATCH_SIZE)
+    )
+    records = worker.embed_clips(
+        lambda *_: None, "model", "ffmpeg", "ffprobe", str(tmp_path), requests,
+    )
+    assert len(loads) == len(probes) == 1
+    assert len(inferences) == len(records) == speaker.PREPARATION_BATCH_SIZE
+
+
+def test_new_range_preparation_retains_verified_old_range_and_unrelated_caches(engine):
+    prepare(engine)
+    moved = replace(engine.clips[1], start=4.5)
+    renamed = replace(engine.clips[0], characters=("Alicia",))
+    prepare(engine, clips=(renamed, moved))
+    assert len(engine.calls) == 2
+    assert len(engine.calls[0]) == 2
+    assert [item for _key, item in engine.calls[1]] == [replace(moved, characters=())]
+    assert match_cached(engine, clips=(renamed, moved)).matches[0].character == "Alicia"
+    assert match_cached(engine).matches[0].character == "Alice"
+    assert len(engine.calls) == 2
+
+
 def test_manifest_records_actual_preprocessing_and_threshold_policy(tmp_path):
     manifest = SpeakerMatchingManager(tmp_path).manifest
     assert manifest["model"]["bytes"] == speaker.MODEL_BYTES

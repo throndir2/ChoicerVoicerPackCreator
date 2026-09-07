@@ -343,6 +343,7 @@ def test_processing_uses_existing_status_bar_and_on_demand_popup(workspace, qtbo
     workspace.resize(1050, 680)
     editor = workspace.add_project(PackProject(title="First", video_path="missing.mp4"), dirty=False)
     qtbot.waitUntil(lambda: editor._layout_restored)
+    qtbot.waitUntil(lambda: not editor.project_checks.pending)
     assert editor._document_layout.count() == 2
     assert editor._document_layout.itemAt(0).widget() is editor.editor_scroll
     assert editor._document_layout.itemAt(1).widget() is editor.statusBar()
@@ -1073,6 +1074,7 @@ def test_fresh_native_layout_keeps_task_and_segment_rows_clickable(workspace, qt
         title="C", video_duration=10,
         segments=[Segment(index, index + 0.5, f"Line {index}", ["Actor"]) for index in range(4)],
     ), dirty=True)
+    qtbot.waitUntil(lambda: all(not item.project_checks.pending for item in workspace.editors.values()))
     jobs = [
         workspace.job_manager.submit(first.session.id, "analysis", f"Task {index}", lambda _ctx: None)
         for index in range(6)

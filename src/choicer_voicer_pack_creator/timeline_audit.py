@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from choicer_voicer_pack_creator.models import Segment
+from choicer_voicer_pack_creator.operations import check_cancelled
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +21,7 @@ def describe_timeline_overlaps(
     indexed = {segment.id: (index, segment) for index, segment in enumerate(segments, 1)}
     details = []
     for warning in warnings:
+        check_cancelled()
         first, second = indexed.get(warning.first_id), indexed.get(warning.second_id)
         if first is not None and second is not None:
             details.append(
@@ -47,12 +49,14 @@ def audit_timeline_overlaps(
     active: list[Segment] = []
     warnings: list[TimelineOverlap] = []
     for _, current in ordered:
+        check_cancelled()
         active = [
             previous
             for previous in active
             if previous.end - current.start > minimum_seconds
         ]
         for previous in active:
+            check_cancelled()
             overlap = min(previous.end, current.end) - max(previous.start, current.start)
             if overlap <= minimum_seconds:
                 continue

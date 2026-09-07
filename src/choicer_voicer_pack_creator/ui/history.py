@@ -194,7 +194,10 @@ class EditHistoryController(QObject):
 
     def go_to(self, index: int) -> None:
         editor = self.editor
-        if self.busy or editor.session.loading or editor._range_edit_record is not None:
+        if (
+            self.busy or editor.session.loading or editor._range_edit_record is not None
+            or editor._range_decision_active
+        ):
             editor.statusBar().showMessage("Finish the current edit before using history.", 5000)
             return
         editor._commit_editors()

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from html import escape
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QDialog,
@@ -53,12 +54,20 @@ class ProcessingModel(QObject):
         self._token = session.source_token()
         self._states: dict[str, ProcessingState] = {}
         self._latest: dict[str, str] = {}
+        self.publication_guard: Callable[[JobRecord], bool] | None = None
+        self._voice_visible = False
+        self._voice_timer = QTimer(self)
+        self._voice_timer.setSingleShot(True)
+        self._voice_timer.setInterval(250)
+        self._voice_timer.timeout.connect(self._show_voice_activity)
         manager.changed.connect(self._job_changed)
 
     def reset(self) -> None:
         self._token = self.session.source_token()
         self._states.clear()
         self._latest.clear()
+        self._voice_timer.stop()
+        self._voice_visible = False
         if self.session.project.analysis_review:
             self.set_status("analysis", "ready", "Saved transcript drafts available for review.")
         if self.session.project.backing_track_path:
@@ -75,13 +84,30 @@ class ProcessingModel(QObject):
         value = ProcessingState(state, message, fraction)
         if self._states.get(kind) != value:
             self._states[kind] = value
+            if kind in GROUPS["voices"]:
+                if not self._voice_active():
+                    self._voice_timer.stop()
+                    self._voice_visible = False
+                elif not self._voice_visible and not self._voice_timer.isActive():
+                    self._voice_timer.start()
             self.changed.emit()
+
+    def _voice_active(self) -> bool:
+        return any(
+            self._states.get(kind, ProcessingState()).state in ACTIVE_STATES - {"consent"}
+            for kind in GROUPS["voices"]
+        )
+
+    def _show_voice_activity(self) -> None:
+        self._voice_visible = self._voice_active()
+        self.changed.emit()
 
     def _job_changed(self, record: JobRecord) -> None:
         if (
             record.project_id != self.session.id or record.kind not in PROCESSING_KINDS
             or self.session.source_token() != self._token
             or record.source_snapshot.get("source_revision") != self.session.source_revision
+            or self.publication_guard is not None and not self.publication_guard(record)
         ):
             return
         if record.state == "queued":
@@ -115,9 +141,11 @@ class ProcessingModel(QObject):
 
     def status_summary(self) -> str:
         active = attention = 0
-        for kinds in GROUPS.values():
+        for group, kinds in GROUPS.items():
             states = {self._states[kind].state for kind in kinds if kind in self._states}
-            active += bool(states & (ACTIVE_STATES - {"consent"}))
+            active += bool(states & (ACTIVE_STATES - {"consent"})) and (
+                group != "voices" or self._voice_visible
+            )
             attention += bool(states & {"consent", "failed"})
         parts = []
         if active:
@@ -127,7 +155,11 @@ class ProcessingModel(QObject):
         return "Background: " + ", ".join(parts) if parts else ""
 
     def has_active_work(self) -> bool:
-        return any(value.state in ACTIVE_STATES - {"consent"} for value in self._states.values())
+        return any(
+            value.state in ACTIVE_STATES - {"consent"}
+            and (kind not in GROUPS["voices"] or self._voice_visible)
+            for kind, value in self._states.items()
+        )
 
 
 class ProcessingStatus(QLabel):

@@ -2,25 +2,22 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal, Slot
-from PySide6.QtWidgets import (
-    QApplication,
-    QCheckBox,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QCheckBox, QTableWidgetItem, QVBoxLayout, QWidget
 
 from choicer_voicer_pack_creator.diagnostics import diagnostic_event, diagnostic_exception
+from choicer_voicer_pack_creator.jobs import JobHandle, JobRecord
 from choicer_voicer_pack_creator.models import Segment
 from choicer_voicer_pack_creator.operations import SourceChangedError
 from choicer_voicer_pack_creator.speaker_matching import (
     MIN_ACTIVE_SECONDS,
+    PREPARATION_BATCH_SIZE,
     SpeakerClip,
     SpeakerDownloadRequired,
     SpeakerMatchingCancelled,
@@ -84,9 +81,14 @@ class _Request:
     generation: int
     source_token: tuple[str, int, str]
     references: tuple[tuple[str, _SegmentState, int], ...]
-    targets: dict[str, tuple[_SegmentState, int]]
+    targets: Mapping[str, tuple[_SegmentState, int]]
     clips: tuple[SpeakerClip, ...]
     preparing: bool = False
+    verifying: bool = False
+
+    @property
+    def key(self) -> str:
+        return "speaker-preparation" if self.preparing else "speakers"
 
 
 def _audio_range(clip: SpeakerClip) -> tuple[str, float, float | None]:
@@ -101,13 +103,19 @@ class SpeakerWorker(JobWorker):
     canceled = Signal()
     preparation_required = Signal()
 
-    def __init__(self, manager, media, clips, *, allow_download: bool, preparing: bool) -> None:
+    def __init__(
+        self, manager, media, clips, *, allow_download: bool, preparing: bool,
+        verification: SpeakerResult | None = None,
+    ) -> None:
         super().__init__()
         self.manager = manager
         self.media = media
         self.clips = clips
         self.allow_download = allow_download
         self.preparing = preparing
+        self.outcome = ""
+        self.verification = verification
+        self.missing_ids: tuple[str, ...] = ()
 
     def run(self) -> None:
         def report(message: str, fraction: float | None) -> None:
@@ -116,7 +124,9 @@ class SpeakerWorker(JobWorker):
             )
 
         try:
-            if self.preparing:
+            if self.verification is not None:
+                result = self.verification
+            elif self.preparing:
                 result = self.manager.prepare(
                     self.media, self.clips, allow_download=self.allow_download,
                     progress=report, cancelled=self.isInterruptionRequested,
@@ -125,14 +135,24 @@ class SpeakerWorker(JobWorker):
                 result = self.manager.match_cached(
                     self.media, self.clips, progress=report, cancelled=self.isInterruptionRequested,
                 )
+            result.sources.verify()
+            self.outcome = "completed"
             self.completed.emit(result)
-        except SpeakerPreparationRequired:
+        except SpeakerPreparationRequired as error:
+            self.outcome = "prepare"
+            self.missing_ids = error.segment_ids
             self.preparation_required.emit()
         except SpeakerDownloadRequired:
+            self.outcome = "download"
             self.download_required.emit()
         except SpeakerMatchingCancelled:
+            self.outcome = "canceled"
             self.canceled.emit()
+        except SourceChangedError:
+            self.outcome = "failed"
+            self.failed.emit("Source audio changed. Retry to analyze the new audio.")
         except Exception as error:
+            self.outcome = "failed"
             diagnostic_exception("speaker_matching_failed", error)
             self.failed.emit(str(error))
 
@@ -143,14 +163,14 @@ class SpeakerMatchingControls(QWidget):
     def __init__(self, editor: ProjectEditor) -> None:
         super().__init__(editor)
         self.editor = editor
+        self.derived_work = editor.derived_work
         self.worker: SpeakerWorker | None = None
+        self._workers: dict[str, SpeakerWorker] = {}
         self._generation = 0
         self._source_token = editor.session.source_token()
         self._observed: dict[str, _SegmentState] = {}
         self._versions: dict[str, int] = {}
         self._request: _Request | None = None
-        self._result: SpeakerResult | SpeakerPreparationResult | None = None
-        self._outcome = ""
         self._activated = False
         self._preprocess = False
         self._prepared_ranges: set[tuple[str, float, float | None]] = set()
@@ -171,10 +191,9 @@ class SpeakerMatchingControls(QWidget):
         self._timer.setSingleShot(True)
         self._timer.setInterval(900)
         self._timer.timeout.connect(self._start)
-        self._publication_timer = QTimer(self)
-        self._publication_timer.setSingleShot(True)
-        self._publication_timer.setInterval(100)
-        self._publication_timer.timeout.connect(self._publish_ready)
+        self.derived_work.changed.connect(self._update_actions)
+        self.derived_work.resumed.connect(self._gesture_finished)
+        self.derived_work.cancelled.connect(self._derived_cancelled)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 0)
@@ -196,6 +215,7 @@ class SpeakerMatchingControls(QWidget):
         return (
             self._document_available() and not workspace._closing
             and not self.editor.session.loading
+            and not getattr(getattr(self.editor, "edit_history", None), "busy", False)
         )
 
     def _document_available(self) -> bool:
@@ -226,9 +246,9 @@ class SpeakerMatchingControls(QWidget):
         token = self.editor.session.source_token()
         if token != self._source_token:
             self._source_token = token
-            self._generation += 1
+            self._invalidate_comparison()
+            self.derived_work.invalidate("speaker-preparation")
             self._timer.stop()
-            self._publication_timer.stop()
             self._publication = None
             if self.worker is not None:
                 self.worker.requestInterruption()
@@ -238,6 +258,8 @@ class SpeakerMatchingControls(QWidget):
             self._typing = False
             self._paused = False
             self._history_paused = False
+            self.derived_work.resume("speakers")
+            self.derived_work.resume("speaker-preparation")
             self._resume_requested = False
             self._undo.clear()
             if self._consent_callback is not None:
@@ -270,10 +292,53 @@ class SpeakerMatchingControls(QWidget):
         self._update_actions()
         if not changed or self._applying:
             return
+        self._invalidate_comparison()
+        # Preparation labels no live segments: its immutable old ranges remain
+        # useful, source-verified cache entries even if a range changes mid-batch.
         if self.worker is not None:
             self._pending = True
         if (self._activated or self._preprocess) and not self._paused:
             self._timer.start(900)
+
+    def _gesture_finished(self) -> None:
+        if not self._paused and self._timer.isActive():
+            self._timer.start(900)
+
+    def _invalidate_comparison(self) -> None:
+        self._generation = self.derived_work.invalidate("speakers")
+        self._workers = {
+            identity: worker for identity, worker in self._workers.items()
+            if worker.isRunning() or worker.preparing
+        }
+        self._publication = None
+        if self._activated and not self._paused and self._document_available():
+            self.editor.processing.set_status(
+                "speakers", "queued",
+                "Reference speakers changed. Rechecking with your latest names and ranges.",
+            )
+
+    def history_replayed(self) -> None:
+        self._source_token = self.editor.session.source_token()
+        self._history_paused = True
+        self._paused = True
+        self._typing = False
+        self._undo.clear()
+        self._timer.stop()
+        self._pending = False
+        self._invalidate_comparison()
+        self.derived_work.pause("speakers")
+        self.derived_work.pause("speaker-preparation")
+        self._generation = self.derived_work.generation("speakers")
+        with QSignalBlocker(self.enabled_check):
+            self.enabled_check.setChecked(self.editor.project.auto_speaker_matching)
+        if self._consent_callback is not None:
+            self.editor.workspace.setup_consent.cancel_request(self._consent_callback)
+        self._observe()
+        for kind in ("speaker-preparation", "speakers"):
+            self.editor.processing.set_status(
+                kind, "cancelled", "Speaker matching paused after undo or redo.",
+            )
+        self._update_actions()
 
     def prepare(self) -> None:
         """Activate name-independent preparation for this imported source."""
@@ -288,13 +353,15 @@ class SpeakerMatchingControls(QWidget):
             self._start()
 
     def name_typed(self, segment: Segment) -> None:
+        if self._history_paused:
+            self._history_paused = False
+            self._paused = False
+            self.derived_work.resume("speakers")
+            self.derived_work.resume("speaker-preparation")
         segment.speaker_assignment = (
             "manual" if any(name.strip() for name in segment.characters) else "excluded"
         )
         self._typing = True
-        if self._history_paused:
-            self._paused = False
-            self._history_paused = False
         if self._preprocess:
             self._timer.start(900)
         else:
@@ -338,6 +405,8 @@ class SpeakerMatchingControls(QWidget):
             return
         self._paused = False
         self._history_paused = False
+        self.derived_work.resume("speakers")
+        self.derived_work.resume("speaker-preparation")
         self._activated = True
         self._preprocess = True
         self._typing = False
@@ -450,13 +519,15 @@ class SpeakerMatchingControls(QWidget):
                 )
             return
         if preparing:
-            clips = preparation
-        self._request = _Request(
-            self._generation, self.editor.session.source_token(), references, targets, clips, preparing,
+            # Amortize model setup while yielding shared CPU capacity between batches.
+            clips = preparation[:PREPARATION_BATCH_SIZE]
+        key = "speaker-preparation" if preparing else "speakers"
+        request = _Request(
+            self.derived_work.generation(key), self.editor.session.source_token(),
+            references, MappingProxyType(targets), clips, preparing,
         )
+        self._request = request
         self._pending = False
-        self._result = None
-        self._outcome = ""
         self._canceled_run = False
         try:
             manager = SpeakerMatchingManager(self.editor.analysis_data_root)
@@ -464,26 +535,49 @@ class SpeakerMatchingControls(QWidget):
             diagnostic_exception("speaker_matching_setup_failed", error)
             self._failed(f"Speaker matching could not start: {error}")
             return
+        self._enqueue(manager, request)
+
+    def _enqueue(
+        self, manager: SpeakerMatchingManager, request: _Request,
+        verification: SpeakerResult | None = None,
+    ) -> None:
+        def start(generation: int) -> JobHandle:
+            nonlocal request
+            request = replace(request, generation=generation)
+            self._request = request
+            if request.key == "speakers":
+                self._generation = generation
+            return self._launch(manager, request, verification)
+
+        self.derived_work.request(
+            request.key, start, lambda record: self._publish(record, request), delay_ms=0,
+        )
+
+    def _launch(
+        self, manager: SpeakerMatchingManager, request: _Request,
+        verification: SpeakerResult | None = None,
+    ) -> JobHandle:
+        preparing, clips = request.preparing, request.clips
         worker = SpeakerWorker(
-            manager, self.editor.media, clips, allow_download=self._allow_download, preparing=preparing,
+            manager, self.editor.media, clips, allow_download=self._allow_download,
+            preparing=preparing, verification=verification,
         )
         self.worker = worker
         worker.configure_job(
             self.editor.workspace.job_manager, self.editor.session.id,
             "speaker-preparation" if preparing else "speakers",
-            "Prepare voice fingerprints" if preparing else "Match cached voices",
+            "Prepare voice fingerprints" if preparing else
+            "Verify speaker source audio" if request.verifying else "Match cached voices",
             resource_class="cpu" if preparing else "io",
             read_paths=tuple({Path(clip.path) for clip in clips}),
             resource_keys=("speaker-matching-inference",) if preparing else (),
-            source_snapshot={"source_revision": self.editor.session.source_revision},
+            source_snapshot={
+                "source_revision": self.editor.session.source_revision,
+                "derived_key": request.key, "derived_generation": request.generation,
+            },
             priority=10 if preparing else 20,
         )
-        worker.completed.connect(self._completed)
-        worker.failed.connect(self._failed)
-        worker.download_required.connect(lambda: setattr(self, "_outcome", "download"))
-        worker.canceled.connect(lambda: setattr(self, "_outcome", "canceled"))
-        worker.preparation_required.connect(lambda: setattr(self, "_outcome", "prepare"))
-        worker.finished.connect(self._finished)
+        worker.finished.connect(lambda: self._finished(worker, request))
         worker.finished.connect(worker.deleteLater)
         worker.start()
         tasks = self.editor.workspace.tasks_window
@@ -493,76 +587,116 @@ class SpeakerMatchingControls(QWidget):
         )
         self.destroyed.connect(lambda: tasks.unregister_retry(job_id))
         self._update_actions()
-
-    @Slot(object)
-    def _completed(self, result: object) -> None:
-        if not isinstance(result, (SpeakerResult, SpeakerPreparationResult)):
-            self._failed("Speaker matching returned an invalid result.")
-            return
-        self._result = result
-        self._outcome = "completed"
+        # Retain the worker only until this request's terminal publication.
+        self._workers[job_id] = worker
+        return worker.job_handle
 
     @Slot(str)
     def _failed(self, message: str) -> None:
-        if self._request is not None and self._request.generation != self._generation:
+        if self._request is not None and not self._request_current(self._request):
             return
-        self._outcome = "failed"
         self._paused = True
+        self.derived_work.pause("speakers")
+        self.derived_work.pause("speaker-preparation")
+        failed_kind = (
+            "speaker-preparation" if self._request is not None and self._request.preparing
+            else "speakers"
+        )
+        other_kind = "speakers" if failed_kind == "speaker-preparation" else "speaker-preparation"
         self.editor.processing.set_status(
-            "speaker-preparation" if self._request is not None and self._request.preparing else "speakers",
-            "failed", message,
+            other_kind, "cancelled", "Voice work paused after failure; cached fingerprints are retained.",
+        )
+        self.editor.processing.set_status(
+            failed_kind, "failed", message,
         )
 
-    @Slot()
-    def _finished(self) -> None:
-        worker, self.worker = self.worker, None
-        request = self._request
-        if (
-            request is None or request.generation != self._generation
-            or not self._document_available()
-        ):
+    def _finished(self, worker: SpeakerWorker, request: _Request) -> None:
+        if self.worker is worker:
+            self.worker = None
+        if not self._request_current(request):
+            self._workers.pop(worker.job_handle.id, None)
+            if self._canceled_run and self._document_available():
+                resume = self._resume_requested and self.editor.project.auto_speaker_matching
+                self._resume_requested = False
+                self._canceled_run = False
+                if resume:
+                    self.retry()
+                else:
+                    self.cancel()
+                return
             self._update_actions()
-            if self._document_available() and self._preprocess and not self._paused:
-                self._timer.start(0)
+            if (
+                self._document_available() and self._preprocess and not self._paused
+                and not self._timer.isActive()
+            ):
+                self._timer.start(900)
             return
-        if self._canceled_run:
-            resume = self._resume_requested and self.editor.project.auto_speaker_matching
-            self._resume_requested = False
-            self._paused = not resume
-            self._pending = resume
-            if resume:
-                self.retry()
-            else:
-                self.cancel()
-        elif self._outcome == "download":
+        if isinstance(worker.job_handle.record.result, SpeakerResult):
+            self._publication = worker.job_handle.record.result, request
+            if self.editor._derived_publication_blocked():
+                self.editor.processing.set_status(
+                    "speakers", "waiting",
+                    "Voice matching is ready; waiting for the current edit to finish.",
+                )
+        self._update_actions()
+
+    def _request_current(self, request: _Request) -> bool:
+        return (
+            self._document_available() and not self._paused
+            and self.editor.session.source_token() == request.source_token
+            and self.derived_work.current(request.key, request.generation)
+        )
+
+    def _publish(self, record: JobRecord, request: _Request) -> None:
+        worker = self._workers.pop(record.id, None)
+        if worker is None or not self._request_current(request):
+            return
+        self._publication = None
+        if worker.outcome == "download":
             self._request_download(worker.manager)
-        elif self._outcome == "prepare":
-            self._prepared_ranges.difference_update(_audio_range(clip) for clip in request.clips)
+        elif worker.outcome == "prepare":
+            self._prepared_ranges.difference_update(
+                _audio_range(clip) for clip in request.clips if clip.segment_id in worker.missing_ids
+            )
             self._preprocess = True
             self._pending = True
         elif (
-            self._outcome == "completed" and self._result is not None
-            and worker.job_handle.record.state == "succeeded"
+            worker.outcome == "completed" and record.state == "succeeded"
             and self.editor.project.auto_speaker_matching and not self._paused
         ):
-            if request.preparing and isinstance(self._result, SpeakerPreparationResult):
+            if request.preparing and isinstance(record.result, SpeakerPreparationResult):
                 self._prepared_ranges.update(_audio_range(clip) for clip in request.clips)
                 self.editor.processing.set_status(
                     "speaker-preparation", "ready", "Voice fingerprints ready.",
                 )
                 self._pending = True
-            elif isinstance(self._result, SpeakerResult):
-                self._apply(self._result, request)
-        elif self._outcome == "canceled" or worker.job_handle.record.state == "cancelled":
+            elif isinstance(record.result, SpeakerResult):
+                if (
+                    request.verifying
+                    and not self.derived_work.publication_was_deferred(request.key)
+                ):
+                    self._apply(record.result, request)
+                else:
+                    # Publication may have waited behind a long modal/gesture. Check
+                    # the original source identity again off-thread, not on the GUI.
+                    verification_request = replace(request, verifying=True)
+                    self._request = verification_request
+                    self._publication = record.result, verification_request
+                    self._enqueue(worker.manager, verification_request, record.result)
+            else:
+                self._failed("Speaker matching returned an invalid result.")
+        elif worker.outcome == "canceled" or record.state == "cancelled":
             self.cancel()
-        elif self._outcome != "failed":
-            self._failed("The task stopped without returning a result.")
+        else:
+            self._failed(
+                worker._job_error or record.error or "The task stopped without returning a result.",
+            )
         self._update_actions()
         if self._pending and not self._paused and not self._timer.isActive():
             self._timer.start(0 if request.preparing else 900)
 
     def _request_download(self, manager: SpeakerMatchingManager) -> None:
-        generation = self._generation
+        source_token = self.editor.session.source_token()
         self._pending_consent = True
         self.editor.processing.set_status(
             "speaker-preparation", "consent",
@@ -571,14 +705,14 @@ class SpeakerMatchingControls(QWidget):
 
         def current() -> bool:
             return (
-                self._current() and self._generation == generation
+                self._current() and self.editor.session.source_token() == source_token
                 and self.editor.project.auto_speaker_matching and not self._paused
             )
 
         def decided(accepted: bool) -> None:
             self._pending_consent = False
             self._consent_callback = None
-            if generation != self._generation or self._closed:
+            if self.editor.session.source_token() != source_token or self._closed:
                 self._timer.start(900)
                 return
             if accepted and current():
@@ -601,16 +735,7 @@ class SpeakerMatchingControls(QWidget):
         )
 
     def _apply(self, result: SpeakerResult, request: _Request) -> None:
-        # A modal range/dirty decision may restore an earlier dirty flag when it closes.
-        if (
-            not self._current() or QApplication.activeModalWidget() is not None
-            or self.editor._range_edit_record is not None
-        ):
-            self._publication = result, request
-            self._publication_timer.start()
-            self.editor.processing.set_status(
-                "speakers", "waiting", "Voice matching is ready; waiting for the current edit to finish.",
-            )
+        if not self._request_current(request):
             return
         self._observe()
         _, references, _ = self._inputs()
@@ -619,15 +744,6 @@ class SpeakerMatchingControls(QWidget):
                 "speakers", "queued", "Reference speakers changed. Rechecking with your latest names.",
             )
             self._pending = True
-            return
-        try:
-            result.sources.verify()
-        except SourceChangedError as error:
-            diagnostic_exception("speaker_matching_source_changed", error)
-            self._paused = True
-            self.editor.processing.set_status(
-                "speakers", "failed", "Source audio changed. Retry to analyze the new audio.",
-            )
             return
         applied = []
         segments = {segment.id: segment for segment in self.editor.project.segments}
@@ -659,27 +775,6 @@ class SpeakerMatchingControls(QWidget):
         self.editor.processing.set_status("speakers", "ready", message)
         self.editor.statusBar().showMessage(message, 5000)
         diagnostic_event("speaker_matching_applied", count=len(applied), examined=result.examined)
-
-    @Slot()
-    def _publish_ready(self) -> None:
-        if self.editor.edit_history.busy:
-            self._publication_timer.start(100)
-            return
-        publication, self._publication = self._publication, None
-        if publication is None:
-            return
-        result, request = publication
-        if (
-            not self._document_available() or self._paused
-            or not self.editor.project.auto_speaker_matching
-            or request.generation != self._generation
-        ):
-            self._update_actions()
-            return
-        self._apply(result, request)
-        self._update_actions()
-        if self._pending and self._publication is None and not self._paused and not self._typing:
-            self._timer.start(900)
 
     def _refresh_names(self, segments: list[Segment]) -> None:
         by_id = {segment.id: segment for segment in segments}
@@ -727,29 +822,6 @@ class SpeakerMatchingControls(QWidget):
         self.editor.statusBar().showMessage(f"Cleared {len(restored)} auto-filled name(s).", 5000)
         self._update_actions()
 
-    def history_replayed(self) -> None:
-        self._generation += 1
-        self._source_token = self.editor.session.source_token()
-        self._timer.stop()
-        self._publication_timer.stop()
-        self._publication = None
-        self._pending = False
-        self._typing = False
-        self._paused = True
-        self._undo.clear()
-        self._history_paused = True
-        if self.worker is not None:
-            self.worker.requestInterruption()
-        with QSignalBlocker(self.enabled_check):
-            self.enabled_check.setChecked(self.editor.project.auto_speaker_matching)
-        self._observe()
-        self._update_actions()
-        self.editor.processing.set_status(
-            "speakers", "cancelled",
-            "Matching paused after restoring history. Edit a speaker or resume "
-            "Speaker matching in Background Processing.",
-        )
-
     @Slot()
     def cancel(self) -> None:
         self._paused = True
@@ -757,11 +829,11 @@ class SpeakerMatchingControls(QWidget):
         self._resume_requested = False
         self._pending = False
         self._timer.stop()
-        self._publication_timer.stop()
         self._publication = None
-        if self.worker is not None:
-            self._canceled_run = True
-            self.worker.requestInterruption()
+        self._canceled_run = self.worker is not None
+        self.derived_work.pause("speakers")
+        self.derived_work.pause("speaker-preparation")
+        self._generation = self.derived_work.generation("speakers")
         if self._consent_callback is not None:
             self.editor.workspace.setup_consent.cancel_request(self._consent_callback)
         if self._document_available():
@@ -773,6 +845,11 @@ class SpeakerMatchingControls(QWidget):
             for kind in ("speaker-preparation", "speakers"):
                 self.editor.processing.set_status(kind, state, message)
         self._update_actions()
+
+    @Slot(str, object)
+    def _derived_cancelled(self, key: str, _record: JobRecord) -> None:
+        if key in {"speakers", "speaker-preparation"}:
+            self.cancel()
 
     def close_processing(self) -> None:
         self._closed = True
