@@ -757,6 +757,10 @@ segment, or replace the caption being edited. Automatic names are shown in itali
 but are never reused as trusted voice references. Edit a name yourself to provide a reference.
 New manually added segments start unassigned when matching is enabled.
 
+**Filled N speaker name(s)** reports only the names applied by that pass. A count of zero is not
+an error: uncertain or short clips stay unassigned. Try a longer, clean reference line as described
+above, or assign the remaining speakers manually.
+
 Clearing a name deliberately checks **Keep unassigned (skip auto-fill)**. Uncheck it on that
 segment to include it again. **Undo auto-fill** clears unchanged names from the last automatic
 batch in this session, keeps those segments unassigned, and preserves subsequent manual edits.
