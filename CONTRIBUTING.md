@@ -35,7 +35,11 @@ completion. Never modify another active session's checkout or work directly on `
 - Validate metadata references, timestamps, codecs, images, ZIP inventory, and decodeability.
 - Never silently discard an unsupported field from an imported pack; report it as a warning and
 	refuse in-place conversion of the source pack.
-- Avoid placing diagnostic files in exported pack folders because the game may interpret them as clip metadata.
+- Do not place diagnostic files in exported pack folders because the game may interpret them as clip metadata.
+  The only app-specific pack file is the versioned `_cvpc_metadata.json` export manifest. Keep its
+  schema independent of the exporter app version, exclude private project data, verify its file
+  hashes before restoring original cuts, and preserve imported recordings and trigger alignment.
+  Unsupported or mismatched manifests must produce an import warning, not silently override game metadata.
 
 ## Export resource budgets
 

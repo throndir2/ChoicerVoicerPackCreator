@@ -60,6 +60,13 @@ the client stops the process.**
   other drafts. Opening an already-open path focuses it without reloading.
   `open_project` requires a `.cvpack.json` project with an explicit supported
   `schema_version`.
+- Exports include `_cvpc_metadata.json` with the app version, versioned provenance,
+  file hashes, and known cuts/padding. The public canonical YouTube URL is shared
+  when present; local paths and editing history are not. Supported, matching manifests
+  restore exact cuts on import. Persistent `pack_id` is not the process-local `project_id`.
+  For restored file-audio segments, move In and Out together to retain the recording's
+  exact duration and `recording_padding`; replacing audio or regenerating from video
+  clears that padding.
 - Optionally call `analyze_video` for deterministic activity suggestions.
   Whisper transcription is off by default and requires explicit
   `allow_download=true`, even when cached components may only need repair.
