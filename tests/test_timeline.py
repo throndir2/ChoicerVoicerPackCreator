@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QImage
 
 from choicer_voicer_pack_creator.models import Segment
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget, segment_lanes
@@ -9,6 +10,12 @@ from choicer_voicer_pack_creator.ui.timeline import TimelineWidget, segment_lane
 
 def _point(widget: TimelineWidget, timestamp: float, y: int) -> QPoint:
     return QPoint(round(widget._time_to_x(timestamp)), y)
+
+
+def _render(widget: TimelineWidget) -> QImage:
+    image = QImage(widget.size(), QImage.Format.Format_ARGB32)
+    widget.render(image)
+    return image
 
 
 def test_zoomed_waveform_renders_separate_transients_at_their_times(qtbot):
@@ -28,7 +35,7 @@ def test_zoomed_waveform_renders_separate_transients_at_their_times(qtbot):
     assert visible[500] == 1.0
     assert visible[501:513] == [0.0] * 12
     assert visible[513] == 0.75
-    image = timeline.grab().toImage()
+    image = _render(timeline)
     assert image.pixelColor(500, 50).name() == "#32c6d5"
     assert image.pixelColor(507, 50).name() != "#32c6d5"
     assert image.pixelColor(513, 50).name() == "#32c6d5"
@@ -44,7 +51,7 @@ def test_zoomed_waveform_fills_each_peak_time_interval_without_gaps(qtbot):
     timeline.set_zoom(80, anchor_time=5)
 
     assert timeline._visible_waveform_peaks() == [0.5] * 1000
-    image = timeline.grab().toImage()
+    image = _render(timeline)
     assert all(image.pixelColor(x, 60).name() == "#32c6d5" for x in range(1000))
 
 
