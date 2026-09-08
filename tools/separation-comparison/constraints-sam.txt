@@ -1,0 +1,12 @@
+torch==2.9.1
+torchaudio==2.9.1
+torchvision==0.24.1
+xformers==0.0.33.post2
+torchcodec==0.8.1
+transformers==4.57.3
+huggingface-hub==0.35.3
+numpy==1.26.4
+scipy==1.15.3
+opencv-python==4.11.0.86
+soundfile==0.13.1
+audiobox-aesthetics==0.0.4
