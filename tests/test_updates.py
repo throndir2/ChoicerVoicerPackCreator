@@ -6,11 +6,18 @@ import json
 import os
 import stat
 import zipfile
+from itertools import count
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from choicer_voicer_pack_creator import updates
+
+
+@pytest.fixture
+def advancing_progress_clock(monkeypatch) -> None:
+    monkeypatch.setattr(updates, "time", SimpleNamespace(monotonic=count(step=0.2).__next__))
 
 
 def package(root: Path, version: str, extra: dict[str, bytes] | None = None) -> Path:
@@ -160,6 +167,62 @@ def test_manifest_records_only_shipped_files_and_detects_modifications(tmp_path)
         updates.verify_installation(root, "0.5.1")
 
 
+def test_verification_reports_file_counts_and_progress_within_large_files(
+    tmp_path, monkeypatch, advancing_progress_clock,
+) -> None:
+    root = package(tmp_path / "app", "0.5.1", {
+        "_internal/large.dll": b"x" * 4096, "_internal/empty.dat": b"",
+    })
+    (root / "user-file.txt").write_text("not part of the application")
+    monkeypatch.setattr(updates, "BUFFER_SIZE", 1024)
+    progress = []
+
+    files = updates.verify_installation(
+        root, "0.5.1", progress=lambda *args: progress.append(args),
+    )
+
+    for index, name in enumerate(files, 1):
+        assert any(
+            message.startswith(f"Checking application files ({index}/{len(files)})")
+            and f"\n{name} (" in message
+            for message, _fraction in progress
+        )
+    large_index = list(files).index("_internal/large.dll")
+    assert any(
+        message.endswith("_internal/large.dll (25%)")
+        and fraction == pytest.approx((large_index + 0.25) / len(files))
+        for message, fraction in progress
+    )
+    assert any(message.endswith("empty.dat (100%)") for message, _fraction in progress)
+    fractions = [fraction for _message, fraction in progress]
+    assert fractions == sorted(fractions)
+    assert fractions[0] == 0
+    assert fractions[-1] == 1
+    assert not any("user-file.txt" in message for message, _fraction in progress)
+
+
+def test_file_progress_throttles_fast_files_but_always_reports_completion(monkeypatch) -> None:
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(updates, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    progress = []
+    reporter = updates._FileProgress(lambda *args: progress.append(args), "Checking files", 1000)
+    for index in range(999):
+        reporter.start(f"file-{index}.dll", 100)
+        reporter.update(50)
+        reporter.finish()
+    assert len(progress) == 1
+    assert progress[0][1] == 0
+
+    clock.now = 0.2
+    reporter.start("last.dll", 100)
+    assert len(progress) == 2
+    assert progress[-1][0].endswith("last.dll (0%)")
+    reporter.finish()
+    assert len(progress) == 3
+    assert progress[-1][0].endswith("last.dll (100%)")
+    assert progress[-1][1] == 1
+
+
 @pytest.mark.parametrize("name", [
     "../outside.exe", "/absolute.exe", "C:/bad.exe", "directory\\file.exe",
     "bad/../file.exe", "file.exe:stream", "NUL.txt", "directory/file. ",
@@ -196,9 +259,76 @@ def test_verified_download_is_staged_without_changing_installation(tmp_path, mon
     )
     assert updates.verify_installation(target, "0.5.1")
     assert updates.verify_installation(prepared.staged, "0.6.0")
-    assert progress[-1][0] == "Verifying and staging update..."
+    fractions = [fraction for _message, fraction in progress]
+    assert fractions == sorted(fractions)
+    assert fractions[0] == 0
+    assert all(0 <= fraction < 1 for fraction in fractions[:-1])
+    assert progress[-1] == ("Update ready to install.", 1.0)
+    for phase, start, end in (
+        ("Checking application files", 0.0, 0.1),
+        ("Downloading update", 0.1, 0.7),
+        ("Extracting update files", 0.7, 0.85),
+        ("Verifying update files", 0.85, 0.99),
+    ):
+        phase_progress = [
+            fraction for message, fraction in progress if message.startswith(phase)
+        ]
+        assert phase_progress
+        assert min(phase_progress) == pytest.approx(start)
+        assert max(phase_progress) == pytest.approx(end)
     assert (prepared.directory / "plan.json").is_file()
     assert not (prepared.directory / "release.zip").exists()
+
+
+def test_extraction_reports_progress_within_large_files(
+    tmp_path, monkeypatch, advancing_progress_clock,
+) -> None:
+    incoming = package(tmp_path / "new", "0.6.0", {
+        "_internal/large.dll": b"x" * 4096, "_internal/empty.dat": b"",
+    })
+    archive = tmp_path / "release.zip"
+    archive.write_bytes(archive_bytes(incoming))
+    monkeypatch.setattr(updates, "BUFFER_SIZE", 1024)
+    progress = []
+
+    updates._extract(
+        archive, tmp_path / "extracted", lambda: False,
+        progress=lambda *args: progress.append(args),
+    )
+
+    assert any(message.endswith("large.dll (25%)") for message, _fraction in progress)
+    assert any(message.endswith("empty.dat (100%)") for message, _fraction in progress)
+    fractions = [fraction for _message, fraction in progress]
+    assert fractions == sorted(fractions)
+    assert fractions[0] == 0
+    assert fractions[-1] == 1
+    assert updates.verify_installation(tmp_path / "extracted", "0.6.0")
+
+
+@pytest.mark.parametrize("phase", [
+    "Checking application files", "Extracting update files", "Verifying update files",
+])
+def test_cancel_within_large_file_leaves_installation_unchanged(
+    tmp_path, monkeypatch, advancing_progress_clock, phase,
+) -> None:
+    extra = {"_internal/large.dll": b"x" * 4096}
+    target = package(tmp_path / "app", "0.5.1", extra)
+    incoming = package(tmp_path / "new", "0.6.0", extra)
+    release = setup_download(monkeypatch, archive_bytes(incoming))
+    monkeypatch.setattr(updates, "BUFFER_SIZE", 1024)
+    canceled = False
+
+    def progress(message, _fraction):
+        nonlocal canceled
+        if message.startswith(phase) and message.endswith("large.dll (25%)"):
+            canceled = True
+
+    with pytest.raises(updates.UpdateCancelled):
+        updates.prepare_update(release, target, progress, lambda: canceled, "0.5.1")
+
+    assert canceled
+    assert updates.verify_installation(target, "0.5.1")
+    assert not list(tmp_path.glob(".cvpc-update-*"))
 
 
 def test_bad_checksum_never_changes_installed_app(tmp_path, monkeypatch) -> None:

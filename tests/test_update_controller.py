@@ -606,14 +606,19 @@ def test_finished_signal_retires_its_sender_not_a_replacement_worker(
             updater.worker = None
 
 
-def test_download_cancel_button_discards_late_success_without_restart_prompt(
-    qtbot, monkeypatch, make_window, dialogs, release, prepared
+@pytest.mark.parametrize(("message", "fraction"), [
+    ("Downloading", 0.5),
+    ("Checking application files (1/4)...\n_internal/runtime.dll (50%)", 0.05),
+    ("Verifying update files (3/4)...\n_internal/runtime.dll (25%)", 0.9),
+])
+def test_preparation_progress_and_cancel_button_discard_late_success_without_restart_prompt(
+    qtbot, monkeypatch, make_window, dialogs, release, prepared, message, fraction,
 ) -> None:
     started = threading.Event()
     monkeypatch.setattr(update_controller, "installation_directory", lambda: prepared.target)
 
     def prepare(_release, _target, progress, cancelled):
-        progress("Downloading", 0.5)
+        progress(message, fraction)
         wait_for_cancellation(cancelled, started)
         # Completion can race with the user pressing Cancel after verification.
         return prepared
@@ -625,7 +630,11 @@ def test_download_cancel_button_discards_late_success_without_restart_prompt(
     qtbot.waitUntil(started.is_set)
     progress = window.updater.progress
     assert progress is not None
-    qtbot.waitUntil(lambda: progress.value() == 50)
+    qtbot.waitUntil(lambda: progress.value() == int(fraction * 100))
+    assert progress.labelText() == message
+    assert progress.windowTitle() == "Preparing application update"
+    assert progress.windowModality() == Qt.WindowModality.NonModal
+    assert progress.isVisible()
     cancel_button = progress.findChild(QPushButton)
     assert cancel_button is not None
     qtbot.mouseClick(cancel_button, Qt.MouseButton.LeftButton)
