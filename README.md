@@ -299,7 +299,9 @@ status bar without interrupting your work. Checks contact GitHub, not your media
 
 When a newer compatible release is found, you can decline it or download its Windows x64 ZIP.
 Downloads are cancelable and checked against the release's SHA-256 checksum and GitHub asset
-digest when available. After the download is verified, a separate confirmation offers a restart.
+digest when available. The progress bar covers application-file checks, download, extraction,
+and verification; file-processing steps show the current file, file count, and progress within
+large files. After the download is verified, a separate confirmation offers a restart.
 Save / Discard / Cancel decisions protect every dirty project, not just the selected tab.
 Active tasks must finish or stop cooperatively before exit. The app restarts in the same folder
 and restores its workspace list, including independent unsaved recovery records.
