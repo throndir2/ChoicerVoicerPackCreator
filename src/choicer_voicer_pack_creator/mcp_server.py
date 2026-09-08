@@ -243,13 +243,19 @@ def create_server(
         sensitivity: Literal["balanced", "sensitive", "conservative"] = "balanced",
         model: Literal["tiny", "base"] = "base",
         language: Annotated[str, Field(pattern=r"^(auto|[a-z]{2,3})$")] = "auto",
+        align_captions: bool = False,
     ) -> dict[str, Any]:
-        """Queue snapshot analysis; suggestions are job results, never automatic segment edits."""
+        """Queue snapshot analysis; suggestions are job results, never automatic segment edits.
+
+        align_captions uses the optional high-accuracy timing model on original YouTube captions.
+        It requires allow_download=true; inspect caption_timing.review_reasons before using rows.
+        """
         manager = require_jobs()
         target = await bind(project_id)
         return await to_thread.run_sync(partial(
             manager.start, target, "analysis", expected_revision, use_whisper=use_whisper,
             allow_download=allow_download, sensitivity=sensitivity, model=model, language=language,
+            align_captions=align_captions,
         ))
 
     @server.tool(annotations=edit)
@@ -295,12 +301,16 @@ def create_server(
         model: Literal["tiny", "base"] = "base",
         language: Annotated[str, Field(pattern=r"^(auto|[a-z]{2,3})$")] = "auto",
         project_id: str | None = None,
+        align_captions: bool = False,
     ) -> dict[str, Any]:
         """Suggest ranges using local audio activity and optionally pinned local Whisper.
 
         Never adds or replaces segments. Whisper requires allow_download=true, even when cached,
         because corrupt/missing components may need repair. It does not identify speakers.
         A whole-video scan can take minutes. No audio or transcripts are uploaded by analysis.
+        align_captions uses a separate optional high-accuracy model on original YouTube captions,
+        preserves their text, and returns corrected ranges plus caption_timing.review_reasons.
+        It also requires allow_download=true. Nonempty review reasons require manual review.
         """
         if jobs is not None:
             target = await bind(project_id)
@@ -308,6 +318,7 @@ def create_server(
             record = await to_thread.run_sync(partial(
                 jobs.start, target, "analysis", snapshot.revision, use_whisper=use_whisper,
                 allow_download=allow_download, sensitivity=sensitivity, model=model, language=language,
+                align_captions=align_captions,
             ))
             return await wait_for_job(record)
         step = 0
@@ -319,7 +330,7 @@ def create_server(
 
         return await invoke(
             "Analyze video", automation.analyze, use_whisper, allow_download, sensitivity,
-            model, language, progress, lambda: False,
+            model, language, progress, lambda: False, align_captions,
             project_id=project_id,
         )
 

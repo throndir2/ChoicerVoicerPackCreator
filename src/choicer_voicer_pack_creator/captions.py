@@ -11,14 +11,14 @@ from typing import Any
 from choicer_voicer_pack_creator.models import CaptionFragment, SourceCaption
 
 
-def _fragment_start(value: Any, event_start: float, event_end: float) -> float | None:
+def _fragment_start(value: Any, event_start_ms: float, event_end: float) -> float | None:
     if isinstance(value, bool):
         return None
     try:
-        offset = float(value) / 1000
+        offset = float(value)
     except (TypeError, ValueError, OverflowError):
         return None
-    start = event_start + offset
+    start = (event_start_ms + offset) / 1000
     if not math.isfinite(start) or offset < 0 or not 0 <= start < event_end:
         return None
     return start
@@ -44,17 +44,18 @@ def parse_json3(
         text = " ".join(text.split())
         if not text:
             continue  # Window definitions and newline-only events are not spoken cues.
-        start = float(event["tStartMs"]) / 1000
-        length = float(event.get("dDurationMs", duration * 1000 - start * 1000)) / 1000
-        if not math.isfinite(start) or not math.isfinite(length) or length <= 0:
+        start_ms = float(event["tStartMs"])
+        length_ms = float(event.get("dDurationMs", duration * 1000 - start_ms))
+        if not math.isfinite(start_ms) or not math.isfinite(length_ms) or length_ms <= 0:
             raise ValueError("Invalid YouTube caption timestamp")
-        end = min(duration, start + length)
+        start = start_ms / 1000
+        end = min(duration, (start_ms + length_ms) / 1000)
         fragments: list[CaptionFragment] = []
         last_start: float | None = None
         for index, segment in enumerate(segments):
             # Only the first segment has an implicit zero offset in JSON3.
             fragment_start = _fragment_start(
-                segment.get("tOffsetMs", 0 if index == 0 else None), start, end
+                segment.get("tOffsetMs", 0 if index == 0 else None), start_ms, end
             )
             fragment_text = html.unescape(str(segment.get("utf8", "")))
             if fragment_text.strip() and fragment_start is not None:
@@ -96,6 +97,11 @@ SOURCE_TAIL_PADDING = 0.25
 _ONSET_TOLERANCE = 0.12
 _MAX_JOIN_SECONDS = 6.0
 _MAX_JOIN_CHARACTERS = 120
+_TIME_PRECISION = 1e-7
+
+
+def _times_overlap(start: float, previous_end: float) -> bool:
+    return start < previous_end - _TIME_PRECISION
 
 
 def _normalize_text(text: str) -> str:
@@ -130,13 +136,14 @@ def pad_source_ranges(
     for index in ordered:
         check_cancel()
         start, end = ranges[index]
-        if start < furthest_end:
+        if _times_overlap(start, furthest_end):
             overlapping.update((index, furthest_index))
         if end > furthest_end:
             furthest_end, furthest_index = end, index
 
     result = list(ranges)
     previous_end = 0.0
+    previous_index: int | None = None
     for position, index in enumerate(ordered):
         check_cancel()
         start, end = ranges[index]
@@ -146,11 +153,16 @@ def pad_source_ranges(
                 (end + ranges[ordered[position + 1]][0]) / 2
                 if position + 1 < len(ordered) else duration
             )
+            if previous_index in overlapping:
+                lower = max(lower, previous_end)
+            if position + 1 < len(ordered) and ordered[position + 1] in overlapping:
+                upper = min(upper, ranges[ordered[position + 1]][0])
             result[index] = (
                 max(lower, start - SOURCE_HEAD_PADDING),
                 min(upper, end + SOURCE_TAIL_PADDING),
             )
-        previous_end = max(previous_end, end)
+        if previous_index is None or end > previous_end:
+            previous_end, previous_index = end, index
     return result
 
 
@@ -273,7 +285,7 @@ def refine_captions(
     for index in sorted(range(len(bounded)), key=lambda i: bounded[i].start):
         check_cancel()
         cue = bounded[index]
-        if cue.start < furthest_end:
+        if _times_overlap(cue.start, furthest_end):
             overlapping.update((index, furthest_index))
         if cue.end > furthest_end:
             furthest_end, furthest_index = cue.end, index

@@ -32,6 +32,10 @@ LATEST_BUILD_MANIFEST = DIST / "latest-portable.json"
 PENDING_BUILD_MANIFEST = DIST / "pending-portable.json"
 SEPARATION_PACKAGES = ("onnxruntime", "numpy", "soundfile", "cffi", "pycparser",
                        "flatbuffers", "protobuf", "packaging", "kaldi-native-fbank")
+CAPTION_TIMING_LICENSES = {
+    "ctranslate2": ("4.8.1", ("CTranslate2-MIT.txt",)),
+    "tokenizers": ("0.23.1", ("Tokenizers-Attribution.txt", "Flatbuffers-Apache-2.0.txt")),
+}
 
 
 def copy_separation_licenses(app_dir: Path) -> None:
@@ -127,10 +131,18 @@ def _dist_path(value: str) -> Path:
 
 
 def _mcp_distribution_names() -> list[str]:
+    return _distribution_names(("mcp",))
+
+
+def _caption_timing_distribution_names() -> list[str]:
+    return _distribution_names(("ctranslate2", "tokenizers"))
+
+
+def _distribution_names(roots: tuple[str, ...]) -> list[str]:
     from packaging.requirements import Requirement
     from packaging.utils import canonicalize_name
 
-    pending = [Requirement("mcp")]
+    pending = [Requirement(root) for root in roots]
     visited: set[tuple[str, str]] = set()
     names: set[str] = set()
     while pending:
@@ -164,7 +176,15 @@ def _write_spec() -> Path:
         multiprocessing.freeze_support()
 
         if len(sys.argv) == 3 and sys.argv[1] == "--speaker-matching-smoke":
+            from choicer_voicer_pack_creator.caption_timing_worker import smoke_main as timing_smoke
             from choicer_voicer_pack_creator.speaker_worker import smoke_main
+
+            # The existing portable smoke harness exercises both optional native runtimes.
+            if timing_smoke(Path(sys.argv[2])):
+                raise SystemExit(1)
+            raise SystemExit(smoke_main(Path(sys.argv[2])))
+        if len(sys.argv) == 3 and sys.argv[1] == "--caption-timing-smoke":
+            from choicer_voicer_pack_creator.caption_timing_worker import smoke_main
 
             raise SystemExit(smoke_main(Path(sys.argv[2])))
         """), encoding="utf-8")
@@ -194,13 +214,23 @@ def _write_spec() -> Path:
                 "anyio._backends._asyncio",
                 "_kaldi_native_fbank",
                 "choicer_voicer_pack_creator.speaker_worker",
+                "choicer_voicer_pack_creator.caption_timing_worker",
                 *collect_submodules(
                     "mcp",
                     filter=lambda name: name != "mcp.cli" and not name.startswith("mcp.cli."),
                 ),
             ]
-            for package in ("onnxruntime", "_soundfile_data", "kaldi_native_fbank"):
+            for package in (
+                "onnxruntime", "_soundfile_data", "kaldi_native_fbank", "ctranslate2", "tokenizers",
+            ):
                 package_data, package_binaries, package_imports = collect_all(package)
+                if package == "ctranslate2":
+                    # CPU inference needs ctranslate2.dll and libiomp5md.dll, not the
+                    # wheel's unused NVIDIA cuDNN loader (the build disables cuDNN).
+                    package_binaries = [
+                        item for item in package_binaries
+                        if not Path(item[0]).name.lower().startswith("cudnn")
+                    ]
                 data += package_data
                 binaries += package_binaries
                 hiddenimports += package_imports
@@ -211,7 +241,7 @@ def _write_spec() -> Path:
                 (str(fbank.locate_file("kaldi-native-fbank-core.dll")), "."),
             ]
             # Include activated dependency extras too (e.g. PyJWT's crypto extra).
-            for package in {_mcp_distribution_names()!r}:
+            for package in {sorted(set(_mcp_distribution_names() + _caption_timing_distribution_names()))!r}:
                 data += copy_metadata(package)
             analysis = Analysis(
                 [str(path) for path in entrypoints],
@@ -225,7 +255,9 @@ def _write_spec() -> Path:
                     {str(speaker_hook)!r},
                     str(root / "scripts" / "separation_runtime_hook.py"),
                 ],
-                excludes=[],
+                # Converted local models need neither training/conversion frameworks nor
+                # a second media decoder. Do not capture them from a developer installation.
+                excludes=["av", "faster_whisper", "torch", "tensorflow", "transformers", "fairseq"],
                 noarchive=False,
             )
             pyz = PYZ(analysis.pure)
@@ -269,16 +301,33 @@ def _write_spec() -> Path:
 
 
 def _copy_mcp_licenses(app_dir: Path) -> None:
+    _copy_python_licenses(
+        app_dir, _mcp_distribution_names(), "MCP SDK and Python dependencies",
+        "The local stdio server uses the official MCP Python SDK.",
+    )
+
+
+def _copy_caption_timing_licenses(app_dir: Path) -> None:
+    _copy_python_licenses(
+        app_dir, _caption_timing_distribution_names(), "Local caption timing runtime",
+        "Optional caption word alignment uses CTranslate2 and Tokenizers, without PyAV "
+        "or faster-whisper. Model weights are not bundled.",
+    )
+
+
+def _copy_python_licenses(
+    app_dir: Path, names: list[str], heading: str, description: str,
+) -> None:
     notices = [
-        "\n## MCP SDK and Python dependencies\n",
-        "The local stdio server uses the official MCP Python SDK. The installed SDK and its "
-        "runtime dependencies are listed below. Their supplied license/notice files and full "
+        f"\n## {heading}\n",
+        description + " Installed runtime dependencies are listed below. "
+        "Their supplied license/notice files and full "
         "package metadata (including author and source information) are bundled under "
         "`licenses/python/`.\n",
         "| Distribution | Version | Bundled notices |",
         "| --- | --- | --- |",
     ]
-    for name in _mcp_distribution_names():
+    for name in names:
         distribution = metadata.distribution(name)
         destination = app_dir / "licenses" / "python" / name
         destination.mkdir(parents=True, exist_ok=True)
@@ -302,8 +351,16 @@ def _copy_mcp_licenses(app_dir: Path) -> None:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
                 copied += 1
-        if name == "mcp" and not copied:
-            raise RuntimeError("The installed MCP SDK does not provide its license file")
+        fallback = CAPTION_TIMING_LICENSES.get(name)
+        if not copied and fallback and distribution.version == fallback[0]:
+            for filename in fallback[1]:
+                shutil.copy2(
+                    ROOT / "src" / "choicer_voicer_pack_creator" / "resources" / filename,
+                    destination / filename,
+                )
+                copied += 1
+        if name in {"mcp", *CAPTION_TIMING_LICENSES} and not copied:
+            raise RuntimeError(f"The installed {name} package does not provide its license file")
         notices.append(
             f"| {distribution.metadata['Name']} | {distribution.version} | "
             f"[License files and metadata](licenses/python/{name}/) |"
@@ -353,6 +410,7 @@ def build_candidate() -> int:
     (app_dir / "docs").mkdir(exist_ok=True)
     shutil.copy2(ROOT / "docs" / "MCP.md", app_dir / "docs" / "MCP.md")
     _copy_mcp_licenses(app_dir)
+    _copy_caption_timing_licenses(app_dir)
     shutil.copy2(
         FFMPEG_STAGE / "licenses" / "FFmpeg-LGPL-3.0.txt",
         app_dir / "licenses" / "LGPL-3.0.txt",
@@ -363,6 +421,7 @@ def build_candidate() -> int:
     for filename in (
         "Demucs-MIT.txt", "StemSplit-MIT.txt", "backing-separation.json",
         "WeSpeaker-Attribution.txt", "WeSpeaker-CC-BY-4.0.txt", "speaker-matching.json",
+        "caption-timing.json", "FasterWhisper-MIT.txt",
     ):
         shutil.copy2(resource_dir / filename, app_dir / "licenses")
     copy_separation_licenses(app_dir)

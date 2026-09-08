@@ -31,6 +31,11 @@ def test_tool_schemas_errors_and_headless_state(tmp_path):
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
             assert len(tools) == 26
             assert tools["get_project"].annotations.readOnlyHint
+            for name in ("analyze_video", "start_analysis"):
+                assert tools[name].inputSchema["properties"]["align_captions"]["default"] is False
+            denied_alignment = await client.call_tool("analyze_video", {"align_captions": True})
+            assert denied_alignment.isError
+            assert "allow_download=true" in denied_alignment.content[0].text
             assert "expected_revision" in tools["edit_segments"].inputSchema["required"]
             assert tools["update_project"].inputSchema["$defs"]["ProjectPatch"]["additionalProperties"] is False
             for name in ("new_project", "open_project", "import_pack"):

@@ -187,7 +187,7 @@ roll back saved/exported files or downloads and is not available in headless mod
 
 In live mode prefer `start_export(output_parent, expected_revision, project_id?, overwrite=false)`
 and `start_analysis(expected_revision, project_id?, use_whisper=false, allow_download=false,
-sensitivity="balanced", model="base", language="auto")`. They return records containing
+sensitivity="balanced", model="base", language="auto", align_captions=false)`. They return records containing
 `job_id`, `project_id`, `kind`, `state`, `active`, `message`, `fraction`, `cancel_requested`,
 `source_snapshot:{project_id,revision,asset_revision}`, `result`, and `error`.
 **A queued/running response is not successful export or analysis completion.**
@@ -406,6 +406,19 @@ oracle. Whisper requires explicit `allow_download=true`, even when components ar
 missing or damaged runtime/model files may need repair. Do not grant download permission as an
 automatic retry. The `language` argument accepts `auto` or a two-/three-letter lowercase language
 code, such as `en`.
+
+Set `align_captions=true` on `analyze_video` or `start_analysis` to improve the original
+YouTube caption timings stored in a project. This uses a separate optional high-accuracy
+local model (approximately 1.5 GB), not the `tiny`/`base` transcription selection.
+Explicit `allow_download=true` is required, including for possible cache repair.
+Caption text is retained, neighboring boundaries are corrected together, and proposed
+audio cuts are checked with independent recognition. Results include `refined_captions`
+and `caption_timing` with parallel `captions`, `confidences`, and `review_reasons` arrays.
+A nonempty review reason means the row requires manual review, not that its timing is
+safe to apply automatically. Nothing is added to or changed in the project.
+Use `preview_audio` to audition corrected ranges and reconcile with the current revision
+before creating segments. The live analysis dialog also exposes `alignYouTubeTimings`
+(**Align Words...**) after opening **Analyze Video & Suggest Segments**.
 
 Prepared per-segment audio files, backing tracks, and icon/still assets can be referenced using
 absolute local paths and the supported project/segment fields. External segment audio is an

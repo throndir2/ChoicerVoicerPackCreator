@@ -1,0 +1,10 @@
+Hugging Face Tokenizers 0.23.1
+Source: https://github.com/huggingface/tokenizers/tree/v0.23.1
+License: Apache License, Version 2.0
+Upstream license: https://github.com/huggingface/tokenizers/blob/v0.23.1/LICENSE
+
+The pinned Python wheel omits its upstream license file. The complete Apache
+License, Version 2.0 text is retained alongside this notice as
+Flatbuffers-Apache-2.0.txt (the same license text, shared with Flatbuffers).
+The native tokenizers extension is unmodified. Only its local-file tokenizer
+interface is used; model download and remote-code APIs are not used.

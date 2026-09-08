@@ -73,6 +73,7 @@ class LiveJobs:
         *, output_parent: str | None = None, overwrite: bool = False,
         use_whisper: bool = False, allow_download: bool = False,
         sensitivity: str = "balanced", model: str = "base", language: str = "auto",
+        align_captions: bool = False,
     ) -> dict[str, Any]:
         snapshot = automation.access.snapshot()
         require_revision(snapshot, expected_revision)
@@ -97,16 +98,19 @@ class LiveJobs:
                     lambda detail: ctx.report(detail.message, detail.fraction, detail=detail),
                 )
         elif kind == "analysis":
-            if use_whisper and not allow_download:
-                raise ValueError("Whisper requires explicit allow_download=true permission.")
+            if (use_whisper or align_captions) and not allow_download:
+                raise ValueError("Whisper and word alignment require explicit allow_download=true permission.")
+            if align_captions and not snapshot.project.source_captions:
+                raise ValueError("Word alignment requires original imported YouTube captions.")
             reads = [local_path(snapshot.project.video_path)]
-            if use_whisper:
+            if use_whisper or align_captions:
                 keys = ("whisper-inference",)
 
             def process(ctx):
                 return frozen.analyze(
                     use_whisper, allow_download, sensitivity, model, language,
                     ctx.report, ctx.cancelled,
+                    align_captions=align_captions,
                 )
         else:
             raise ValueError(f"Unsupported processing kind: {kind}")

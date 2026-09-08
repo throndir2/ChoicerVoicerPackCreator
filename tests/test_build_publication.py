@@ -160,7 +160,9 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
         hook_calls.append(("all", name))
         return (
             [(f"{name}-data", name)],
-            [(f"{name}-binary", name)],
+            [(f"{name}-binary", name)] + (
+                [("cudnn64_9.dll", name)] if name == "ctranslate2" else []
+            ),
             [f"{name}.dynamic_module"],
         )
 
@@ -252,16 +254,34 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
     )
     assert "_kaldi_native_fbank" in analyses[0].hiddenimports
     assert "choicer_voicer_pack_creator.speaker_worker" in analyses[0].hiddenimports
+    assert "choicer_voicer_pack_creator.caption_timing_worker" in analyses[0].hiddenimports
+    assert "--caption-timing-smoke" in speaker_hook
+    assert "timing_smoke(Path(sys.argv[2]))" in speaker_hook
+    assert ("cudnn64_9.dll", "ctranslate2") not in analyses[0].binaries
     assert any(
         Path(source).name == "kaldi-native-fbank-core.dll" and destination == "."
         for source, destination in analyses[0].binaries
     )
     assert analyses[0].pathex == [str(root / "src")]
-    for name in ("onnxruntime", "_soundfile_data", "kaldi_native_fbank"):
+    for name in ("onnxruntime", "_soundfile_data", "kaldi_native_fbank", "ctranslate2", "tokenizers"):
         assert ("all", name) in hook_calls
         assert (f"{name}-data", name) in analyses[0].datas
         assert (f"{name}-binary", name) in analyses[0].binaries
         assert f"{name}.dynamic_module" in analyses[0].hiddenimports
+
+
+def test_caption_timing_dependencies_retain_metadata_and_missing_wheel_licenses(tmp_path):
+    application = tmp_path / "app"
+    application.mkdir()
+    BUILD_SCRIPT._copy_caption_timing_licenses(application)
+    for name, (_, filenames) in BUILD_SCRIPT.CAPTION_TIMING_LICENSES.items():
+        destination = application / "licenses" / "python" / name
+        assert (destination / "METADATA.txt").is_file()
+        for filename in filenames:
+            assert (destination / filename).is_file()
+    assert "huggingface-hub" in BUILD_SCRIPT._caption_timing_distribution_names()
+    assert "faster-whisper" not in BUILD_SCRIPT._caption_timing_distribution_names()
+    assert "av" not in BUILD_SCRIPT._caption_timing_distribution_names()
 
 
 def test_mcp_distribution_licenses_and_dependency_notices_are_bundled(
