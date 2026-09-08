@@ -286,10 +286,11 @@ class UpdateController(QObject):
             self._open_release_page(release.page_url)
             return
         self.progress = QProgressDialog("Preparing update...", "Cancel", 0, 100, self.window)
-        self.progress.setWindowTitle("Downloading application update")
+        self.progress.setWindowTitle("Preparing application update")
         self.progress.setWindowModality(Qt.WindowModality.NonModal)
         self.progress.setAutoClose(False)
         self.progress.setAutoReset(False)
+        self.progress.setValue(0)
         worker = UpdateWorker(
             include_prereleases=self.prerelease_action.isChecked(), release=release, target=target
         )

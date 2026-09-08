@@ -35,6 +35,41 @@ Progress = Callable[[str, float], None]
 Cancelled = Callable[[], bool]
 
 
+class _FileProgress:
+    def __init__(self, progress: Progress | None, message: str, count: int) -> None:
+        self.progress = progress
+        self.message = message
+        self.count = count
+        self.index = 0
+        self.last_time = float("-inf")
+
+    def start(self, name: str, size: int) -> None:
+        self.index += 1
+        self.name = name
+        self.size = size
+        self.update(0)
+
+    def update(self, completed: int) -> None:
+        self._report(min(completed / self.size, 1.0) if self.size else 0.0)
+
+    def finish(self) -> None:
+        self._report(1.0)
+
+    def _report(self, fraction: float) -> None:
+        if self.progress is None:
+            return
+        overall = (self.index - 1 + fraction) / self.count
+        now = time.monotonic()
+        # Bound queued GUI signals/logs even when thousands of small files finish quickly.
+        if now - self.last_time < 0.1 and overall < 1.0:
+            return
+        self.last_time = now
+        self.progress(
+            f"{self.message} ({self.index}/{self.count})...\n{self.name} ({fraction:.0%})",
+            overall,
+        )
+
+
 class UpdateError(RuntimeError):
     pass
 
@@ -209,12 +244,20 @@ def find_release(
     return max(candidates, key=lambda release: version_key(release.version), default=None)
 
 
-def sha256(path: Path, cancelled: Cancelled = lambda: False) -> str:
+def sha256(
+    path: Path, cancelled: Cancelled = lambda: False,
+    *, progress: Callable[[int], None] | None = None,
+) -> str:
     digest = hashlib.sha256()
+    completed = 0
+    _check_cancel(cancelled)
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(BUFFER_SIZE), b""):
             _check_cancel(cancelled)
             digest.update(chunk)
+            completed += len(chunk)
+            if progress is not None:
+                progress(completed)
     return digest.hexdigest()
 
 
@@ -297,16 +340,23 @@ def installation_directory() -> Path | None:
 
 def verify_installation(
     target: Path, version: str, cancelled: Cancelled = lambda: False,
+    *, progress: Progress | None = None, message: str = "Checking application files",
 ) -> dict[str, str]:
     files = read_portable_manifest(target, version)
+    file_progress = _FileProgress(progress, message, len(files))
     for name, digest in files.items():
         _check_cancel(cancelled)
         path = _safe_path(target, name)
-        if not path.is_file() or sha256(path, cancelled) != digest:
+        present = path.is_file()
+        file_progress.start(name, path.stat().st_size if present and progress is not None else 0)
+        if not present or sha256(
+            path, cancelled, progress=file_progress.update if progress is not None else None,
+        ) != digest:
             raise UpdateError(
                 f"An application file is missing or locally modified:\n{path}\n\n"
                 "It will not be overwritten. Extract the new release into a separate folder."
             )
+        file_progress.finish()
     return files
 
 
@@ -323,7 +373,9 @@ def _check_collisions(target: Path, old: dict[str, str], new: dict[str, str]) ->
                 raise UpdateError(f"The update conflicts with an existing file:\n{parent}")
 
 
-def _extract(archive: Path, destination: Path, cancelled: Cancelled) -> None:
+def _extract(
+    archive: Path, destination: Path, cancelled: Cancelled, *, progress: Progress | None = None,
+) -> None:
     with zipfile.ZipFile(archive) as package:
         files: list[tuple[zipfile.ZipInfo, str]] = []
         seen: set[str] = set()
@@ -351,14 +403,20 @@ def _extract(archive: Path, destination: Path, cancelled: Cancelled) -> None:
             raise UpdateError("The release ZIP exceeds the supported portable-package size.")
         if shutil.disk_usage(destination.parent).free < total * 2 + 100 * BUFFER_SIZE:
             raise UpdateError("Not enough free disk space to stage and back up the update.")
+        file_progress = _FileProgress(progress, "Extracting update files", len(files))
         for entry, relative in files:
             _check_cancel(cancelled)
+            file_progress.start(relative, entry.file_size)
             output_path = _safe_path(destination, relative)
             output_path.parent.mkdir(parents=True, exist_ok=True)
+            completed = 0
             with package.open(entry) as source, output_path.open("xb") as output:
                 while chunk := source.read(BUFFER_SIZE):
                     _check_cancel(cancelled)
                     output.write(chunk)
+                    completed += len(chunk)
+                    file_progress.update(completed)
+            file_progress.finish()
 
 
 def prepare_update(
@@ -371,14 +429,18 @@ def prepare_update(
     if version_key(release.version) <= version_key(current_version):
         raise UpdateError("The selected release is not newer than the installed application.")
     progress("Checking application files...", 0.0)
-    old = verify_installation(target, current_version, cancelled)
-    manifest_hash = sha256(target / MANIFEST)
+    old = verify_installation(
+        target, current_version, cancelled,
+        progress=lambda message, fraction: progress(message, 0.1 * fraction),
+    )
+    manifest_hash = sha256(target / MANIFEST, cancelled)
     _check_cancel(cancelled)
     if shutil.disk_usage(target.parent).free < release.archive_size * 3:
         raise UpdateError("Not enough free disk space to download the update.")
     directory = Path(tempfile.mkdtemp(prefix=".cvpc-update-", dir=target.parent))
     prepared = PreparedUpdate(directory, target, release.version)
     try:
+        progress("Fetching update checksum...", 0.1)
         checksum_text = _read(release.checksum_url, 1024, cancelled).decode("ascii").strip()
         match = re.fullmatch(
             r"([0-9a-fA-F]{64}) [ *]" + re.escape(release.archive_name), checksum_text
@@ -392,6 +454,7 @@ def prepare_update(
         digest = hashlib.sha256()
         downloaded = 0
         deadline = time.monotonic() + 1800
+        progress("Downloading update...", 0.1)
         with _open(release.archive_url) as response, archive.open("xb") as output:
             while chunk := response.read(BUFFER_SIZE):
                 _check_cancel(cancelled)
@@ -400,14 +463,22 @@ def prepare_update(
                     raise UpdateError("The update download exceeded its size or time limit.")
                 output.write(chunk)
                 digest.update(chunk)
-                progress("Downloading update...", downloaded / release.archive_size)
+                progress("Downloading update...", 0.1 + 0.6 * (downloaded / release.archive_size))
             output.flush()
             os.fsync(output.fileno())
         if downloaded != release.archive_size or digest.hexdigest() != expected_hash:
             raise UpdateError("The update archive failed size/SHA-256 verification.")
-        progress("Verifying and staging update...", 1.0)
-        _extract(archive, prepared.staged, cancelled)
-        new = verify_installation(prepared.staged, release.version, cancelled)
+        progress("Extracting update files...", 0.7)
+        _extract(
+            archive, prepared.staged, cancelled,
+            progress=lambda message, fraction: progress(message, 0.7 + 0.15 * fraction),
+        )
+        progress("Verifying update files...", 0.85)
+        new = verify_installation(
+            prepared.staged, release.version, cancelled, message="Verifying update files",
+            progress=lambda message, fraction: progress(message, 0.85 + 0.14 * fraction),
+        )
+        progress("Finalizing update...", 0.99)
         actual = {
             path.relative_to(prepared.staged).as_posix()
             for path in prepared.staged.rglob("*") if path.is_file()
@@ -422,6 +493,7 @@ def prepare_update(
         }
         (directory / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
         archive.unlink()
+        progress("Update ready to install.", 1.0)
         return prepared
     except (OSError, ValueError, UpdateError, zipfile.BadZipFile, http.client.HTTPException):
         shutil.rmtree(directory)
