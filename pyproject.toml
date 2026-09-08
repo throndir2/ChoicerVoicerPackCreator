@@ -43,6 +43,7 @@ test = [
 ]
 build = [
   "pyinstaller==6.22.2",
+  "distlib==0.4.0",
 ]
 dev = [
   "choicer-voicer-pack-creator[test,build]",

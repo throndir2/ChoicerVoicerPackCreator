@@ -32,6 +32,7 @@ from choicer_voicer_pack_creator.operations import (
     report,
 )
 from choicer_voicer_pack_creator.process_worker import owned_subprocess
+from choicer_voicer_pack_creator.runtime_paths import application_directory
 
 ProgressCallback = Callable[[str], None]
 
@@ -162,7 +163,10 @@ class MediaTools:
     def _find_tool_pair() -> tuple[str, str]:
         suffix = ".exe" if sys.platform == "win32" else ""
         executable_dir = Path(sys.executable).resolve().parent
-        application_dir = Path(sys.argv[0]).resolve().parent
+        application_dir = (
+            application_directory() if getattr(sys, "frozen", False)
+            else Path(sys.argv[0]).resolve().parent
+        )
         directories = [
             application_dir,
             application_dir / "bin",

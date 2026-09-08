@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
+import subprocess
 import sys
+import zipfile
+from importlib.resources import files
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -40,8 +44,12 @@ def _prepare_candidate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple
     application.mkdir(parents=True)
     executable = application / "Choicer Voicer Pack Creator.exe"
     executable.write_bytes(b"application")
-    mcp_executable = application / "Choicer Voicer MCP.exe"
+    mcp_executable = application / "MCP" / "Choicer Voicer MCP.exe"
+    mcp_executable.parent.mkdir()
     mcp_executable.write_bytes(b"console application")
+    (mcp_executable.parent / "README.md").write_text("MCP setup", encoding="utf-8")
+    (application / "_internal").mkdir()
+    (application / "_internal" / mcp_executable.name).write_bytes(b"console payload")
     candidate = distribution / "portable-build" / ".candidate.zip"
     candidate.write_bytes(b"validated candidate")
     stable = distribution / "share.zip"
@@ -111,7 +119,7 @@ def test_missing_mcp_executable_prevents_promotion(
 ) -> None:
     candidate, stable, _latest = _prepare_candidate(tmp_path, monkeypatch)
     stable.write_bytes(b"previous stable")
-    (candidate.parent / BUILD_SCRIPT.APP_NAME / f"{BUILD_SCRIPT.MCP_NAME}.exe").unlink()
+    (candidate.parent / BUILD_SCRIPT.APP_NAME / "MCP" / f"{BUILD_SCRIPT.MCP_NAME}.exe").unlink()
 
     with pytest.raises(RuntimeError, match="incomplete"):
         BUILD_SCRIPT.promote_candidate("build-id")
@@ -120,7 +128,7 @@ def test_missing_mcp_executable_prevents_promotion(
     assert candidate.read_bytes() == b"validated candidate"
 
 
-def test_mcp_executable_must_share_editor_folder(
+def test_mcp_executable_must_be_in_mcp_subfolder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _prepare_candidate(tmp_path, monkeypatch)
@@ -131,8 +139,83 @@ def test_mcp_executable_must_share_editor_folder(
     manifest["mcp_executable"] = other.relative_to(tmp_path).as_posix()
     pending.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="share the editor"):
+    with pytest.raises(RuntimeError, match="MCP subfolder"):
         BUILD_SCRIPT.promote_candidate("build-id")
+
+
+@pytest.mark.parametrize("missing", ["MCP/README.md", "_internal/Choicer Voicer MCP.exe"])
+def test_missing_mcp_launcher_support_files_prevent_promotion(tmp_path, monkeypatch, missing):
+    candidate, stable, _latest = _prepare_candidate(tmp_path, monkeypatch)
+    (candidate.parent / BUILD_SCRIPT.APP_NAME / missing).unlink()
+    with pytest.raises(RuntimeError, match="incomplete MCP launcher layout"):
+        BUILD_SCRIPT.promote_candidate("build-id")
+    assert candidate.is_file() and not stable.exists()
+
+
+def test_extra_root_mcp_executable_prevents_promotion(tmp_path, monkeypatch):
+    candidate, stable, _latest = _prepare_candidate(tmp_path, monkeypatch)
+    (candidate.parent / BUILD_SCRIPT.APP_NAME / f"{BUILD_SCRIPT.MCP_NAME}.exe").touch()
+    with pytest.raises(RuntimeError, match="incomplete MCP launcher layout"):
+        BUILD_SCRIPT.promote_candidate("build-id")
+    assert candidate.is_file() and not stable.exists()
+
+
+def test_mcp_assembly_keeps_one_runtime_and_copies_the_complete_guide(tmp_path, monkeypatch):
+    root = tmp_path / "repository"
+    (root / "MCP").mkdir(parents=True)
+    (root / "MCP" / "README.md").write_text("Complete MCP setup guide", encoding="utf-8")
+    application = tmp_path / "Portable app ü"
+    (application / "_internal").mkdir(parents=True)
+    payload = application / f"{BUILD_SCRIPT.MCP_NAME}.exe"
+    payload.write_bytes(b"frozen console payload")
+    monkeypatch.setattr(BUILD_SCRIPT, "ROOT", root)
+
+    BUILD_SCRIPT._assemble_mcp(application)
+
+    assert not payload.exists()
+    assert (application / "_internal" / payload.name).read_bytes() == b"frozen console payload"
+    launcher = application / "MCP" / payload.name
+    data = launcher.read_bytes()
+    assert data.startswith(b"MZ")
+    assert b'#!"<launcher_dir>\\..\\_internal\\Choicer Voicer MCP.exe" --cvpc-mcp-launcher\n' in data
+    assert str(application).encode() not in data
+    with BUILD_SCRIPT.zipfile.ZipFile(launcher) as archive:
+        assert archive.namelist() == ["__main__.py"]
+    assert (application / "MCP" / "README.md").read_text() == "Complete MCP setup guide"
+    assert sorted(path.name for path in application.iterdir()) == ["MCP", "_internal"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows native console launcher")
+def test_native_mcp_launcher_forwards_arguments_stdio_and_exit_code(tmp_path):
+    application = tmp_path / "Portable app ü"
+    (application / "_internal").mkdir(parents=True)
+    # A second stock launcher serves as an observable payload without running a full freeze.
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr("__main__.py", (
+            "import json, sys\n"
+            "print(json.dumps({'args': sys.argv[1:], 'stdin': sys.stdin.read()}))\n"
+            "print('payload diagnostic', file=sys.stderr)\n"
+            "sys.exit(17)\n"
+        ))
+    (application / f"{BUILD_SCRIPT.MCP_NAME}.exe").write_bytes(
+        files("distlib").joinpath("t64.exe").read_bytes()
+        + f'#!"{sys.executable}"\n'.encode()
+        + archive.getvalue()
+    )
+    BUILD_SCRIPT._assemble_mcp(application)
+    launcher = application / "MCP" / f"{BUILD_SCRIPT.MCP_NAME}.exe"
+    arguments = ["--headless", "--data-root", str(tmp_path / "MCP data ü")]
+    completed = subprocess.run(
+        [str(launcher), *arguments], input="client request\n", capture_output=True,
+        text=True, cwd=tmp_path, timeout=15, check=False,
+    )
+    assert completed.returncode == 17, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "args": ["--cvpc-mcp-launcher", str(launcher), *arguments],
+        "stdin": "client request\n",
+    }
+    assert completed.stderr.strip() == "payload diagnostic"
 
 
 def test_spec_builds_two_entrypoints_from_one_shared_analysis(
@@ -218,6 +301,7 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
     editor, mcp = executables
     assert editor.name == BUILD_SCRIPT.APP_NAME and editor.console is False
     assert mcp.name == BUILD_SCRIPT.MCP_NAME and mcp.console is True
+    assert mcp.contents_directory == "."
     assert editor.exclude_binaries and mcp.exclude_binaries
     assert editor.args[0] is mcp.args[0] is analyses[0].pure
     assert [entry[0] for entry in editor.args[1]] == ["runtime_hook", "__main__"]
@@ -249,6 +333,9 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
         str(root / "scripts" / "separation_runtime_hook.py"),
     ]
     speaker_hook = (BUILD_SCRIPT.BUILD / "speaker_runtime_hook.py").read_text()
+    assert speaker_hook.index("--cvpc-mcp-launcher") < speaker_hook.index(
+        "multiprocessing.freeze_support()"
+    )
     assert speaker_hook.index("multiprocessing.freeze_support()") < speaker_hook.index(
         "--speaker-matching-smoke"
     )
@@ -268,6 +355,25 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
         assert (f"{name}-data", name) in analyses[0].datas
         assert (f"{name}-binary", name) in analyses[0].binaries
         assert f"{name}.dynamic_module" in analyses[0].hiddenimports
+
+
+@pytest.mark.parametrize("native_launcher", [False, True])
+def test_launcher_arguments_are_normalized_before_multiprocessing(
+    tmp_path, monkeypatch, native_launcher,
+):
+    import multiprocessing
+
+    monkeypatch.setattr(BUILD_SCRIPT, "BUILD", tmp_path)
+    BUILD_SCRIPT._write_spec()
+    arguments = ["console.exe", "--multiprocessing-fork", "parent_pid=123"]
+    if native_launcher:
+        arguments[1:1] = ["--cvpc-mcp-launcher", r"D:\Portable app ü\MCP\launcher.exe"]
+    monkeypatch.setattr(sys, "argv", arguments)
+    calls = []
+    monkeypatch.setattr(multiprocessing, "freeze_support", lambda: calls.append(sys.argv[:]))
+    hook = tmp_path / "speaker_runtime_hook.py"
+    exec(compile(hook.read_text(encoding="utf-8"), str(hook), "exec"), {})
+    assert calls == [["console.exe", "--multiprocessing-fork", "parent_pid=123"]]
 
 
 def test_caption_timing_dependencies_retain_metadata_and_missing_wheel_licenses(tmp_path):
@@ -295,6 +401,7 @@ def test_mcp_distribution_licenses_and_dependency_notices_are_bundled(
         ("anyio", []),
         ("pyjwt", ["cryptography>=3; extra == 'crypto'"]),
         ("cryptography", []),
+        ("distlib", []),
     ):
         license_path = Path(f"{name}-1.dist-info") / "licenses" / "LICENSE"
         (installed / license_path).parent.mkdir(parents=True)
@@ -342,52 +449,6 @@ def test_missing_mcp_license_fails_build(
     )
     with pytest.raises(RuntimeError, match="license file"):
         BUILD_SCRIPT._copy_mcp_licenses(tmp_path)
-
-
-@pytest.mark.parametrize("frozen", [False, True])
-@pytest.mark.parametrize("headless", [False, True])
-def test_help_configuration_selects_source_or_console_entrypoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frozen: bool, headless: bool
-) -> None:
-    from choicer_voicer_pack_creator.ui.mcp_help_dialog import mcp_client_configuration
-
-    executable = tmp_path / "Unicode ü path" / (
-        "Choicer Voicer Pack Creator.exe" if frozen else "python.exe"
-    )
-    monkeypatch.setattr(sys, "executable", str(executable))
-    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
-    configuration = mcp_client_configuration(headless=headless)
-    entry = configuration["mcpServers"]["choicer-voicer"]
-    assert entry["command"] == str(
-        executable.with_name("Choicer Voicer MCP.exe") if frozen else executable
-    )
-    expected = [] if frozen else ["-m", "choicer_voicer_pack_creator", "--mcp"]
-    if headless:
-        expected.append("--headless")
-    assert entry["args"] == expected
-    assert json.loads(json.dumps(configuration)) == configuration
-
-
-def test_help_dialog_reads_bundled_guide_and_copies_configuration(qtbot, qapp) -> None:
-    from choicer_voicer_pack_creator.ui.mcp_help_dialog import McpHelpDialog
-
-    dialog = McpHelpDialog()
-    qtbot.addWidget(dialog)
-    assert dialog.help_browser.isReadOnly()
-    assert "model provider" in dialog.help_browser.toPlainText()
-    assert dialog.configuration.isReadOnly()
-    assert not dialog.headless_check.isChecked()
-    assert "Live editor" in dialog.mode_label.text()
-    dialog.copy_button.click()
-    assert qapp.clipboard().text() == dialog.configuration.toPlainText()
-    assert dialog.copy_status.text() == "Configuration copied."
-    dialog.headless_check.setChecked(True)
-    entry = json.loads(dialog.configuration.toPlainText())["mcpServers"]["choicer-voicer"]
-    assert entry["args"][-1] == "--headless"
-    assert "Headless" in dialog.mode_label.text()
-    assert dialog.copy_status.text() == ""
-    dialog.copy_button.click()
-    assert qapp.clipboard().text() == dialog.configuration.toPlainText()
 
 
 def test_failed_candidate_replace_never_removes_stable_zip(

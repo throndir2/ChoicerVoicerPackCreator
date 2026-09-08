@@ -25,23 +25,18 @@ class AboutDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("About Choicer Voicer Pack Creator")
-        self.resize(600, 400)
+        self.resize(600, 300)
 
         layout = QVBoxLayout(self)
         description = QLabel(
-            f"<h3>Choicer Voicer Pack Creator {__version__}</h3>"
-            "<p>An unofficial community desktop editor for creating, importing, and validating "
-            "Choicer Voicer dub packs.</p>"
-            "<p>The desktop interface uses PySide6/Qt. Windows bundles include an unmodified "
-            "FFmpeg LGPL shared build for media conversion; its license, provenance, and source "
-            "links are in <code>THIRD_PARTY_NOTICES.md</code>.</p>"
-            "<p>Godot is <b>not</b> the GUI framework or an end-user dependency. Release tests use "
-            "Godot's native <code>ConfigFile</code> parser because The Choicer Voicer is a Godot "
-            "application and reads pack metadata with that parser.</p>"
-            "<p>Optional video analysis uses deterministic audio-energy scanning and can download "
-            "a pinned local whisper.cpp CPU runtime/model. No media is uploaded. Transcripts and "
-            "timestamps are editable suggestions, never correctness claims.</p>"
-            "<p>Project files store paths and edit decisions only. Source media remains yours.</p>"
+            "<h3>Choicer Voicer Pack Creator</h3>"
+            f"<p>Version {__version__}</p>"
+            "<p>A desktop editor for creating, editing, importing, and validating dub packs "
+            "for <i>The Choicer Voicer</i>.</p>"
+            "<p>Unofficial tool. Not affiliated with the creators of "
+            "<i>The Choicer Voicer</i>.</p>"
+            "<p>Licensed under the MIT License. Third-party licenses and source information "
+            "are listed in <code>THIRD_PARTY_NOTICES.md</code>.</p>"
         )
         description.setWordWrap(True)
         layout.addWidget(description)

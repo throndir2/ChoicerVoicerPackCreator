@@ -437,6 +437,34 @@ def test_apply_refuses_collisions_with_unrelated_files(tmp_path) -> None:
     assert updates.verify_installation(prepared.target, "0.5.1")
 
 
+def test_update_relocates_managed_mcp_files_and_preserves_user_configuration(tmp_path):
+    target = package(tmp_path / "app", "0.5.1", {
+        "Choicer Voicer MCP.exe": b"old console executable",
+        "docs/MCP.md": b"old guide",
+    })
+    directory = tmp_path / ".cvpc-update-test"
+    nested = {
+        "MCP/Choicer Voicer MCP.exe": b"native launcher",
+        "MCP/README.md": b"complete guide",
+        "_internal/Choicer Voicer MCP.exe": b"console payload",
+    }
+    package(directory / "application", "0.6.0", nested)
+    configuration = target / "MCP" / "my-client.json"
+    configuration.parent.mkdir()
+    configuration.write_bytes(b"user configuration")
+    prepared = updates.PreparedUpdate(directory, target, "0.6.0")
+
+    updates.apply_update(prepared, "0.5.1", updates.sha256(target / updates.MANIFEST))
+
+    inventory = updates.verify_installation(target, "0.6.0")
+    assert nested.keys() <= inventory.keys()
+    assert not (target / "Choicer Voicer MCP.exe").exists()
+    assert not (target / "docs" / "MCP.md").exists()
+    assert configuration.read_bytes() == b"user configuration"
+    for name, content in nested.items():
+        assert (target / name).read_bytes() == content
+
+
 def test_apply_refuses_modified_app_files_or_changed_manifest(tmp_path) -> None:
     prepared = prepared_package(tmp_path)
     manifest_hash = updates.sha256(prepared.target / updates.MANIFEST)

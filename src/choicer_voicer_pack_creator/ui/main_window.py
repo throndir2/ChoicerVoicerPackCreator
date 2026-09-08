@@ -3462,11 +3462,6 @@ class ProjectEditor(QWidget):
 
         AboutDialog(self).exec()
 
-    def show_mcp_help(self) -> None:
-        from choicer_voicer_pack_creator.ui.mcp_help_dialog import McpHelpDialog
-
-        McpHelpDialog(self).exec()
-
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         event.ignore()
         index = self.workspace.tabs.indexOf(self)
@@ -3720,10 +3715,6 @@ class MainWindow(QMainWindow):
         self.action_recordings.setObjectName("showRecordings")
         self.action_recordings.triggered.connect(self.show_recordings)
         self.tools_menu.addAction(self.action_recordings)
-        self.action_mcp_help = QAction("LLM / MCP Help", self)
-        self.action_mcp_help.triggered.connect(lambda: self.active_editor.show_mcp_help())
-        self.help_menu.addAction(self.action_mcp_help)
-        self.help_menu.addSeparator()
         self.updates_menu = self.help_menu.addMenu("&Updates")
         self.updates_menu.setToolTipsVisible(True)
         self.updater = UpdateController(self, self.updates_menu)
@@ -3754,7 +3745,6 @@ class MainWindow(QMainWindow):
             (self.action_reset_layout, "restore", "Restore the default window size and pane layout for all tabs without changing projects."),
             (self.tasks_window.show_action, "tasks", "View and manage background tasks across all projects."),
             (self.action_recordings, "play", "Find game recordings, preview dubbed playback, and export a video without changing your projects."),
-            (self.action_mcp_help, "help", "Open assistant connection instructions and the MCP safety guide."),
             (self.updater.check_action, "restore", "Check GitHub for application updates."),
             (self.updater.auto_action, "restore", "Check for application updates automatically on startup."),
             (self.updater.prerelease_action, "info", "Include prerelease versions when checking for application updates."),

@@ -232,9 +232,16 @@ def test_support_button_only_appears_in_help_about(
             assert isinstance(dialog, AboutDialog)
             assert dialog.windowTitle() == "About Choicer Voicer Pack Creator"
             text = "".join(label.text() for label in dialog.findChildren(QLabel))
-            assert __version__ in text
-            assert "THIRD_PARTY_NOTICES.md" in text
-            assert "Source media remains yours." in text
+            assert text == (
+                "<h3>Choicer Voicer Pack Creator</h3>"
+                f"<p>Version {__version__}</p>"
+                "<p>A desktop editor for creating, editing, importing, and validating dub packs "
+                "for <i>The Choicer Voicer</i>.</p>"
+                "<p>Unofficial tool. Not affiliated with the creators of "
+                "<i>The Choicer Voicer</i>.</p>"
+                "<p>Licensed under the MIT License. Third-party licenses and source information "
+                "are listed in <code>THIRD_PARTY_NOTICES.md</code>.</p>"
+            )
             button = dialog.support_button
             assert button.window() is dialog
             assert button.isVisible() and button.isEnabled()
