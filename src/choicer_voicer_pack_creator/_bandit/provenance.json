@@ -8,6 +8,13 @@
   "vendoring": "Files were downloaded unchanged from the pinned revision before applying the adaptations recorded below. Digests describe those original downloaded bytes.",
   "adaptations": [
     {
+      "path": "./",
+      "changes": [
+        "Relocated from scripts/_bandit to the installed choicer_voicer_pack_creator._bandit package. Numerical source bytes and their original hashes remain unchanged.",
+        "Local loader exposes the fixed constructor parameters, validates the installed combined manifest against its checkpoint/configuration pins, and accepts a cancellable hash-verification callback. No architecture or numerical changes."
+      ]
+    },
+    {
       "path": "models/base.py",
       "changes": [
         "Replace the pytorch_lightning import and empty LightningModule superclass with torch.nn.Module.",

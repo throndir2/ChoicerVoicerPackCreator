@@ -404,7 +404,12 @@ class ExportResourceBudget:
             raise
         return decision
 
-    def acquire(self, estimate: WorkEstimate, *, max_wait_seconds: float = 30) -> Admission:
+    def acquire(
+        self, estimate: WorkEstimate, *, max_wait_seconds: float = 30,
+        work_label: str = "export",
+    ) -> Admission:
+        if not isinstance(work_label, str) or not work_label.strip():
+            raise ValueError("work_label must be nonempty text")
         if (
             isinstance(max_wait_seconds, bool) or not isinstance(max_wait_seconds, (int, float))
             or not math.isfinite(max_wait_seconds) or max_wait_seconds < 0
@@ -421,17 +426,23 @@ class ExportResourceBudget:
                     self._diagnose(decision)
                 if decision.admission is not None:
                     return decision.admission
+                reason = decision.reason.replace("export", work_label)
                 if not decision.retryable:
-                    raise ResourceError(f"Cannot admit export work: {decision.reason}. Reduce the requested working set or thread count.")
+                    advice = (
+                        "Reduce the requested working set or thread count."
+                        if work_label == "export" else "Use a computer with more available RAM."
+                    )
+                    raise ResourceError(f"Cannot admit {work_label} work: {reason}. {advice}")
                 remaining = deadline - self._clock()
                 if remaining <= 0:
                     raise ResourceError(
-                        f"Timed out after {max_wait_seconds:g}s waiting for export resources: "
-                        f"{decision.reason}. Close resource-heavy applications or reduce the "
-                        "export working set, then retry."
+                        f"Timed out after {max_wait_seconds:g}s waiting for {work_label} resources: "
+                        f"{reason}. Close resource-heavy applications"
+                        + (" or reduce the export working set, then retry." if work_label == "export"
+                           else " or wait for other work to finish, then retry.")
                     )
                 if decision.reason != previous_reason:
-                    operations.report(f"Waiting for export resources: {decision.reason}...", None)
+                    operations.report(f"Waiting for {work_label} resources: {reason}...", None)
                     previous_reason = decision.reason
                 operations.check_cancelled()
                 remaining = deadline - self._clock()

@@ -12,6 +12,32 @@ from choicer_voicer_pack_creator.models import (
     Segment,
     SourceCaption,
 )
+from choicer_voicer_pack_creator.separation_types import KEEP_SINGING, REMOVE_ALL_VOCALS
+
+
+def test_backing_mode_defaults_and_round_trips_without_claiming_file_provenance():
+    project = PackProject(backing_track_path="imported.mp3")
+    assert project.backing_generation_mode == REMOVE_ALL_VOCALS
+    data = project.to_dict()
+    del data["backing_generation_mode"]
+    assert PackProject.from_dict(data).backing_generation_mode == REMOVE_ALL_VOCALS
+    project.backing_generation_mode = KEEP_SINGING
+    restored = PackProject.from_dict(project.to_dict())
+    assert restored.backing_generation_mode == KEEP_SINGING
+    assert restored.backing_track_path == "imported.mp3"
+    assert restored.to_dict()["schema_version"] == 1
+
+
+@pytest.mark.parametrize("value", [None, True, 0, "", "unknown", "KEEP_SINGING", [], {}])
+def test_backing_mode_rejects_invalid_stored_constructed_and_mutated_values(value):
+    with pytest.raises(ValueError):
+        PackProject.from_dict({"schema_version": 1, "backing_generation_mode": value})
+    with pytest.raises(ValueError):
+        PackProject(backing_generation_mode=value)
+    project = PackProject()
+    project.backing_generation_mode = value
+    with pytest.raises(ValueError):
+        project.to_dict()
 
 
 def test_new_projects_default_to_fast_video_profile() -> None:

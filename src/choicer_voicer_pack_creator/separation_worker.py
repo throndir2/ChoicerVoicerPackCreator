@@ -24,6 +24,11 @@ from choicer_voicer_pack_creator.separation import (
     verify_model_file,
     write_json_atomic,
 )
+from choicer_voicer_pack_creator.separation_types import (
+    KEEP_SINGING,
+    REMOVE_ALL_VOCALS,
+    validate_backing_mode,
+)
 
 
 def separate_stream(
@@ -144,8 +149,14 @@ def worker_main(request_path: Path) -> int:
         request = json.loads(request_path.read_text(encoding="utf-8"))
         if request.get("version") != 1 or request.get("job_id") != job_id:
             raise SeparationError("Invalid separation worker request")
+        mode = validate_backing_mode(request.get("mode", REMOVE_ALL_VOCALS))
         if request.get("smoke_test") is True:
-            report = smoke_test(job)
+            if mode == KEEP_SINGING:
+                from choicer_voicer_pack_creator.bandit_runtime import smoke_test as bandit_smoke
+
+                report = bandit_smoke(job)
+            else:
+                report = smoke_test(job)
             if any(name.startswith("PySide6") for name in sys.modules):
                 raise SeparationError("The separation worker unexpectedly imported Qt")
             write_json_atomic(job / "smoke.json", report)
@@ -154,8 +165,17 @@ def worker_main(request_path: Path) -> int:
             if type(frames) is not int or frames <= 0:
                 raise SeparationError("Invalid separation worker frame count")
             status("Loading the verified local CPU model…", None)
-            session = load_session(Path(request["model"]))
-            separate_stream(job / "decoded.wav", output_path, session, frames, status, lambda: False)
+            if mode == KEEP_SINGING:
+                from choicer_voicer_pack_creator import bandit_runtime
+
+                model = bandit_runtime.load_cpu_model(Path(request["model"]), request.get("threads"))
+                bandit_runtime.separate_stream(
+                    job / "decoded.wav", output_path, bandit_runtime.make_predictor(model),
+                    frames, status, lambda: False,
+                )
+            else:
+                session = load_session(Path(request["model"]))
+                separate_stream(job / "decoded.wav", output_path, session, frames, status, lambda: False)
         status("Full-length backing track generated and verified.", 1.0, "succeeded")
         return 0
     except Exception as error:

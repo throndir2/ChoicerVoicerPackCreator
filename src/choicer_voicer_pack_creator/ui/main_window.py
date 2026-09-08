@@ -81,6 +81,7 @@ from choicer_voicer_pack_creator.project_checks import ProjectChecksResult
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore, WorkspaceStore
 from choicer_voicer_pack_creator.project_session import ProjectSession, canonical_project_path
 from choicer_voicer_pack_creator.scene_editing import SceneEditMode, execute_scene_edit
+from choicer_voicer_pack_creator.separation_types import REMOVE_ALL_VOCALS, BackingMode
 from choicer_voicer_pack_creator.timeline_audit import (
     TimelineOverlap,
     describe_timeline_overlaps,
@@ -1381,7 +1382,11 @@ class ProjectEditor(QWidget):
         )
         if history_replay:
             self._source_request += 1
-        if project.backing_track_path != self.project.backing_track_path:
+        if (
+            history_replay
+            or project.backing_track_path != self.project.backing_track_path
+            or project.backing_generation_mode != self.project.backing_generation_mode
+        ):
             self.session.backing_revision += 1
         if project.analysis_review != self.project.analysis_review:
             self.session.draft_revision += 1
@@ -2859,6 +2864,8 @@ class ProjectEditor(QWidget):
     def generate_backing_track(
         self, *, after_success: Callable[[], None] | None = None, background: bool = False,
     ) -> bool:
+        if background and self.project.backing_track_path:
+            return False
         if self._backing_dialog is not None:
             if not background:
                 self._backing_dialog.show()
@@ -2874,7 +2881,8 @@ class ProjectEditor(QWidget):
                 "or ZIP to use the included dub_video.ogv without changing your dialogue.",
             )
             return False
-        if project.backing_track_path:
+
+        def confirm_replacement() -> bool:
             answer = QMessageBox.question(
                 self,
                 "Regenerate backing track?",
@@ -2884,14 +2892,92 @@ class ProjectEditor(QWidget):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             )
-            if answer != QMessageBox.StandardButton.Yes:
+            return answer == QMessageBox.StandardButton.Yes
+
+        def source_identity():
+            return self.session.source_token(), self.project.pack_id, self._source_request
+
+        picker_source = source_identity()
+        approved_selection = (self.session.backing_revision, project.backing_track_path)
+        if project.backing_track_path and not confirm_replacement():
+            return False
+        if picker_source != source_identity():
+            return False
+        token = None
+
+        def current_token(mode: BackingMode):
+            return (
+                source_identity(), self.session.backing_revision,
+                self.project.backing_track_path, self.project.backing_generation_mode, mode,
+            )
+
+        def project_is_open() -> bool:
+            return (
+                not self.workspace._closing and self.session.id not in self.workspace._closed_ids
+                and self.workspace.editors.get(self.session.id) is self
+            )
+
+        def request_current() -> bool:
+            return (
+                project_is_open() and not self.session.loading and token is not None
+                and token == current_token(dialog.mode)
+                and self._backing_dialog is dialog
+            )
+
+        def preserve_backing_status() -> None:
+            if (
+                project_is_open() and self._backing_dialog is dialog
+                and self.processing.group_state("backing").state in ACTIVE_STATES
+            ):
+                self.processing.set_status(
+                    "backing", "ready" if self.project.backing_track_path else "idle",
+                    "Using the project's selected backing track."
+                    if self.project.backing_track_path else "No backing track selected.",
+                )
+
+        def before_start(mode: BackingMode) -> bool:
+            nonlocal token
+            if (
+                not project_is_open() or self._backing_dialog is not dialog
+                or source_identity() != picker_source
+                or self.session.loading or self.edit_history.busy
+            ):
                 return False
-        token = (self.session.source_token(), self.session.backing_revision, project.backing_track_path)
+            if background and self.project.backing_track_path:
+                return False
+            selection = (self.session.backing_revision, self.project.backing_track_path)
+            if self.project.backing_track_path and selection != approved_selection:
+                if not confirm_replacement():
+                    return False
+                if not project_is_open() or selection != (
+                    self.session.backing_revision, self.project.backing_track_path,
+                ) or source_identity() != picker_source:
+                    return False
+            if not background and self.project.backing_generation_mode != mode:
+                self.project.backing_generation_mode = mode
+                self.session.backing_revision += 1
+                self._set_dirty(True, history_label="Change backing generation mode", fields_only=True)
+            token = current_token(mode)
+            dialog.source_snapshot = {
+                "project_id": self.session.id,
+                "pack_id": self.project.pack_id,
+                "source_revision": self.session.source_revision,
+                "source_request": self._source_request,
+                "backing_revision": self.session.backing_revision,
+                "backing_path": self.project.backing_track_path,
+                "backing_generation_mode": mode,
+                "backing_preference": self.project.backing_generation_mode,
+            }
+            return True
+
         try:
             dialog = BackingDialog(
                 self.media, source.resolve(), self.analysis_data_root.parent / "backing", self,
                 job_manager=self.workspace.job_manager, project_id=self.session.id,
                 source_snapshot={"source_revision": self.session.source_revision},
+                mode=REMOVE_ALL_VOCALS if background else project.backing_generation_mode,
+                auto_start=background, before_start=before_start, request_current=request_current,
+                on_stale=preserve_backing_status,
             )
         except (OSError, RuntimeError, ValueError) as error:
             diagnostic_exception("backing_setup_failed", error)
@@ -2902,19 +2988,16 @@ class ProjectEditor(QWidget):
         self._backing_dialog = dialog
 
         def apply_result() -> None:
-            if self.session.id in self.workspace._closed_ids:
+            if not project_is_open():
                 return
             if self.edit_history.busy:
                 QTimer.singleShot(100, apply_result)
                 return
             result = dialog.backing_path
-            current = (
-                self.session.source_token(), self.session.backing_revision,
-                self.project.backing_track_path,
-            )
             if result is None:
                 return
-            if token != current:
+            if token is None or token != current_token(dialog.mode):
+                preserve_backing_status()
                 self.statusBar().showMessage(
                     f"Backing saved at {result}; your newer source/backing choice was kept."
                 )
@@ -3263,6 +3346,15 @@ class ProjectEditor(QWidget):
         self.derived_work.close()
 
     def _derived_status_current(self, record: JobRecord) -> bool:
+        snapshot = record.source_snapshot
+        if record.kind == "backing" and "backing_revision" in snapshot:
+            return (
+                snapshot["backing_revision"] == self.session.backing_revision
+                and snapshot.get("backing_path") == self.project.backing_track_path
+                and snapshot.get("backing_preference") == self.project.backing_generation_mode
+                and snapshot.get("pack_id") == self.project.pack_id
+                and snapshot.get("source_request") == self._source_request
+            )
         key = record.source_snapshot.get("derived_key")
         if key is None:
             return True

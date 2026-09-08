@@ -235,6 +235,11 @@ def test_support_button_only_appears_in_help_about(
             assert __version__ in text
             assert "THIRD_PARTY_NOTICES.md" in text
             assert "Source media remains yours." in text
+            assert "Facing the Music BandIt combined model" in text
+            assert "Karn N. Watcharasupat, Chih-Wei Wu, and Iroro Orife" in text
+            assert "Apache-2.0" in text
+            assert "CC BY-NC 4.0 (non-commercial use)" in text
+            assert "not MIT or unrestricted" in text
             button = dialog.support_button
             assert button.window() is dialog
             assert button.isVisible() and button.isEnabled()

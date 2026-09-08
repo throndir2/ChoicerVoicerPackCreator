@@ -19,6 +19,10 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 
+# This repository-only runner deliberately uses a numerical/GPU environment, not
+# the GUI application's dependencies or its CPU-only singing extra.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 Predict = Callable[[np.ndarray], dict[str, np.ndarray]]
 STEMS = {"backing", "removed"}
 SAM_REVISION = "20b65f56888142eebe7c37448c6f6b3b32600e9b"
@@ -277,7 +281,7 @@ def preflight(backend: str, ffmpeg_bin: Path | None) -> dict[str, Any]:
         import librosa  # noqa: F401
         import torchaudio  # noqa: F401
 
-        from scripts._bandit import load_model  # noqa: F401
+        from choicer_voicer_pack_creator._bandit import load_model  # noqa: F401
     else:
         require_sam_source_pin()
         import sam_audio  # noqa: F401
@@ -289,7 +293,7 @@ def preflight(backend: str, ffmpeg_bin: Path | None) -> dict[str, Any]:
 def load_bandit(model_path: Path) -> Backend:
     import torch
 
-    from scripts._bandit import load_model
+    from choicer_voicer_pack_creator._bandit import load_model
 
     model = load_model(model_path, "cuda")
 
@@ -314,7 +318,7 @@ def load_bandit(model_path: Path) -> Backend:
             "backend": "bandit-combined",
             "source_revision": "d5563d9031e95fdaa3e5a73d5020b9a0df61adb6",
             "checkpoint_sha256": sha256(model_path),
-            "weights_license": "CC BY-NC 4.0; non-commercial research evaluation only",
+            "weights_license": "CC BY-NC 4.0; non-commercial uses only",
             "meaning": "music (including singing) + sfx; removed = speech",
             "channel_strategy": "mono network applied separately to left and right",
             "packages": {name: version(name) for name in ("torchaudio", "librosa")},

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -10,10 +12,14 @@ import tempfile
 import time
 import tomllib
 import uuid
+from email.parser import Parser
+from importlib import metadata
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 from choicer_voicer_pack_creator.separation import write_json_atomic
 from choicer_voicer_pack_creator.updates import (
@@ -48,6 +54,22 @@ REQUIRED_MCP_TOOLS = {
     "validate_pack",
     "show_in_editor",
 }
+SINGING_VERSIONS = {
+    "torch": "2.8.0+cpu", "torchaudio": "2.8.0+cpu",
+    "librosa": "0.10.2.post1", "scipy": "1.15.3", "numba": "0.67.0", "llvmlite": "0.49.0",
+    "numpy": "2.4.6", "soundfile": "0.13.1",
+}
+BANDIT_SMOKE_REPORT = {
+    "frames": 4097, "sample_rate": 48000, "torch": "2.8.0+cpu", "torchaudio": "2.8.0+cpu",
+    "cuda": None, "threads": 1, "interop_threads": 1, "numpy": "2.4.6", "qt_imported": False,
+    "channels": 2, "stems": ["speech", "music", "sfx"], "finite": True,
+    "ctranslate2_imported": False,
+}
+BANDIT_SMOKE_TIMEOUT = 180
+OPENMP_LIBRARIES = {
+    "torch": ("2.8.0+cpu", Path("torch") / "lib" / "libiomp5md.dll"),
+    "ctranslate2": ("4.8.1", Path("ctranslate2") / "libiomp5md.dll"),
+}
 
 
 def default_executable() -> Path:
@@ -68,8 +90,11 @@ def mcp_environment(environment: dict[str, str], executable: Path) -> dict[str, 
     isolated = {
         name: value
         for name, value in environment.items()
-        if name.upper()
-        not in {"PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CHOICER_VOICER_SMOKE_REPORT"}
+        if not name.upper().startswith(("PYTHON", "PIP_", "CONDA", "NUMBA_"))
+        and name.upper() not in {
+            "PATH", "VIRTUAL_ENV", "CHOICER_VOICER_SMOKE_REPORT", "KMP_DUPLICATE_LIB_OK",
+            "CUDA_PATH", "CUDA_HOME", "TORCH_HOME", "TORCH_EXTENSIONS_DIR",
+        }
     }
     # The bundled server must not depend on Python, FFmpeg, or another executable on a dev PATH.
     system_root = Path(
@@ -137,6 +162,7 @@ def smoke_separation(executable: Path) -> None:
         write_json_atomic(request, {"version": 1, "job_id": job.name, "smoke_test": True})
         completed = subprocess.run(
             [str(executable), "--separate-audio", str(request)],
+            env=mcp_environment(dict(os.environ), executable),
             check=False, timeout=60,
         )
         status_path = job / "status.json"
@@ -167,6 +193,165 @@ def smoke_separation(executable: Path) -> None:
             ).rglob("*")):
                 raise RuntimeError(f"Missing separation dependency licenses: {package}")
         print("PACKAGED QT-FREE CPU SEPARATION + STREAMING AUDIO SMOKE PASSED")
+    finally:
+        shutil.rmtree(job)
+
+
+def _check_singing_licenses(application: Path) -> None:
+    root = application / "licenses" / "python"
+    inventory = json.loads((application / "licenses" / "singing-runtime.json").read_text())
+    if inventory.get("version") != 1 or not isinstance(inventory.get("dependencies"), list):
+        raise RuntimeError("Invalid singing dependency inventory")
+    distributions = {}
+    for entry in inventory["dependencies"]:
+        name, version = entry.get("name"), entry.get("version")
+        if (
+            not isinstance(name, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name)
+            or name in distributions
+            or not isinstance(version, str)
+        ):
+            raise RuntimeError("Invalid singing dependency inventory entry")
+        directory = root / name
+        metadata = Parser().parsestr((directory / "METADATA.txt").read_text(encoding="utf-8"))
+        if canonicalize_name(metadata.get("Name", "")) != name or metadata.get("Version") != version:
+            raise RuntimeError(f"Incorrect singing dependency metadata: {name}")
+        if not any(
+            file.is_file() and file.name != "METADATA.txt" and (
+                file.name.casefold().startswith(
+                    ("license", "licence", "copying", "notice", "thirdpartynotices")
+                ) or "licenses" in tuple(part.casefold() for part in file.relative_to(directory).parts)
+            ) for file in directory.rglob("*")
+        ):
+            raise RuntimeError(f"Missing singing dependency license: {name}")
+        distributions[name] = (version, metadata)
+    for name, version in SINGING_VERSIONS.items():
+        if name not in distributions or distributions[name][0] != version:
+            raise RuntimeError(f"Unexpected singing dependency version: {name}")
+    pending = [Requirement(name) for name in SINGING_VERSIONS]
+    visited = set()
+    while pending:
+        requirement = pending.pop()
+        name = canonicalize_name(requirement.name)
+        if name not in distributions:
+            raise RuntimeError(f"Missing recursive singing dependency: {name}")
+        version, metadata = distributions[name]
+        if requirement.specifier and not requirement.specifier.contains(version):
+            raise RuntimeError(f"Inconsistent singing dependency: {requirement}")
+        extras = {extra for extra in {"", *requirement.extras} if (name, extra) not in visited}
+        if not extras:
+            continue
+        visited.update((name, extra) for extra in extras)
+        for text in metadata.get_all("Requires-Dist", []):
+            child = Requirement(text)
+            if child.marker is None or any(child.marker.evaluate({"extra": extra}) for extra in extras):
+                pending.append(child)
+
+
+def _check_openmp_libraries(application: Path) -> None:
+    expected = []
+    for name, (version, relative) in OPENMP_LIBRARIES.items():
+        distribution = metadata.distribution(name)
+        if distribution.version != version:
+            raise RuntimeError(f"Expected pinned {name} {version} for the OpenMP audit")
+        source = Path(distribution.locate_file(relative))
+        if not source.is_file():
+            raise RuntimeError(f"The installed {name} wheel is missing {relative}")
+        digest = sha256(source)
+        record = next((file for file in distribution.files or [] if Path(file) == relative), None)
+        if (
+            record is None or record.hash is None or record.hash.mode != "sha256"
+            or record.hash.value != base64.urlsafe_b64encode(
+                bytes.fromhex(digest)
+            ).rstrip(b"=").decode("ascii")
+        ):
+            raise RuntimeError(f"Installed OpenMP DLL fails the {name} wheel RECORD hash: {source}")
+        bundled = application / "_internal" / relative
+        if not bundled.is_file() or sha256(bundled) != digest:
+            raise RuntimeError(f"Package-local OpenMP DLL differs from the pinned wheel: {bundled}")
+        expected.append({
+            "distribution": name, "version": version, "path": relative.as_posix(), "sha256": digest,
+        })
+    inventory = json.loads((application / "licenses" / "singing-runtime.json").read_text())
+    if inventory.get("openmp_libraries") != expected:
+        raise RuntimeError("Packaged OpenMP provenance differs from the installed pinned wheels")
+
+
+def smoke_bandit(executable: Path) -> None:
+    job = ROOT / "build" / "bandit-smoke" / uuid.uuid4().hex
+    job.mkdir(parents=True)
+    try:
+        request = job / "request.json"
+        write_json_atomic(request, {
+            "version": 1, "job_id": job.name, "smoke_test": True, "mode": "keep_singing",
+        })
+        environment = mcp_environment(dict(os.environ), executable)
+        # Isolate optional caches and disable model hubs. This smoke only creates
+        # synthetic samples/random model parameters; it must never fetch real weights.
+        for name in ("TORCH_HOME", "HF_HOME", "NUMBA_CACHE_DIR"):
+            environment[name] = str(job / name.casefold())
+        environment.update({
+            "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+            "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",
+        })
+        try:
+            completed = subprocess.run(
+                [str(executable), "--separate-audio", str(request)],
+                cwd=executable.parent, env=environment, check=False, timeout=BANDIT_SMOKE_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(
+                f"Packaged BandIt native CPU smoke exceeded {BANDIT_SMOKE_TIMEOUT}s: {executable}"
+            ) from error
+        status_path = job / "status.json"
+        status = json.loads(status_path.read_text()) if status_path.is_file() else {}
+        if completed.returncode != 0 or status.get("state") != "succeeded":
+            raise RuntimeError(f"Packaged BandIt worker failed: {status}")
+        report = json.loads((job / "smoke.json").read_text())
+        if report != BANDIT_SMOKE_REPORT:
+            raise RuntimeError(f"Unexpected packaged BandIt CPU runtime: {report}")
+        application = executable.parent
+        resources = application / "_internal" / "choicer_voicer_pack_creator" / "resources"
+        manifest = json.loads((resources / "backing-separation-bandit.json").read_text())
+        if (
+            manifest.get("mode") != "keep_singing" or manifest.get("sample_rate") != 48000
+            or manifest.get("source_revision") != "d5563d9031e95fdaa3e5a73d5020b9a0df61adb6"
+            or manifest.get("weights_license") != "CC-BY-NC-4.0"
+            or manifest.get("model", {}).get("sha256") !=
+            "ebcd8a3c8c783aa8f3379c0cab925b76987f4f8959dfb595a84426817e1ffb60"
+            or manifest["model"].get("bytes") != 446680129
+            or manifest["model"].get("md5") != "d04760e77bb947668d8f5582d36b45a0"
+        ):
+            raise RuntimeError("Packaged BandIt model provenance is incorrect")
+        for filename in (
+            "backing-separation-bandit.json", "BandIt-Apache-2.0.txt",
+            "BandIt-CC-BY-NC-4.0.txt", "BandIt-Attribution.txt",
+        ):
+            resource, notice = resources / filename, application / "licenses" / filename
+            if not resource.is_file() or not notice.is_file() or resource.read_bytes() != notice.read_bytes():
+                raise RuntimeError(f"Missing or mismatched BandIt notice: {filename}")
+        for filename in ("LICENSE", "provenance.json"):
+            vendor = resources.parent / "_bandit" / filename
+            notice = application / "licenses" / "bandit" / filename
+            if not vendor.is_file() or not notice.is_file() or vendor.read_bytes() != notice.read_bytes():
+                raise RuntimeError(f"Missing or mismatched BandIt source provenance: {filename}")
+        named_provenance = application / "licenses" / "BandIt-provenance.json"
+        if not named_provenance.is_file() or named_provenance.read_bytes() != (
+            resources.parent / "_bandit" / "provenance.json"
+        ).read_bytes():
+            raise RuntimeError("Missing or mismatched BandIt source provenance: BandIt-provenance.json")
+        if any(application.rglob("*.ckpt")):
+            raise RuntimeError("Model checkpoints must not be bundled in the portable application")
+        for path in (application / "_internal").rglob("*"):
+            if path.suffix.casefold() in {".dll", ".pyd"} and any(
+                name in path.name.casefold() for name in (
+                    "cuda", "cudnn", "cublas", "cufft", "curand", "cusolver", "cusparse",
+                    "nvrtc", "nvjitlink", "nvidia", "nvml", "tensorrt",
+                )
+            ):
+                raise RuntimeError(f"GPU binary found in CPU package: {path}")
+        _check_openmp_libraries(application)
+        _check_singing_licenses(application)
+        print("PACKAGED QT-FREE BANDIT CPU ARCHITECTURE + STEREO STREAMING SMOKE PASSED")
     finally:
         shutil.rmtree(job)
 
@@ -213,7 +398,9 @@ def smoke_speaker_matching(executable: Path) -> None:
 
 
 def smoke_update(executable: Path) -> None:
-    with tempfile.TemporaryDirectory(prefix="cvpc-update-smoke-") as temporary:
+    scratch_root = ROOT / "build"
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="cvpc-update-smoke-", dir=scratch_root) as temporary:
         root = Path(temporary)
         target = root / "Installed app"
         directory = root / ".cvpc-update-smoke"
@@ -235,7 +422,7 @@ def smoke_update(executable: Path) -> None:
             }),
             encoding="utf-8",
         )
-        environment = os.environ.copy()
+        environment = mcp_environment(dict(os.environ), executable)
         environment["CHOICER_VOICER_SMOKE_REPORT"] = str(report)
         environment["QT_QPA_PLATFORM"] = "offscreen"
         # This parent holds the old EXE open without FILE_SHARE_DELETE, like the editor.
@@ -313,14 +500,8 @@ def main() -> int:
     scratch_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="cvpc-smoke-", dir=scratch_root) as temporary:
         report_path = Path(temporary) / "report.json"
-        environment = os.environ.copy()
+        environment = mcp_environment(dict(os.environ), executable)
         environment["CHOICER_VOICER_SMOKE_REPORT"] = str(report_path)
-        # Prove the packaged app does not accidentally fall back to a developer's PATH copy.
-        environment["PATH"] = os.pathsep.join(
-            value
-            for value in environment.get("PATH", "").split(os.pathsep)
-            if "ffmpeg" not in value.casefold()
-        )
         completed = subprocess.run(
             [str(executable), "--smoke-test"],
             env=environment,
@@ -385,6 +566,8 @@ def main() -> int:
     print("PACKAGED APPLICATION + BUNDLED FFMPEG + MCP STDIO SMOKE PASSED")
     smoke_separation(executable)
     smoke_separation(mcp_executable)
+    smoke_bandit(executable)
+    smoke_bandit(mcp_executable)
     smoke_speaker_matching(executable)
     smoke_speaker_matching(mcp_executable)
     if "--update-smoke" in sys.argv:

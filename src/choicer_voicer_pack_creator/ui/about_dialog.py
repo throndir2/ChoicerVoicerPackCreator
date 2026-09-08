@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -25,13 +26,26 @@ class AboutDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("About Choicer Voicer Pack Creator")
-        self.resize(600, 400)
+        self.resize(650, 540)
 
         layout = QVBoxLayout(self)
         description = QLabel(
             f"<h3>Choicer Voicer Pack Creator {__version__}</h3>"
             "<p>An unofficial community desktop editor for creating, importing, and validating "
             "Choicer Voicer dub packs.</p>"
+            "<p><b>Keep singing; remove dialogue</b> uses the "
+            '<a href="https://zenodo.org/records/13327983">Facing the Music BandIt combined model</a> '
+            "by <b>Karn N. Watcharasupat, Chih-Wei Wu, and Iroro Orife</b>. "
+            'The <a href="https://github.com/kwatcharasupat/bandit-v2">'
+            "BandIt source</a> is <b>Apache-2.0</b>; the optional model weights are "
+            '<a href="https://creativecommons.org/licenses/by-nc/4.0/">'
+            "<b>CC BY-NC 4.0 (non-commercial use)</b></a>, not MIT or unrestricted. "
+            "The creators do not endorse this application.</p>"
+            "<p>BandIt keeps music (including singing) and effects, and removes speech. "
+            "Results may contain separation errors. Its approximately 426 MiB model is downloaded "
+            "only with permission and reused offline; audio processing stays on this computer. "
+            "Full model terms, source attribution, and runtime notices are retained in "
+            "<code>THIRD_PARTY_NOTICES.md</code> and the bundled license files.</p>"
             "<p>The desktop interface uses PySide6/Qt. Windows bundles include an unmodified "
             "FFmpeg LGPL shared build for media conversion; its license, provenance, and source "
             "links are in <code>THIRD_PARTY_NOTICES.md</code>.</p>"
@@ -44,7 +58,13 @@ class AboutDialog(QDialog):
             "<p>Project files store paths and edit decisions only. Source media remains yours.</p>"
         )
         description.setWordWrap(True)
-        layout.addWidget(description)
+        description.setAlignment(Qt.AlignmentFlag.AlignTop)
+        description.setOpenExternalLinks(True)
+        description.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(description)
+        layout.addWidget(scroll)
 
         controls = QHBoxLayout()
         self.support_button = QPushButton(self)

@@ -981,6 +981,8 @@ def test_backing_consent_keeps_other_project_request_when_one_closes(
         )
         editors.append(editor)
         editor.generate_backing_track(background=background)
+        if not background:
+            editor._backing_dialog.generate_button.click()
     qtbot.waitUntil(lambda: all(editor._backing_dialog._pending_consent for editor in editors))
     assert all(editor._backing_dialog.isVisible() is not background for editor in editors)
     box = workspace.setup_consent.box
@@ -1032,6 +1034,7 @@ def test_tasks_retry_uses_origin_and_rejects_superseded_source(
             dialog.start_scan()
     elif kind == "backing":
         editor.generate_backing_track()
+        editor._backing_dialog.generate_button.click()
     elif kind == "youtube":
         editor._start_youtube_import()
         editor._youtube_dialog.url_edit.setText("https://www.youtube.com/watch?v=abcdefghijk")
@@ -1708,6 +1711,12 @@ def test_backing_completion_keeps_newer_choice_and_never_targets_active_tab(
         def __init__(self, _media, _video, _root, parent, **_kwargs):
             super().__init__(parent)
             self.backing_path = tmp_path / "generated.wav"
+            self.mode = _kwargs["mode"]
+            self.before_start = _kwargs["before_start"]
+
+        def show(self):
+            super().show()
+            assert self.before_start(self.mode)
 
     monkeypatch.setattr(main_window, "BackingDialog", BackingReview)
     source = tmp_path / "source.mp4"

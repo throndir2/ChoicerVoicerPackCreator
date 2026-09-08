@@ -9,6 +9,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,12 @@ from choicer_voicer_pack_creator.operations import (
     critical_stage,
     operation_scope,
     path_leases,
+)
+from choicer_voicer_pack_creator.separation_types import (
+    KEEP_SINGING,
+    REMOVE_ALL_VOCALS,
+    BackingMode,
+    validate_backing_mode,
 )
 
 ProgressCallback = Callable[[str, float | None], None]
@@ -86,29 +93,39 @@ def write_json_atomic(path: Path, value: dict[str, Any]) -> None:
 
 def verify_model_file(
     path: Path, expected_bytes: int, expected_hash: str, cancelled: CancelCallback,
+    *, expected_md5: str | None = None,
 ) -> bool:
     check_cancel(cancelled)
     if not path.is_file() or path.stat().st_size != expected_bytes:
         return False
     digest = hashlib.sha256()
+    md5 = hashlib.md5(usedforsecurity=False) if expected_md5 is not None else None
     with path.open("rb") as stream:
         while block := stream.read(1024 * 1024):
             check_cancel(cancelled)
             digest.update(block)
+            if md5 is not None:
+                md5.update(block)
     check_cancel(cancelled)
-    return digest.hexdigest() == expected_hash
+    return digest.hexdigest() == expected_hash and (
+        md5 is None or md5.hexdigest() == expected_md5
+    )
 
 
-def validate_audio(path: Path, frames: int, cancelled: CancelCallback) -> None:
+def validate_audio(
+    path: Path, frames: int, cancelled: CancelCallback, *, sample_rate: int = SAMPLE_RATE,
+) -> None:
     import numpy as np
     import soundfile as sf
 
     check_cancel(cancelled)
+    if type(sample_rate) is not int or sample_rate not in (SAMPLE_RATE, 48000):
+        raise SeparationError("Unsupported backing-track sample rate")
     try:
         with sf.SoundFile(path) as source:
             if (
                 source.frames != frames or frames <= 0 or source.channels != 2
-                or source.samplerate != SAMPLE_RATE or source.format not in {"WAV", "RF64"}
+                or source.samplerate != sample_rate or source.format not in {"WAV", "RF64"}
             ):
                 raise SeparationError("Generated backing track has an incorrect format or duration")
             count = 0
@@ -124,10 +141,17 @@ def validate_audio(path: Path, frames: int, cancelled: CancelCallback) -> None:
 
 
 class SeparationManager:
-    def __init__(self, data_root: Path) -> None:
+    def __init__(self, data_root: Path, *, mode: BackingMode = REMOVE_ALL_VOCALS) -> None:
+        self._mode = validate_backing_mode(mode)
         self.data_root = data_root.resolve()
         self.manifest_path = default_manifest_path()
         try:
+            if self.mode == KEEP_SINGING:
+                from choicer_voicer_pack_creator._bandit import load_manifest, manifest_path
+
+                self.manifest_path = manifest_path()
+                self.manifest = load_manifest()
+                return
             self.manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
             model = self.manifest["model"]
             if (
@@ -141,6 +165,14 @@ class SeparationManager:
                 raise ValueError("unsupported model configuration")
         except (OSError, ValueError, KeyError, TypeError) as error:
             raise SeparationError(f"Backing-separation model manifest is invalid: {error}") from error
+
+    @property
+    def mode(self) -> BackingMode:
+        return self._mode
+
+    @property
+    def sample_rate(self) -> int:
+        return 48000 if self.mode == KEEP_SINGING else SAMPLE_RATE
 
     @property
     def model_download_bytes(self) -> int:
@@ -158,6 +190,7 @@ class SeparationManager:
         progress("Verifying the cached local separation model…", None)
         return verify_model_file(
             self.model_path, self.model_download_bytes, self.manifest["model"]["sha256"], cancelled,
+            **({"expected_md5": self.manifest["model"]["md5"]} if self.mode == KEEP_SINGING else {}),
         )
 
     def _ensure_model(
@@ -182,11 +215,19 @@ class SeparationManager:
                 )
             check_cancel(cancelled)
             model = self.manifest["model"]
+            if self.mode == KEEP_SINGING:
+                self._check_disk(job, self.model_download_bytes + 64 * 1024**2)
             # Download to this job, not a shared .partial file or an invalid existing cache.
             downloaded = download_verified(
-                model["url"], job / "htdemucs.onnx", model["sha256"], self.model_download_bytes,
-                "HTDemucs backing-separation model", progress, cancelled,
+                model["url"], job / model["filename"], model["sha256"], self.model_download_bytes,
+                ("BandIt combined (CC BY-NC 4.0; non-commercial)" if self.mode == KEEP_SINGING
+                 else "HTDemucs backing-separation model"), progress, cancelled,
             )
+            if self.mode == KEEP_SINGING and not verify_model_file(
+                downloaded, self.model_download_bytes, model["sha256"], cancelled,
+                expected_md5=model["md5"],
+            ):
+                raise SeparationError("BandIt checkpoint failed its published MD5 / pinned SHA-256")
             check_cancel(cancelled)
             self.model_path.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -197,9 +238,21 @@ class SeparationManager:
                 if not self._verified_model(progress, cancelled):
                     raise
                 downloaded.unlink(missing_ok=True)
-        for filename in ("Demucs-MIT.txt", "StemSplit-MIT.txt", self.manifest_path.name):
+        notices = (
+            (*self.manifest["notice_files"], self.manifest_path.name)
+            if self.mode == KEEP_SINGING
+            else ("Demucs-MIT.txt", "StemSplit-MIT.txt", self.manifest_path.name)
+        )
+        notice_sources = {
+            filename: self.manifest_path.parent / filename for filename in notices
+        }
+        if self.mode == KEEP_SINGING:
+            notice_sources[self.manifest["source_provenance_file"]] = (
+                self.manifest_path.parent.parent / "_bandit" / "provenance.json"
+            )
+        for filename, source in notice_sources.items():
             check_cancel(cancelled)
-            payload = (self.manifest_path.parent / filename).read_bytes()
+            payload = source.read_bytes()
             destination = self.model_path.parent / filename
             if destination.is_file() and destination.read_bytes() == payload:
                 continue
@@ -221,6 +274,8 @@ class SeparationManager:
         self, media: MediaTools, video: Path, destination: Path,
         progress: ProgressCallback, cancelled: CancelCallback,
     ) -> int:
+        if self.mode == KEEP_SINGING:
+            return self._decode_bandit(media, video, destination, progress, cancelled)
         progress("Inspecting the source video timeline…", None)
         completed = _run_cancellable(
             [media.ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json",
@@ -263,6 +318,79 @@ class SeparationManager:
             raise SeparationError(f"Could not read decoded source audio: {error}") from error
         return frames
 
+    @staticmethod
+    def _check_disk(directory: Path, required: int) -> None:
+        available = shutil.disk_usage(directory).free
+        if available < required:
+            raise SeparationError(
+                f"Backing generation needs approximately {required / 1024**3:.2f} GiB of free "
+                f"staging space; only {available / 1024**3:.2f} GiB is available. "
+                "Free disk space and retry; the source and existing backing are unchanged."
+            )
+
+    def _decode_bandit(
+        self, media: MediaTools, video: Path, destination: Path,
+        progress: ProgressCallback, cancelled: CancelCallback,
+    ) -> int:
+        from choicer_voicer_pack_creator.export_resources import current_ffmpeg_threads
+
+        progress("Inspecting the source video timeline and native audio rate…", None)
+        completed = _run_cancellable(
+            [media.ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(video)],
+            "Inspecting backing-track source", cancelled,
+        )
+        try:
+            value = json.loads(completed.stdout)
+            video_stream = next(s for s in value["streams"] if s.get("codec_type") == "video")
+            audio_stream = next(s for s in value["streams"] if s.get("codec_type") == "audio")
+            duration = float(value.get("format", {}).get("duration")
+                             or video_stream.get("duration") or 0)
+            native_rate = int(audio_stream["sample_rate"])
+            if not math.isfinite(duration) or duration <= 0 or not 1 <= native_rate <= 768000:
+                raise ValueError("invalid video duration or native audio sample rate")
+            frames = round(duration * self.sample_rate)
+            native_frames = round(duration * native_rate)
+            if min(frames, native_frames) <= 0:
+                raise ValueError("the video is shorter than one audio frame")
+        except (KeyError, TypeError, ValueError, StopIteration) as error:
+            raise SeparationError(f"Could not determine the source video timeline: {error}") from error
+        native = (
+            destination if native_rate == self.sample_rate
+            else destination.with_name("decoded-native.wav")
+        )
+        self._check_disk(
+            destination.parent,
+            frames * (8 + 8 + 6) + (native_frames * 8 if native != destination else 0)
+            + 64 * 1024**2,
+        )
+        threads = str(current_ffmpeg_threads() or 1)
+        progress("Decoding native-rate stereo audio aligned to the video timeline…", None)
+        try:
+            _run_cancellable(
+                [media.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                 "-threads", threads, "-filter_threads", threads,
+                 "-copyts", "-start_at_zero", "-i", str(video), "-map", "0:a:0", "-vn",
+                 "-af", f"aresample={native_rate}:async=1:first_pts=0,"
+                        f"apad=whole_len={native_frames},atrim=end_sample={native_frames}",
+                 "-ar", str(native_rate), "-ac", "2", "-c:a", "pcm_f32le",
+                 "-threads", threads, "-rf64", "auto", str(native)],
+                "Decoding backing-track source", cancelled,
+            )
+            import soundfile as sf
+
+            with sf.SoundFile(native) as source:
+                if (source.frames, source.samplerate, source.channels) != (native_frames, native_rate, 2):
+                    raise SeparationError("Source audio decoding did not preserve the video timeline")
+            if native != destination:
+                from choicer_voicer_pack_creator.bandit_runtime import resample_stream
+
+                progress("Resampling aligned audio to 48 kHz with bounded polyphase filtering…", None)
+                resample_stream(native, destination, frames, cancelled)
+        finally:
+            if native != destination:
+                native.unlink(missing_ok=True)
+        return frames
+
     def generate(
         self, media: MediaTools, video: Path, *, allow_download: bool = False,
         progress: ProgressCallback, cancelled: CancelCallback,
@@ -287,9 +415,25 @@ class SeparationManager:
         check_cancel(cancelled)
         job_id = uuid.uuid4().hex
         job = self.data_root / "separation-jobs" / job_id
+        runtime = ExitStack()
         try:
             job.mkdir(parents=True)
             model = self._ensure_model(job, allow_download, progress, cancelled)
+            threads = None
+            if self.mode == KEEP_SINGING:
+                from choicer_voicer_pack_creator.bandit_runtime import WORK_ESTIMATE
+                from choicer_voicer_pack_creator.export_resources import (
+                    ResourceError,
+                    export_resources,
+                )
+
+                try:
+                    admission = runtime.enter_context(export_resources.acquire(
+                        WORK_ESTIMATE, work_label="singing-preserving backing",
+                    ))
+                except ResourceError as error:
+                    raise SeparationError(str(error)) from error
+                threads = admission.ffmpeg_threads
             decoded = job / "decoded.wav"
             frames = self._decode(media, video.resolve(), decoded, progress, cancelled)
             output = job / "backing.wav"
@@ -297,7 +441,8 @@ class SeparationManager:
             request_path = job / "request.json"
             write_json_atomic(request_path, {
                 "version": 1, "job_id": job_id, "model": str(model),
-                "frames": frames,
+                "frames": frames, "mode": self.mode,
+                **({"threads": threads} if threads is not None else {}),
             })
             last_status: dict[str, Any] | None = None
 
@@ -339,7 +484,7 @@ class SeparationManager:
             if not last_status or last_status.get("state") != "succeeded":
                 raise SeparationError("The separation worker exited without a successful result")
             progress("Verifying the full-length backing track…", None)
-            validate_audio(output, frames, cancelled)
+            validate_audio(output, frames, cancelled, sample_rate=self.sample_rate)
             check_cancel(cancelled)
             destination = self.data_root / "backing-tracks" / f"backing-{job_id}.wav"
             with critical_stage("Publishing the verified backing track..."):
@@ -355,8 +500,11 @@ class SeparationManager:
         except (OSError, ValueError) as error:
             raise SeparationError(f"Backing-track generation failed: {error}") from error
         finally:
-            if job.exists():
-                try:
-                    shutil.rmtree(job)
-                except OSError as error:
-                    diagnostic_exception("backing_separation_cleanup_failed", error, directory=job)
+            try:
+                if job.exists():
+                    try:
+                        shutil.rmtree(job)
+                    except OSError as error:
+                        diagnostic_exception("backing_separation_cleanup_failed", error, directory=job)
+            finally:
+                runtime.close()

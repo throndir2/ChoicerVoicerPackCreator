@@ -64,6 +64,7 @@ ALLOWED_DOWNLOAD_HOSTS = {
     "cdn-lfs-us-1.hf.co",
     "cdn-lfs-eu-1.hf.co",
     "cas-bridge.xethub.hf.co",
+    "zenodo.org",
 }
 ALLOWED_DOWNLOAD_HOST_SUFFIXES = (".cdn.hf.co", ".xethub.hf.co")
 

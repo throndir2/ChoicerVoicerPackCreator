@@ -16,6 +16,48 @@ from choicer_voicer_pack_creator.models import (
     SourceCaption,
 )
 from choicer_voicer_pack_creator.project_io import ProjectStore, RecoveryStore
+from choicer_voicer_pack_creator.project_session import ProjectSession
+from choicer_voicer_pack_creator.scene_editing import SceneEditPlan, _remap_project
+from choicer_voicer_pack_creator.separation_types import KEEP_SINGING
+
+
+def test_backing_mode_survives_project_save_recovery_and_session_snapshot(tmp_path):
+    project = PackProject(backing_generation_mode=KEEP_SINGING)
+    path = tmp_path / "mode.cvpack.json"
+    ProjectStore.save(project, path)
+    assert ProjectStore.load(path).backing_generation_mode == KEEP_SINGING
+    recovery = RecoveryStore(tmp_path / "recovery.json")
+    recovery.save(project, path)
+    assert recovery.load().project.backing_generation_mode == KEEP_SINGING
+    snapshot = ProjectSession(project).snapshot()
+    snapshot.title = "Metadata edit"
+    assert snapshot.backing_generation_mode == KEEP_SINGING
+    assert snapshot.backing_track_path == ""
+
+
+def test_backing_preference_survives_mcp_metadata_and_scene_edits(tmp_path):
+    from choicer_voicer_pack_creator.automation import (
+        HeadlessProjectAccess,
+        PackAutomation,
+        ProjectPatch,
+        ProjectSnapshot,
+    )
+
+    project = PackProject(
+        video_duration=10, backing_generation_mode=KEEP_SINGING,
+        segments=[Segment(1, 2, "Dialogue", ["Speaker"])],
+    )
+    access = HeadlessProjectAccess(ProjectSnapshot(project))
+    automation = PackAutomation(access, tmp_path)
+    before = automation.get_project()
+    updated = automation.update_project(ProjectPatch(title="MCP edit"), before["revision"])
+    assert updated["project"]["backing_generation_mode"] == KEEP_SINGING
+    assert updated["revision"] != before["revision"]
+    edited, _warnings = _remap_project(
+        access.snapshot().project, SceneEditPlan(5, 7, "cut", 8, ((0, 5), (7, 10))),
+    )
+    assert edited.backing_generation_mode == KEEP_SINGING
+    assert edited.segments[0].caption == "Dialogue"
 
 
 def test_project_store_uses_relative_paths_when_possible(tmp_path: Path) -> None:

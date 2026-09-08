@@ -154,17 +154,59 @@ and downloaded model cache both retain these files.
 Separation is probabilistic and can leave voice remnants or remove desired music/effects.
 It is not an authoritative recovery of an original instrumental mix.
 
+### Keep singing; remove dialogue (BandIt)
+
+The optional **Keep singing; remove dialogue** choice uses the **Facing the Music
+BandIt combined model** by **Karn N. Watcharasupat, Chih-Wei Wu, and Iroro Orife**.
+The model's music target includes singing; the application retains music plus sound
+effects and removes the speech target. The existing HTDemucs remove-all-vocals choice
+remains available and is the default for automatic generation.
+
+**The BandIt model weights are licensed under Creative Commons
+Attribution-NonCommercial 4.0 International (CC BY-NC 4.0). They are not MIT-licensed
+or unrestricted.** Use of the optional mode remains subject to those license terms.
+The application license does not replace third-party licenses. The creators do not
+endorse this application.
+
+- Publication: [Facing the Music: Tackling Singing Voice Separation in Cinematic Audio Source Separation](https://arxiv.org/html/2408.03588v2)
+- Publisher's model record: <https://zenodo.org/records/13327983>
+- DOI: <https://doi.org/10.5281/zenodo.13327983>
+- Asset: `bandit-combined.ckpt`, 446,680,129 bytes (approximately 426 MiB)
+- SHA-256: `ebcd8a3c8c783aa8f3379c0cab925b76987f4f8959dfb595a84426817e1ffb60`
+- Publisher's MD5: `d04760e77bb947668d8f5582d36b45a0`
+- License: <https://creativecommons.org/licenses/by-nc/4.0/>
+
+Weights are not included in the repository or portable ZIP. Downloading or repairing
+them requires permission; verified cached weights work offline. Size, SHA-256, and
+publisher MD5 are checked before loading. No audio is uploaded by separation.
+The exact license and attribution are in `resources/BandIt-CC-BY-NC-4.0.txt` and
+`resources/BandIt-Attribution.txt`, retained in portable `licenses/` and alongside
+downloaded weights with the model manifest.
+
+The inference architecture is a minimally adapted subset of
+[BandIt-v2](https://github.com/kwatcharasupat/bandit-v2/tree/d5563d9031e95fdaa3e5a73d5020b9a0df61adb6)
+under **Apache-2.0**, not the weights license. Its original files, hashes, upstream
+license, and adaptation history are retained in
+`src/choicer_voicer_pack_creator/_bandit/provenance.json` and the adjacent `LICENSE`.
+The source license is also retained in `resources/BandIt-Apache-2.0.txt`.
+The application uses the unmodified combined checkpoint; CPU execution, stereo channel
+handling, and disk-backed full-video streaming do not relicense the checkpoint.
+
+The Windows portable runtime includes CPU-only **PyTorch 2.8.0** and
+**TorchAudio 2.8.0** (BSD-style licenses and their third-party notices), plus
+**librosa 0.10.2.post1** (ISC), **SciPy 1.15.3** (BSD-style and bundled notices), and
+their runtime dependencies. It shares the app's NumPy and SoundFile versions.
+Exact installed dependency metadata and all supplied license/notice files are retained
+under `licenses/python/`; numerical/native dependencies retain their own terms.
+Build-only static link archives are not required for inference and are omitted from
+the portable package. No Python, pip, or CUDA installation is required by portable users.
+
 ## Optional developer separation comparison
 
 The source-only [comparison workflow](docs/SEPARATION_COMPARISON.md) is not part of the
-portable application or its dependency set. It contains a minimally adapted inference
-subset of [BandIt-v2](https://github.com/kwatcharasupat/bandit-v2/tree/d5563d9031e95fdaa3e5a73d5020b9a0df61adb6)
-under Apache-2.0, with upstream license, attribution, source hashes, and adaptation
-provenance retained in `scripts/_bandit`.
-
-The optional singing-aware **Facing the Music** BandIt checkpoint is separately licensed
-**CC BY-NC 4.0**; see its [official publication](https://zenodo.org/records/13327983).
-It is not bundled or covered by the application's MIT license.
+portable application. Its BandIt backend reuses the installed inference subset and
+the separately licensed checkpoint described above; comparison-specific GPU tooling
+is not required by the application.
 The optional, externally installed SAM Audio code and weights use the
 [SAM License](https://github.com/facebookresearch/sam-audio/blob/bb4c6999d2677c7402360e426afc01ddfad6dce0/LICENSE),
 and its standard dependency profile includes ImageBind under CC BY-NC-SA 4.0.

@@ -248,11 +248,42 @@ On a Windows x86-64 computer, double-click `Build-Portable.cmd`. From PowerShell
 
 The build computer needs **64-bit Python 3.12** and an internet connection for the first build. The
 script creates an isolated environment under the current user's local application data, installs
-the pinned Python packaging dependencies, securely
+SHA-256-pinned official **CPU-only** PyTorch/TorchAudio wheels before the `singing` extra
+and pinned Python packaging dependencies, securely
 downloads and verifies the pinned LGPL FFmpeg runtime, builds the application, and smoke-tests the
 finished editor and console MCP executables, including an official-SDK stdio handshake.
-It does not require a system FFmpeg installation. Use
-`-ResetBuildEnvironment` if the isolated environment ever needs to be recreated.
+It does not require a system FFmpeg installation. Both entrypoints include the singing backend;
+recipients do not install Python, pip, CUDA, or a separate runtime executable.
+
+For concurrent development, give each task its own build environment instead of modifying the
+shared default:
+
+```powershell
+.\Build-Portable.ps1 -BuildEnvironment .\build\environments\singing-cpu
+```
+
+Use `-ResetBuildEnvironment` only with an environment created and marked by this script.
+Reset refuses unmarked directories, repository roots/ancestors, and links/junctions. For a legacy
+unmarked environment, choose a new path instead of deleting it through the build script.
+The build uses isolated pip configuration, hash-verified direct CPU wheel URLs, then public
+PyPI for the other dependencies; it checks exact CPU versions and rejects GPU binaries.
+
+The offline smoke exercises tiny synthetic BandIt CPU inference from **both** EXEs, as well as
+the existing ONNX, caption timing, speaker, MCP, FFmpeg, and updater checks. It runs on the
+candidate and a clean ZIP extraction before publication. It never downloads a checkpoint.
+Tiny synthetic smoke is a packaging check, not a substitute for real-checkpoint CPU/parity tests.
+Dependency metadata and recursive Python/native license notices are included in `licenses/`.
+Each backend retains its own wheel's OpenMP DLL; `licenses/singing-runtime.json` records their
+SHA-256 hashes, checked against the installed pinned wheels. No global OpenMP replacement or
+duplicate-runtime suppression is applied.
+
+Allow roughly **3.5–5 GiB extra build-environment storage** for the singing dependencies, plus
+candidate/ZIP/extraction and updater staging space. The torch wheel contains over 2 GiB of static
+development libraries that are not shipped. Estimated added portable size is **150–300 MiB ZIP**
+and **0.6–1.0 GiB extracted**, excluding model weights; these are allowances, not measured final
+sizes. The build prints the actual assembled and compressed sizes. The optional combined BandIt
+checkpoint is approximately **426 MiB**, downloaded only with consent, and carries **CC BY-NC 4.0**
+non-commercial restrictions; the inference source is Apache-2.0. See About and the bundled notices.
 
 The finished outputs are:
 
@@ -337,6 +368,39 @@ py -3.12 -m venv .venv
 ```
 
 If `py` is unavailable, invoke your installed Python executable directly.
+
+### Optional singing-preserving CPU backend
+
+The core source application still requires Python **3.11 or newer**. The additional
+**Keep singing; remove dialogue** backend is supported for **Windows x64 CPython 3.11/3.12**
+only; portable builds use 3.12. A base source install remains usable without this extra.
+To enable it in your own virtual environment, install the exact official CPU wheels **first**,
+then install the extra from public PyPI:
+
+```powershell
+# In the repository root, after creating .venv with 64-bit Python 3.11 or 3.12:
+$previousPipConfig = $env:PIP_CONFIG_FILE
+try {
+    $env:PIP_CONFIG_FILE = "nul" # Exact os.devnull spelling; pip compares this case-sensitively.
+    .\.venv\Scripts\python.exe -m pip --isolated install --no-index --no-deps --require-hashes -r .\tools\singing-cpu-wheels.txt
+    if ($LASTEXITCODE -ne 0) { throw "CPU wheel installation failed" }
+    .\.venv\Scripts\python.exe -m pip --isolated install --index-url https://pypi.org/simple -e ".[singing]"
+    if ($LASTEXITCODE -ne 0) { throw "Singing dependencies installation failed" }
+    .\.venv\Scripts\python.exe -m pip --isolated check
+    if ($LASTEXITCODE -ne 0) { throw "Dependency consistency check failed" }
+} finally {
+    $env:PIP_CONFIG_FILE = $previousPipConfig
+}
+```
+
+Developers can use `".[dev,singing]"` in the second install command. The canonical requirements
+select the CPython/ABI-matching CPU wheels and verify their SHA-256 hashes. The extra requires
+`torch==2.8.0+cpu` and `torchaudio==2.8.0+cpu`; plain PyPI torch (which can bring CUDA dependencies)
+is not a substitute. Do not replace this setup with a floating extra index or `pip install torch`.
+NumPy remains 2.4.6, SoundFile 0.13.1, and ONNX Runtime 1.26.0; the new backend pins librosa
+0.10.2.post1, SciPy 1.15.3, Numba 0.67.0, and llvmlite 0.49.0.
+The application never invokes pip or installs a Python runtime for you. The model's separate
+non-commercial license and consent still apply after installing these dependencies.
 
 ## Use an LLM / MCP assistant
 

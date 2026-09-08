@@ -142,6 +142,9 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
     monkeypatch.setattr(BUILD_SCRIPT, "ROOT", root)
     monkeypatch.setattr(BUILD_SCRIPT, "BUILD", root / "build")
     monkeypatch.setattr(BUILD_SCRIPT, "_mcp_distribution_names", lambda: ["mcp", "cryptography"])
+    monkeypatch.setattr(
+        BUILD_SCRIPT, "_singing_distribution_names", lambda: [*BUILD_SCRIPT.SINGING_PACKAGES, "soxr"],
+    )
     deno = root / "Deno's runtime" / "deno.exe"
     monkeypatch.setattr(BUILD_SCRIPT.deno, "find_deno_bin", lambda: deno)
     analyses = []
@@ -156,12 +159,18 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
         hook_calls.append(("data", name))
         return [(f"{name}-data", name)]
 
-    def collect_all(name):
+    def collect_all(name, **kwargs):
         hook_calls.append(("all", name))
+        if name in BUILD_SCRIPT.SINGING_PACKAGES:
+            assert kwargs == {"exclude_datas": ["**/*.lib", "**/*.h", "**/*.hpp", "**/*.cuh"]}
         return (
             [(f"{name}-data", name)],
             [(f"{name}-binary", name)] + (
                 [("cudnn64_9.dll", name)] if name == "ctranslate2" else []
+            ) + (
+                [(str(root / "installed" / BUILD_SCRIPT.OPENMP_LIBRARIES[name][1]),
+                  str(BUILD_SCRIPT.OPENMP_LIBRARIES[name][1].parent))]
+                if name in BUILD_SCRIPT.OPENMP_LIBRARIES else []
             ),
             [f"{name}.dynamic_module"],
         )
@@ -190,11 +199,14 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
                 *[(Path(path).stem, path, "PYSOURCE") for path in paths],
             ],
             pure=object(),
-            binaries=kwargs["binaries"],
+            binaries=[
+                *kwargs["binaries"], ("libiomp5md.dll", "automatic-root-copy.dll", "BINARY"),
+            ],
             datas=kwargs["datas"],
             hiddenimports=kwargs["hiddenimports"],
             runtime_hooks=kwargs["runtime_hooks"],
             pathex=kwargs["pathex"],
+            excludes=kwargs["excludes"],
         )
         analyses.append(result)
         return result
@@ -263,7 +275,19 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
         for source, destination in analyses[0].binaries
     )
     assert analyses[0].pathex == [str(root / "src")]
-    for name in ("onnxruntime", "_soundfile_data", "kaldi_native_fbank", "ctranslate2", "tokenizers"):
+    assert "torch" not in analyses[0].excludes
+    assert "choicer_voicer_pack_creator.bandit_runtime" in analyses[0].hiddenimports
+    assert ("data", "choicer_voicer_pack_creator._bandit") in hook_calls
+    assert ("metadata", "soxr") in hook_calls
+    for _version, relative in BUILD_SCRIPT.OPENMP_LIBRARIES.values():
+        assert (str(root / "installed" / relative), str(relative.parent)) in analyses[0].binaries
+    assert [
+        item for item in analyses[0].binaries if item[0] == "libiomp5md.dll"
+    ] == [("libiomp5md.dll", "automatic-root-copy.dll", "BINARY")]
+    for name in (
+        "onnxruntime", "_soundfile_data", "kaldi_native_fbank", "ctranslate2", "tokenizers",
+        *BUILD_SCRIPT.SINGING_PACKAGES,
+    ):
         assert ("all", name) in hook_calls
         assert (f"{name}-data", name) in analyses[0].datas
         assert (f"{name}-binary", name) in analyses[0].binaries
@@ -342,6 +366,158 @@ def test_missing_mcp_license_fails_build(
     )
     with pytest.raises(RuntimeError, match="license file"):
         BUILD_SCRIPT._copy_mcp_licenses(tmp_path)
+
+
+def test_all_installed_singing_dependency_notices_and_metadata_are_copied(tmp_path):
+    application = tmp_path / "app"
+    application.mkdir()
+    BUILD_SCRIPT._copy_singing_licenses(application)
+    names = BUILD_SCRIPT._singing_distribution_names()
+    assert {
+        "torch", "torchaudio", "librosa", "scipy", "numba", "llvmlite",
+        "soxr", "scikit-learn", "sympy", "soundfile", "numpy",
+    } <= set(names)
+    assert not any(name.startswith(("nvidia", "cuda")) for name in names)
+    assert not {"lightning", "pytorch-lightning", "wandb"} & set(names)
+    for name in names:
+        destination = application / "licenses" / "python" / name
+        assert (destination / "METADATA.txt").is_file()
+        assert any(file.is_file() and file.name != "METADATA.txt"
+                   for file in destination.rglob("*"))
+    assert (application / "licenses" / "bandit" / "LICENSE").is_file()
+    assert (application / "licenses" / "bandit" / "provenance.json").is_file()
+    assert (application / "licenses" / "BandIt-provenance.json").read_bytes() == (
+        application / "licenses" / "bandit" / "provenance.json"
+    ).read_bytes()
+    manifest = json.loads((application / "licenses" / "singing-runtime.json").read_text())
+    assert manifest == {
+        "version": 1,
+        "dependencies": [
+            {"name": name, "version": BUILD_SCRIPT.metadata.version(name)} for name in names
+        ],
+        "openmp_libraries": BUILD_SCRIPT._openmp_inventory(),
+    }
+
+
+def test_missing_transitive_singing_license_fails_build(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        BUILD_SCRIPT.metadata, "distribution",
+        lambda _name: SimpleNamespace(
+            metadata={"Name": "transitive"}, version="1", files=[], requires=[],
+            read_text=lambda _file: "Name: transitive",
+        ),
+    )
+    with pytest.raises(RuntimeError, match="transitive.*license file"):
+        BUILD_SCRIPT._copy_python_licenses(
+            tmp_path, ["transitive"], "Singing", "Description", require_all=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "unexpected",
+    [
+        "torch/lib/torch_cuda.dll", "onnxruntime/capi/onnxruntime_providers_cuda.dll",
+        "ctranslate2/cudnn64_9.dll", "nvidia/cublas64_12.dll",
+        "torch/lib/dnnl.lib", "torch/include/torch.h",
+    ],
+)
+def test_cpu_inventory_rejects_gpu_and_development_files(tmp_path, unexpected):
+    path = tmp_path / "_internal" / unexpected
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"unwanted")
+    with pytest.raises(RuntimeError, match="GPU binary|development files"):
+        BUILD_SCRIPT._audit_cpu_inventory(tmp_path)
+
+
+def _copy_openmp_fixture(application: Path) -> None:
+    for name, (_version, relative) in BUILD_SCRIPT.OPENMP_LIBRARIES.items():
+        source = BUILD_SCRIPT.metadata.distribution(name).locate_file(relative)
+        target = application / "_internal" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(Path(source).read_bytes())
+
+
+@pytest.mark.parametrize("automatic_root_copy", [False, True])
+def test_cpu_inventory_preserves_original_wheel_libraries_and_automatic_root_copy(
+    tmp_path, automatic_root_copy,
+):
+    _copy_openmp_fixture(tmp_path)
+    for name in (
+        "torch/lib/torch_cpu.dll", "torch/_C.pyd",
+        "torch/backends/cuda/__init__.py", "torch/utils/checkpoint.py",
+        "scipy.libs/libscipy_openblas.dll", "torchaudio/lib/libtorchaudio.pyd",
+    ):
+        path = tmp_path / "_internal" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"runtime")
+    root_copy = tmp_path / "_internal" / "libiomp5md.dll"
+    if automatic_root_copy:
+        root_copy.write_bytes(b"unmodified automatically collected root copy")
+    BUILD_SCRIPT._audit_cpu_inventory(tmp_path)
+    assert root_copy.exists() == automatic_root_copy
+    if automatic_root_copy:
+        assert root_copy.read_bytes() == b"unmodified automatically collected root copy"
+
+
+@pytest.mark.parametrize("package", ["torch", "ctranslate2"])
+@pytest.mark.parametrize("failure", ["missing", "substituted"])
+def test_cpu_inventory_rejects_missing_or_substituted_package_local_openmp(
+    tmp_path, package, failure,
+):
+    _copy_openmp_fixture(tmp_path)
+    path = tmp_path / "_internal" / BUILD_SCRIPT.OPENMP_LIBRARIES[package][1]
+    if failure == "missing":
+        path.unlink()
+    else:
+        other = "ctranslate2" if package == "torch" else "torch"
+        path.write_bytes((
+            tmp_path / "_internal" / BUILD_SCRIPT.OPENMP_LIBRARIES[other][1]
+        ).read_bytes())
+    with pytest.raises(RuntimeError, match="Package-local OpenMP DLL differs"):
+        BUILD_SCRIPT._audit_cpu_inventory(tmp_path)
+
+
+def test_openmp_audit_requires_the_pinned_wheel_version(monkeypatch):
+    monkeypatch.setattr(
+        BUILD_SCRIPT.metadata, "distribution", lambda _name: SimpleNamespace(version="unapproved"),
+    )
+    with pytest.raises(RuntimeError, match="Expected pinned torch 2.8.0\\+cpu"):
+        BUILD_SCRIPT._openmp_inventory()
+
+
+def test_openmp_audit_rejects_modified_installed_wheel_bytes(monkeypatch):
+    monkeypatch.setattr(BUILD_SCRIPT, "_sha256", lambda _path: "0" * 64)
+    with pytest.raises(RuntimeError, match="Installed OpenMP DLL fails the torch wheel RECORD hash"):
+        BUILD_SCRIPT._openmp_inventory()
+
+
+@pytest.mark.parametrize("wrong_version,cuda", [(True, False), (False, True), (False, False)])
+def test_cpu_environment_checks_versions_and_native_cuda_state(
+    monkeypatch, wrong_version, cuda,
+):
+    monkeypatch.setattr(
+        BUILD_SCRIPT.metadata, "version",
+        lambda name: "2.8.0" if wrong_version and name == "torch"
+        else BUILD_SCRIPT.CPU_VERSIONS[name],
+    )
+    calls = []
+
+    def probe(command, **kwargs):
+        calls.append(command)
+        assert command[1:3] == ["-I", "-c"]
+        assert "KMP_DUPLICATE_LIB_OK" not in kwargs["env"]
+        return SimpleNamespace(
+            stdout=json.dumps(["2.8.0+cpu", "2.8.0+cpu", "12.8" if cuda else None]),
+        )
+
+    monkeypatch.setenv("KMP_DUPLICATE_LIB_OK", "TRUE")
+    monkeypatch.setattr(BUILD_SCRIPT.subprocess, "run", probe)
+    if wrong_version or cuda:
+        with pytest.raises(RuntimeError, match="pinned singing|CPU-only"):
+            BUILD_SCRIPT._verify_cpu_environment()
+    else:
+        BUILD_SCRIPT._verify_cpu_environment()
+    assert len(calls) == (0 if wrong_version else 1)
 
 
 @pytest.mark.parametrize("frozen", [False, True])

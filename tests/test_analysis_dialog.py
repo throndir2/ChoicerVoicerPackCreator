@@ -197,7 +197,7 @@ def test_workspace_backing_and_whisper_overlap_within_cpu_budget(
     output.write_bytes(b"backing")
 
     class Separation:
-        def __init__(self, _root):
+        def __init__(self, _root, *, mode):
             pass
 
         def generate(self, *_args, **_kwargs):
@@ -222,6 +222,7 @@ def test_workspace_backing_and_whisper_overlap_within_cpu_budget(
     backing = backing_dialog.BackingDialog(
         UnusedMedia(), tmp_path / "video.mp4", tmp_path / "backing-cache",
         job_manager=managed_jobs, project_id="project-a",
+        auto_start=True,
     )
     qtbot.addWidget(backing)
     dialog = None
@@ -286,6 +287,7 @@ def test_same_inference_engine_stays_serial_across_projects(
                 dialog = backing_dialog.BackingDialog(
                     UnusedMedia(), tmp_path / f"{project}.mp4", tmp_path / project,
                     job_manager=managed_jobs, project_id=project,
+                    auto_start=True,
                 )
             else:
                 dialog = AnalysisDialog(

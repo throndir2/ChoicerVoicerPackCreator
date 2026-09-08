@@ -570,6 +570,9 @@ def _run_caption_job(
 def smoke_test(emit: Callable[[str, dict], None]) -> dict[str, Any]:
     import sys
 
+    if any(name == "torch" or name.startswith("torch.") for name in sys.modules):
+        raise CaptionTimingError("Caption timing worker unexpectedly imported Torch")
+
     import ctranslate2
     import numpy as np
     import tokenizers
@@ -580,8 +583,12 @@ def smoke_test(emit: Callable[[str, dict], None]) -> dict[str, Any]:
         ctranslate2.get_supported_compute_types("cpu")
     ):
         raise CaptionTimingError("The bundled caption timing runtime failed its offline smoke check")
+    torch_imported = any(name == "torch" or name.startswith("torch.") for name in sys.modules)
+    if torch_imported:
+        raise CaptionTimingError("Caption timing worker unexpectedly imported Torch")
     return {
         "ctranslate2": ctranslate2.__version__, "tokenizers": tokenizers.__version__,
+        "torch_imported": torch_imported,
         "features": list(storage.shape), "qt_imported": any(
             name.startswith("PySide6") for name in sys.modules
         ),
@@ -599,6 +606,8 @@ def smoke_main(report_path: Path) -> int:
         )
         if result["qt_imported"]:
             raise CaptionTimingError("Caption timing worker unexpectedly imported Qt")
+        if result.get("torch_imported") is not False:
+            raise CaptionTimingError("Caption timing worker failed to verify Torch is absent")
         report_path.write_text(json.dumps(result), encoding="utf-8")
         return 0
     except Exception as error:

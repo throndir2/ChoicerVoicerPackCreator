@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.metadata
 import json
@@ -36,6 +37,84 @@ CAPTION_TIMING_LICENSES = {
     "ctranslate2": ("4.8.1", ("CTranslate2-MIT.txt",)),
     "tokenizers": ("0.23.1", ("Tokenizers-Attribution.txt", "Flatbuffers-Apache-2.0.txt")),
 }
+SINGING_PACKAGES = ("torch", "torchaudio", "librosa", "scipy", "numba", "llvmlite")
+CPU_VERSIONS = {
+    "torch": "2.8.0+cpu", "torchaudio": "2.8.0+cpu",
+    "librosa": "0.10.2.post1", "scipy": "1.15.3", "numba": "0.67.0", "llvmlite": "0.49.0",
+    "numpy": "2.4.6", "soundfile": "0.13.1", "onnxruntime": "1.26.0",
+}
+CUDA_BINARY_NAMES = (
+    "cuda", "cudnn", "cublas", "cufft", "curand", "cusolver", "cusparse",
+    "nvrtc", "nvjitlink", "nvidia", "nvml", "tensorrt",
+)
+OPENMP_LIBRARIES = {
+    "torch": ("2.8.0+cpu", Path("torch") / "lib" / "libiomp5md.dll"),
+    "ctranslate2": ("4.8.1", Path("ctranslate2") / "libiomp5md.dll"),
+}
+
+
+def _verify_cpu_environment() -> None:
+    for name, expected in CPU_VERSIONS.items():
+        if metadata.version(name) != expected:
+            raise RuntimeError(f"Install the pinned singing CPU dependencies: {name} != {expected}")
+    environment = {
+        name: value for name, value in os.environ.items()
+        if name.upper() not in {"KMP_DUPLICATE_LIB_OK", "PYTHONPATH", "PYTHONHOME"}
+    }
+    probe = subprocess.run(
+        [
+            sys.executable, "-I", "-c",
+            "import json,torch,torchaudio; print(json.dumps([torch.__version__, "
+            "torchaudio.__version__, torch.version.cuda]))",
+        ],
+        env=environment, capture_output=True, text=True, check=True, timeout=120,
+    )
+    if json.loads(probe.stdout) != ["2.8.0+cpu", "2.8.0+cpu", None]:
+        raise RuntimeError("The singing backend must use CPU-only PyTorch and TorchAudio")
+
+
+def _openmp_inventory() -> list[dict[str, str]]:
+    inventory = []
+    for name, (version, relative) in OPENMP_LIBRARIES.items():
+        distribution = metadata.distribution(name)
+        if distribution.version != version:
+            raise RuntimeError(f"Expected pinned {name} {version} for the OpenMP audit")
+        source = Path(distribution.locate_file(relative))
+        if not source.is_file():
+            raise RuntimeError(f"The installed {name} wheel is missing {relative}")
+        digest = _sha256(source)
+        record = next((file for file in distribution.files or [] if Path(file) == relative), None)
+        if (
+            record is None or record.hash is None or record.hash.mode != "sha256"
+            or record.hash.value != base64.urlsafe_b64encode(
+                bytes.fromhex(digest)
+            ).rstrip(b"=").decode("ascii")
+        ):
+            raise RuntimeError(f"Installed OpenMP DLL fails the {name} wheel RECORD hash: {source}")
+        inventory.append({
+            "distribution": name, "version": version, "path": relative.as_posix(),
+            "sha256": digest,
+        })
+    return inventory
+
+
+def _audit_cpu_inventory(app_dir: Path) -> None:
+    for path in app_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix.casefold() in {".dll", ".pyd"} and any(
+            name in path.name.casefold() for name in CUDA_BINARY_NAMES
+        ):
+            raise RuntimeError(f"GPU binary must not ship in the CPU package: {path}")
+        relative = path.relative_to(app_dir).as_posix().casefold()
+        if "/torch/" in relative and path.suffix.casefold() in {".lib", ".h", ".hpp", ".cuh"}:
+            raise RuntimeError(f"Torch development files must not ship: {path}")
+    for library in _openmp_inventory():
+        bundled = app_dir / "_internal" / library["path"]
+        if not bundled.is_file() or _sha256(bundled) != library["sha256"]:
+            raise RuntimeError(
+                f"Package-local OpenMP DLL differs from the installed pinned wheel: {bundled}"
+            )
 
 
 def copy_separation_licenses(app_dir: Path) -> None:
@@ -138,6 +217,10 @@ def _caption_timing_distribution_names() -> list[str]:
     return _distribution_names(("ctranslate2", "tokenizers"))
 
 
+def _singing_distribution_names() -> list[str]:
+    return _distribution_names(SINGING_PACKAGES)
+
+
 def _distribution_names(roots: tuple[str, ...]) -> list[str]:
     from packaging.requirements import Requirement
     from packaging.utils import canonicalize_name
@@ -206,6 +289,7 @@ def _write_spec() -> Path:
             ]
             data += collect_data_files("mcp")
             data += collect_data_files("yt_dlp_ejs")
+            data += collect_data_files("choicer_voicer_pack_creator._bandit")
             binaries = [({str(deno.find_deno_bin())!r}, "runtime/deno")]
             hiddenimports = [
                 "PySide6.QtMultimedia",
@@ -215,6 +299,7 @@ def _write_spec() -> Path:
                 "_kaldi_native_fbank",
                 "choicer_voicer_pack_creator.speaker_worker",
                 "choicer_voicer_pack_creator.caption_timing_worker",
+                "choicer_voicer_pack_creator.bandit_runtime",
                 *collect_submodules(
                     "mcp",
                     filter=lambda name: name != "mcp.cli" and not name.startswith("mcp.cli."),
@@ -234,6 +319,15 @@ def _write_spec() -> Path:
                 data += package_data
                 binaries += package_binaries
                 hiddenimports += package_imports
+            for package in {SINGING_PACKAGES!r}:
+                # Only compiler/link-time archives and headers are excluded. Preserve
+                # torch's Python compilation machinery reached by checkpoint imports.
+                package_data, package_binaries, package_imports = collect_all(
+                    package, exclude_datas=["**/*.lib", "**/*.h", "**/*.hpp", "**/*.cuh"],
+                )
+                data += package_data
+                binaries += package_binaries
+                hiddenimports += package_imports
             # The extension is top-level; its companion DLL must also be at the root.
             from importlib.metadata import distribution
             fbank = distribution("kaldi-native-fbank")
@@ -241,7 +335,7 @@ def _write_spec() -> Path:
                 (str(fbank.locate_file("kaldi-native-fbank-core.dll")), "."),
             ]
             # Include activated dependency extras too (e.g. PyJWT's crypto extra).
-            for package in {sorted(set(_mcp_distribution_names() + _caption_timing_distribution_names()))!r}:
+            for package in {sorted(set(_mcp_distribution_names() + _caption_timing_distribution_names() + _singing_distribution_names()))!r}:
                 data += copy_metadata(package)
             analysis = Analysis(
                 [str(path) for path in entrypoints],
@@ -257,9 +351,16 @@ def _write_spec() -> Path:
                 ],
                 # Converted local models need neither training/conversion frameworks nor
                 # a second media decoder. Do not capture them from a developer installation.
-                excludes=["av", "faster_whisper", "torch", "tensorflow", "transformers", "fairseq"],
+                excludes=["av", "faster_whisper", "tensorflow", "transformers", "fairseq"],
                 noarchive=False,
             )
+            analysis.datas = [
+                item for item in analysis.datas
+                if not (
+                    "torch" in Path(item[0]).parts
+                    and Path(item[0]).suffix.casefold() in {{".lib", ".h", ".hpp", ".cuh"}}
+                )
+            ]
             pyz = PYZ(analysis.pure)
 
             def scripts_for(entrypoint):
@@ -315,8 +416,34 @@ def _copy_caption_timing_licenses(app_dir: Path) -> None:
     )
 
 
+def _copy_singing_licenses(app_dir: Path) -> None:
+    names = _singing_distribution_names()
+    _copy_python_licenses(
+        app_dir, names, "Singing-preserving CPU backing runtime",
+        "BandIt uses the official CPU-only PyTorch/TorchAudio runtime and the unchanged "
+        "librosa scientific dependency chain. Checkpoint weights are not bundled.",
+        require_all=True,
+    )
+    (app_dir / "licenses" / "singing-runtime.json").write_text(
+        json.dumps({
+            "version": 1,
+            "dependencies": [
+                {"name": name, "version": metadata.version(name)} for name in names
+            ],
+            "openmp_libraries": _openmp_inventory(),
+        }, indent=2) + "\n", encoding="utf-8",
+    )
+    vendor = ROOT / "src" / "choicer_voicer_pack_creator" / "_bandit"
+    target = app_dir / "licenses" / "bandit"
+    target.mkdir(parents=True, exist_ok=True)
+    for filename in ("LICENSE", "provenance.json"):
+        shutil.copy2(vendor / filename, target / filename)
+    shutil.copy2(vendor / "provenance.json", app_dir / "licenses" / "BandIt-provenance.json")
+
+
 def _copy_python_licenses(
     app_dir: Path, names: list[str], heading: str, description: str,
+    *, require_all: bool = False,
 ) -> None:
     notices = [
         f"\n## {heading}\n",
@@ -341,7 +468,9 @@ def _copy_python_licenses(
             if relative.is_absolute() or ".." in relative.parts:
                 continue
             if not (
-                relative.name.casefold().startswith(("license", "licence", "copying", "notice"))
+                relative.name.casefold().startswith(
+                    ("license", "licence", "copying", "notice", "thirdpartynotices")
+                )
                 or any(part.casefold() == "licenses" for part in relative.parts[:-1])
             ):
                 continue
@@ -359,7 +488,7 @@ def _copy_python_licenses(
                     destination / filename,
                 )
                 copied += 1
-        if name in {"mcp", *CAPTION_TIMING_LICENSES} and not copied:
+        if (require_all or name in {"mcp", *CAPTION_TIMING_LICENSES}) and not copied:
             raise RuntimeError(f"The installed {name} package does not provide its license file")
         notices.append(
             f"| {distribution.metadata['Name']} | {distribution.version} | "
@@ -370,6 +499,7 @@ def _copy_python_licenses(
 
 
 def build_candidate() -> int:
+    _verify_cpu_environment()
     if BUILD.exists():
         shutil.rmtree(BUILD)
     DIST.mkdir(parents=True, exist_ok=True)
@@ -411,6 +541,7 @@ def build_candidate() -> int:
     shutil.copy2(ROOT / "docs" / "MCP.md", app_dir / "docs" / "MCP.md")
     _copy_mcp_licenses(app_dir)
     _copy_caption_timing_licenses(app_dir)
+    _copy_singing_licenses(app_dir)
     shutil.copy2(
         FFMPEG_STAGE / "licenses" / "FFmpeg-LGPL-3.0.txt",
         app_dir / "licenses" / "LGPL-3.0.txt",
@@ -422,6 +553,8 @@ def build_candidate() -> int:
         "Demucs-MIT.txt", "StemSplit-MIT.txt", "backing-separation.json",
         "WeSpeaker-Attribution.txt", "WeSpeaker-CC-BY-4.0.txt", "speaker-matching.json",
         "caption-timing.json", "FasterWhisper-MIT.txt",
+        "BandIt-Apache-2.0.txt", "BandIt-CC-BY-NC-4.0.txt", "BandIt-Attribution.txt",
+        "backing-separation-bandit.json",
     ):
         shutil.copy2(resource_dir / filename, app_dir / "licenses")
     copy_separation_licenses(app_dir)
@@ -467,6 +600,7 @@ def build_candidate() -> int:
         if result.returncode != 0:
             print(f"Bundled tool failed to start: {executable}", file=sys.stderr)
             return 1
+    _audit_cpu_inventory(app_dir)
     write_portable_manifest(app_dir, APP_VERSION)
     stable_archive = DIST / f"Choicer-Voicer-Pack-Creator-{APP_VERSION}-Windows-x64.zip"
     candidate_archive = portable_root / f".{stable_archive.name}.candidate"
@@ -504,6 +638,11 @@ def build_candidate() -> int:
     _write_manifest_atomic(PENDING_BUILD_MANIFEST, manifest)
     print(f"Bundled application with FFmpeg: {app_dir}", flush=True)
     print(f"Unpromoted ZIP candidate: {candidate_archive}", flush=True)
+    print(
+        f"Measured package bytes: ZIP={candidate_archive.stat().st_size:,}; "
+        f"extracted={sum(path.stat().st_size for path in app_dir.rglob('*') if path.is_file()):,}",
+        flush=True,
+    )
     return 0
 
 

@@ -16,6 +16,28 @@ completion. Never modify another active session's checkout or work directly on `
 3. Activate it and install: `python -m pip install -e ".[dev]"`.
 4. Run `pytest` and `ruff check .` before submitting a change.
 
+For the optional singing-preserving source backend, use Windows x64 CPython 3.11 or 3.12 and
+follow [the CPU setup commands](README.md#optional-singing-preserving-cpu-backend), installing
+`tools\singing-cpu-wheels.txt` with isolated pip, `--no-index --no-deps --require-hashes` before
+`".[dev,singing]"` from public PyPI. Do not substitute PyPI's plain torch wheels or globally
+downgrade NumPy. This backend restriction does not change the core `requires-python >=3.11`.
+Portable recipients never need this source setup.
+
+Use `.\Build-Portable.ps1 -BuildEnvironment .\build\environments\<task-name>` for a task-owned
+build environment; do not reset or install into another session's environment or the shared
+default during concurrent development. Reset requires this script's ownership marker and an
+ordinary directory containing `pyvenv.cfg`; unmarked older environments require a new path.
+The canonical script installs CPU wheels before `".[build,singing]"` and checks dependency
+consistency. Reserve several GiB for the environment, staging, and clean extraction. Static
+torch `.lib` archives and headers may be excluded, but never prune runtime DLLs or change
+musical-band/STFT math to meet a size estimate. Preserve each pinned wheel's package-local
+Intel OpenMP DLL and audit its SHA-256 against the installed wheel. Do not replace either
+backend's DLL, globally preload one version, or alter automatically collected root copies
+without actual frozen-dependency evidence. Never use `KMP_DUPLICATE_LIB_OK` to suppress failures.
+Validate both isolated backend workers in the candidate and a clean ZIP extraction.
+Worker smoke must reject importing the other heavy backend; module absence checks do not
+replace actual native validation of each backend's original DLLs.
+
 ## Design rules
 
 - Keep the main editing workspace focused on editing. Do not add persistent banners, panels,
@@ -91,6 +113,15 @@ must not need a source interpreter in the target folder, open a port, download m
 network requests. The build computer still uses Python to run the smoke client. Run it against
 both the candidate application folder and a clean ZIP extraction before promoting the stable ZIP;
 `Build-Portable.ps1` performs both checks.
+Both packaged entrypoints must also pass the offline BandIt actual-architecture tiny CPU smoke
+with exact CPU dependency versions, no Qt in the worker, stereo streaming, model provenance,
+and all recursive dependency notices/metadata present. Keep the existing HTDemucs assertions
+unchanged. These synthetic inputs do not establish model quality or real eight-second-window
+feasibility: before shipping backend changes, separately prove real-checkpoint CPU feasibility,
+memory/time, and numerical parity from the candidate and clean extraction, with verified weights
+and any private fixtures kept outside the portable folder. Do not overlap those heavy checks
+with packaging/model loads on a memory-constrained machine. Record measured ZIP/extracted sizes;
+do not present engineering size estimates as measurements.
 
 ## Pull requests
 

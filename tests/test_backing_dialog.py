@@ -13,6 +13,7 @@ from choicer_voicer_pack_creator.separation import (
     SeparationCancelled,
     SeparationDownloadRequired,
 )
+from choicer_voicer_pack_creator.separation_types import KEEP_SINGING, REMOVE_ALL_VOCALS
 from choicer_voicer_pack_creator.ui import backing_dialog, main_window
 
 
@@ -25,7 +26,7 @@ def test_workspace_backing_download_consent_survives_hidden_review(qtbot, tmp_pa
     class Manager:
         model_download_bytes = 1024**2
 
-        def __init__(self, _root):
+        def __init__(self, _root, *, mode):
             pass
 
         def generate(self, *_args, allow_download, cancelled, **_kwargs):
@@ -49,6 +50,7 @@ def test_workspace_backing_download_consent_survives_hidden_review(qtbot, tmp_pa
     dialog = backing_dialog.BackingDialog(
         SimpleNamespace(), tmp_path / "video.mp4", tmp_path, host,
         job_manager=jobs, project_id="project-a", source_snapshot={"revision": 9},
+        auto_start=True,
     )
     qtbot.addWidget(dialog)
     dialog.show()
@@ -89,7 +91,7 @@ def test_workspace_backing_explicit_cancel_stops_job(qtbot, tmp_path, monkeypatc
     started = threading.Event()
 
     class Manager:
-        def __init__(self, _root):
+        def __init__(self, _root, *, mode):
             pass
 
         def generate(self, *_args, cancelled, **_kwargs):
@@ -103,6 +105,7 @@ def test_workspace_backing_explicit_cancel_stops_job(qtbot, tmp_path, monkeypatc
     dialog = backing_dialog.BackingDialog(
         SimpleNamespace(), tmp_path / "video.mp4", tmp_path,
         job_manager=jobs, project_id="project-a",
+        auto_start=True,
     )
     qtbot.addWidget(dialog)
     dialog.show()
@@ -124,7 +127,7 @@ def test_download_consent_retries_only_after_worker_finishes(qtbot, tmp_path, mo
     class Manager:
         model_download_bytes = 316446953
 
-        def __init__(self, _root):
+        def __init__(self, _root, *, mode):
             pass
 
         def generate(self, _media, _video, *, allow_download, progress, cancelled):
@@ -144,7 +147,9 @@ def test_download_consent_retries_only_after_worker_finishes(qtbot, tmp_path, mo
         return QMessageBox.StandardButton.Yes
 
     monkeypatch.setattr(QMessageBox, "question", consent)
-    dialog = backing_dialog.BackingDialog(SimpleNamespace(), tmp_path / "video.mp4", tmp_path)
+    dialog = backing_dialog.BackingDialog(
+        SimpleNamespace(), tmp_path / "video.mp4", tmp_path, auto_start=True,
+    )
     qtbot.addWidget(dialog)
     dialog.show()
     qtbot.waitUntil(lambda: dialog.result() == QDialog.DialogCode.Accepted)
@@ -161,7 +166,7 @@ def test_declining_download_leaves_no_result(qtbot, tmp_path, monkeypatch):
     class Manager:
         model_download_bytes = 100
 
-        def __init__(self, _root):
+        def __init__(self, _root, *, mode):
             pass
 
         def generate(self, *_args, allow_download, **_kwargs):
@@ -172,7 +177,9 @@ def test_declining_download_leaves_no_result(qtbot, tmp_path, monkeypatch):
     monkeypatch.setattr(
         QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.Cancel,
     )
-    dialog = backing_dialog.BackingDialog(SimpleNamespace(), tmp_path / "video.mp4", tmp_path)
+    dialog = backing_dialog.BackingDialog(
+        SimpleNamespace(), tmp_path / "video.mp4", tmp_path, auto_start=True,
+    )
     qtbot.addWidget(dialog)
     dialog.show()
     qtbot.waitUntil(lambda: bool(calls) and dialog.worker is None and not dialog.isVisible())
@@ -183,7 +190,7 @@ def test_declining_download_leaves_no_result(qtbot, tmp_path, monkeypatch):
 @pytest.mark.parametrize("failure", ["exception", "no-result"])
 def test_failed_generation_can_be_retried_without_losing_dialog(qtbot, tmp_path, monkeypatch, failure):
     class Manager:
-        def __init__(self, _root):
+        def __init__(self, _root, *, mode):
             pass
 
         def generate(self, *_args, **_kwargs):
@@ -192,7 +199,9 @@ def test_failed_generation_can_be_retried_without_losing_dialog(qtbot, tmp_path,
             return object()
 
     monkeypatch.setattr(backing_dialog, "SeparationManager", Manager)
-    dialog = backing_dialog.BackingDialog(SimpleNamespace(), tmp_path / "video.mp4", tmp_path)
+    dialog = backing_dialog.BackingDialog(
+        SimpleNamespace(), tmp_path / "video.mp4", tmp_path, auto_start=True,
+    )
     qtbot.addWidget(dialog)
     dialog.show()
     qtbot.waitUntil(lambda: dialog.retry_button.isVisible())
@@ -209,7 +218,7 @@ def test_close_waits_for_canceled_worker(qtbot, tmp_path, monkeypatch):
     allow_finish = threading.Event()
 
     class Manager:
-        def __init__(self, _root):
+        def __init__(self, _root, *, mode):
             pass
 
         def generate(self, *_args, cancelled, **_kwargs):
@@ -219,7 +228,9 @@ def test_close_waits_for_canceled_worker(qtbot, tmp_path, monkeypatch):
             raise SeparationCancelled("Canceled")
 
     monkeypatch.setattr(backing_dialog, "SeparationManager", Manager)
-    dialog = backing_dialog.BackingDialog(SimpleNamespace(), tmp_path / "video.mp4", tmp_path)
+    dialog = backing_dialog.BackingDialog(
+        SimpleNamespace(), tmp_path / "video.mp4", tmp_path, auto_start=True,
+    )
     qtbot.addWidget(dialog)
     dialog.show()
     try:
@@ -238,11 +249,13 @@ def test_close_waits_for_canceled_worker(qtbot, tmp_path, monkeypatch):
 
 
 def test_dismissed_dialog_does_not_start_scheduled_worker(qtbot, tmp_path, monkeypatch):
-    monkeypatch.setattr(backing_dialog, "SeparationManager", lambda _root: SimpleNamespace())
+    monkeypatch.setattr(backing_dialog, "SeparationManager", lambda _root, **_kwargs: SimpleNamespace())
     monkeypatch.setattr(
         backing_dialog, "BackingWorker", lambda *_args, **_kwargs: pytest.fail("Dialog was closed"),
     )
-    dialog = backing_dialog.BackingDialog(SimpleNamespace(), tmp_path / "video.mp4", tmp_path)
+    dialog = backing_dialog.BackingDialog(
+        SimpleNamespace(), tmp_path / "video.mp4", tmp_path, auto_start=True,
+    )
     qtbot.addWidget(dialog)
     labels = [label.text() for label in dialog.findChildren(QLabel)]
     assert (
@@ -295,9 +308,12 @@ def test_regeneration_changes_only_backing_selection(qtbot, tmp_path, monkeypatc
 
         def __init__(self, *_args, **_kwargs):
             super().__init__(_args[3])
+            self.mode = _kwargs["mode"]
+            self.before_start = _kwargs["before_start"]
 
         def show(self):
             super().show()
+            assert self.before_start(self.mode)
             QTimer.singleShot(0, self.accept if accepted else self.reject)
 
     monkeypatch.setattr(main_window, "BackingDialog", Dialog)
@@ -344,9 +360,12 @@ def test_late_backing_result_cannot_attach_to_different_project(qtbot, tmp_path,
 
         def __init__(self, *_args, **_kwargs):
             super().__init__(_args[3])
+            self.mode = _kwargs["mode"]
+            self.before_start = _kwargs["before_start"]
 
         def show(self):
             super().show()
+            assert self.before_start(self.mode)
             window.project = new_project
             QTimer.singleShot(0, self.accept)
 
@@ -443,3 +462,449 @@ def test_pack_zip_entrypoint_uses_durable_import_directory(qtbot, tmp_path, monk
     assert window.project.backing_track_path == ""
     window.dirty = False
     window.close()
+
+
+@pytest.mark.parametrize("initial_mode", [REMOVE_ALL_VOCALS, KEEP_SINGING])
+def test_manual_picker_waits_for_generate_and_freezes_request(
+    qtbot, tmp_path, monkeypatch, initial_mode,
+):
+    modes, calls = [], []
+
+    class Manager:
+        def __init__(self, _root, *, mode):
+            modes.append(mode)
+
+        def generate(self, *_args, **_kwargs):
+            calls.append(True)
+            raise RuntimeError("Not enough memory")
+
+    monkeypatch.setattr(backing_dialog, "SeparationManager", Manager)
+    dialog = backing_dialog.BackingDialog(
+        SimpleNamespace(), tmp_path / "video.mp4", tmp_path, mode=initial_mode,
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.wait(20)
+    assert not calls and not modes
+    assert dialog.generate_button.isVisible()
+    assert dialog.keep_singing_choice.isChecked() is (initial_mode == KEEP_SINGING)
+    dialog.keep_singing_choice.setChecked(True)
+    assert dialog.license_warning.isVisible()
+    assert "CC BY-NC 4.0" in dialog.license_warning.text()
+    assert "non-commercial" in dialog.license_warning.text()
+    assert "About" in dialog.license_warning.text()
+    dialog.remove_vocals_choice.setChecked(True)
+    assert not dialog.license_warning.isVisible()
+    dialog.keep_singing_choice.setChecked(True)
+    assert not modes
+    dialog.generate_button.click()
+    qtbot.waitUntil(lambda: dialog.worker is None)
+    assert modes == [KEEP_SINGING]
+    assert not dialog.keep_singing_choice.isEnabled()
+    assert not dialog.remove_vocals_choice.isEnabled()
+    assert not dialog.generate_button.isVisible()
+    dialog.retry_button.click()
+    qtbot.waitUntil(lambda: dialog.worker is None)
+    assert calls == [True, True]
+    assert modes == [KEEP_SINGING]
+    assert dialog.mode == KEEP_SINGING
+    dialog.close()
+
+
+def prepare_mode_window(qtbot, tmp_path, monkeypatch):
+    window = make_window(qtbot, tmp_path)
+    monkeypatch.setattr(window, "_commit_editors", lambda: None)
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.Yes)
+    window.edit_history.reset(dirty=False)
+    window.processing.reset()
+    return window
+
+
+@pytest.mark.parametrize("dismiss", ["button", "close", "escape"])
+def test_opening_selecting_and_canceling_picker_does_not_change_project(
+    qtbot, tmp_path, monkeypatch, dismiss,
+):
+    window = prepare_mode_window(qtbot, tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        backing_dialog, "SeparationManager", lambda *_args, **_kwargs: pytest.fail("Not started"),
+    )
+    before = window.project.to_dict()
+    processing_before = window.processing.group_state("backing")
+    assert window.generate_backing_track()
+    dialog = window._backing_dialog
+    dialog.keep_singing_choice.setChecked(True)
+    qtbot.wait(20)
+    assert window.project.to_dict() == before
+    assert not window.dirty
+    if dismiss == "button":
+        dialog.close_button.click()
+    elif dismiss == "close":
+        dialog.close()
+    else:
+        qtbot.keyClick(dialog, Qt.Key.Key_Escape)
+    assert window._backing_dialog is None
+    assert window.project.to_dict() == before
+    assert not window.edit_history.history.can_undo
+    assert window.processing.group_state("backing") == processing_before
+    window.close()
+
+
+@pytest.mark.parametrize("outcome", ["failure", "cancel"])
+def test_explicit_mode_preference_survives_failure_and_cancel_with_old_backing(
+    qtbot, tmp_path, monkeypatch, outcome,
+):
+    window = prepare_mode_window(qtbot, tmp_path, monkeypatch)
+    started = threading.Event()
+    modes = []
+
+    class Manager:
+        def __init__(self, _root, *, mode):
+            modes.append(mode)
+
+        def generate(self, *_args, cancelled, **_kwargs):
+            started.set()
+            if outcome == "failure":
+                raise RuntimeError("Insufficient memory")
+            while not cancelled():
+                threading.Event().wait(0.01)
+            raise SeparationCancelled("Canceled")
+
+    monkeypatch.setattr(backing_dialog, "SeparationManager", Manager)
+    before = window.project.to_dict()
+    try:
+        assert window.generate_backing_track()
+        dialog = window._backing_dialog
+        dialog.keep_singing_choice.setChecked(True)
+        assert window.project.to_dict() == before
+        dialog.generate_button.click()
+        qtbot.waitUntil(started.is_set)
+        assert window.project.to_dict() == {**before, "backing_generation_mode": KEEP_SINGING}
+        assert window.dirty
+        assert window.edit_history.history.labels == ("Change backing generation mode",)
+        if outcome == "cancel":
+            dialog.cancel_generation()
+        qtbot.waitUntil(lambda: dialog.worker is None)
+        assert window.project.backing_track_path == before["backing_track_path"]
+        assert window.project.backing_generation_mode == KEEP_SINGING
+        assert modes == [KEEP_SINGING]
+        assert (tmp_path / "silent.mp3").read_bytes() == b"original silent backing"
+        if outcome == "failure":
+            dialog.retry_button.click()
+            qtbot.waitUntil(lambda: dialog.worker is None)
+            assert modes == [KEEP_SINGING]
+            assert window.edit_history.history.labels == ("Change backing generation mode",)
+            dialog.cancel_generation()
+        assert window.generate_backing_track()
+        assert window._backing_dialog.keep_singing_choice.isChecked()
+        assert window._backing_dialog.worker is None
+        window._backing_dialog.cancel_generation()
+    finally:
+        window.dirty = False
+        window.close()
+
+
+def test_background_generation_uses_old_backend_without_changing_manual_preference(
+    qtbot, tmp_path, monkeypatch,
+):
+    window = prepare_mode_window(qtbot, tmp_path, monkeypatch)
+    window.project.backing_track_path = ""
+    window.project.backing_generation_mode = KEEP_SINGING
+    window.edit_history.reset(dirty=False)
+    modes = []
+
+    class Manager:
+        def __init__(self, _root, *, mode):
+            modes.append(mode)
+
+        def generate(self, *_args, **_kwargs):
+            raise RuntimeError("Not enough memory")
+
+    monkeypatch.setattr(backing_dialog, "SeparationManager", Manager)
+    try:
+        assert window.generate_backing_track(background=True)
+        dialog = window._backing_dialog
+        assert not dialog.isVisible()
+        qtbot.waitUntil(lambda: bool(modes) and dialog.worker is None)
+        assert modes == [REMOVE_ALL_VOCALS]
+        assert dialog.remove_vocals_choice.isChecked()
+        assert not dialog.keep_singing_choice.isEnabled()
+        assert window.project.backing_generation_mode == KEEP_SINGING
+        assert not window.dirty
+        dialog.start()
+        qtbot.waitUntil(lambda: dialog.worker is None)
+        assert modes == [REMOVE_ALL_VOCALS]
+        assert not window.edit_history.history.can_undo
+        dialog.cancel_generation()
+    finally:
+        window.dirty = False
+        window.close()
+
+
+def test_background_never_regenerates_selected_backing(qtbot, tmp_path, monkeypatch):
+    window = prepare_mode_window(qtbot, tmp_path, monkeypatch)
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args: pytest.fail("No confirmation needed"))
+    monkeypatch.setattr(
+        main_window, "BackingDialog", lambda *_args, **_kwargs: pytest.fail("Keep existing backing"),
+    )
+    assert not window.generate_backing_track(background=True)
+    assert window.project.backing_track_path == str(tmp_path / "silent.mp3")
+    window.close()
+
+
+@pytest.mark.parametrize("change", ["source", "source-request", "project"])
+def test_obsolete_picker_cannot_start_or_persist_mode(qtbot, tmp_path, monkeypatch, change):
+    window = prepare_mode_window(qtbot, tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        backing_dialog, "SeparationManager", lambda *_args, **_kwargs: pytest.fail("Obsolete picker"),
+    )
+    assert window.generate_backing_track()
+    dialog = window._backing_dialog
+    dialog.keep_singing_choice.setChecked(True)
+    if change == "source":
+        window.session.source_revision += 1
+    elif change == "source-request":
+        window._source_request += 1
+    else:
+        window.project = PackProject(video_path=window.project.video_path)
+    before = window.project.to_dict()
+    dialog.generate_button.click()
+    assert dialog.worker is None
+    assert window.project.to_dict() == before
+    assert not window.dirty
+    dialog.cancel_generation()
+    window.close()
+
+
+@pytest.mark.parametrize("setup_failure", [False, True])
+def test_failed_request_retry_keeps_mode_and_cannot_replace_superseded_preference(
+    qtbot, tmp_path, monkeypatch, setup_failure,
+):
+    window = prepare_mode_window(qtbot, tmp_path, monkeypatch)
+    modes, calls = [], []
+
+    class Manager:
+        def __init__(self, _root, *, mode):
+            modes.append(mode)
+            if setup_failure:
+                raise RuntimeError("Install the optional CPU runtime")
+
+        def generate(self, *_args, **_kwargs):
+            calls.append(True)
+            raise RuntimeError("Not enough memory")
+
+    monkeypatch.setattr(backing_dialog, "SeparationManager", Manager)
+    try:
+        assert window.generate_backing_track()
+        dialog = window._backing_dialog
+        dialog.keep_singing_choice.setChecked(True)
+        dialog.generate_button.click()
+        qtbot.waitUntil(lambda: dialog.worker is None)
+        assert window.project.backing_generation_mode == KEEP_SINGING
+        assert modes == [KEEP_SINGING]
+        assert dialog.retry_button.isVisible()
+        if not setup_failure:
+            job = next(job for job in window.job_manager.tasks() if job.kind == "backing")
+            assert window.tasks_window._can_retry(job.id)
+        window.project.backing_generation_mode = REMOVE_ALL_VOCALS
+        before = window.project.to_dict()
+        if not setup_failure:
+            assert not window.tasks_window._can_retry(job.id)
+            window.tasks_window._retry[job.id]()
+        dialog.retry_button.click()
+        assert modes == [KEEP_SINGING]
+        assert calls == ([] if setup_failure else [True])
+        assert window.project.to_dict() == before
+        assert "no longer matches" in dialog.progress_label.text()
+        dialog.cancel_generation()
+    finally:
+        window.dirty = False
+        window.close()
+
+
+@pytest.mark.parametrize("confirm_new", [True, False])
+def test_start_captures_latest_backing_selection_and_reconfirms_replacement(
+    qtbot, tmp_path, monkeypatch, confirm_new,
+):
+    window = prepare_mode_window(qtbot, tmp_path, monkeypatch)
+    calls, confirmations = [], []
+    output = tmp_path / "generated.wav"
+    output.write_bytes(b"new backing")
+    replacement = tmp_path / "chosen.wav"
+    replacement.write_bytes(b"chosen backing")
+
+    def confirm(*_args):
+        confirmations.append(True)
+        return (
+            QMessageBox.StandardButton.Yes if len(confirmations) == 1 or confirm_new
+            else QMessageBox.StandardButton.Cancel
+        )
+
+    class Manager:
+        def __init__(self, _root, *, mode):
+            pass
+
+        def generate(self, *_args, **_kwargs):
+            calls.append(True)
+            return output
+
+    monkeypatch.setattr(QMessageBox, "question", confirm)
+    monkeypatch.setattr(backing_dialog, "SeparationManager", Manager)
+    try:
+        assert window.generate_backing_track()
+        dialog = window._backing_dialog
+        monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(replacement), ""))
+        window.choose_backing_track()
+        revision = window.session.backing_revision
+        dialog.generate_button.click()
+        qtbot.waitUntil(lambda: dialog.worker is None)
+        assert confirmations == [True, True]
+        assert bool(calls) is confirm_new
+        if confirm_new:
+            assert window.project.backing_track_path == str(output)
+            assert dialog.source_snapshot["backing_revision"] == revision
+            assert dialog.source_snapshot["backing_path"] == str(replacement)
+        else:
+            assert window.project.backing_track_path == str(replacement)
+            dialog.cancel_generation()
+        assert replacement.read_bytes() == b"chosen backing"
+    finally:
+        window.dirty = False
+        window.close()
+
+
+@pytest.mark.parametrize("change", ["mode", "history", "source", "source-request", "backing"])
+def test_successful_stale_generation_keeps_durable_output_without_attaching(
+    qtbot, tmp_path, monkeypatch, change,
+):
+    window = prepare_mode_window(qtbot, tmp_path, monkeypatch)
+    started, release = threading.Event(), threading.Event()
+    output = tmp_path / "generated.wav"
+    output.write_bytes(b"new backing")
+
+    class Manager:
+        def __init__(self, _root, *, mode):
+            pass
+
+        def generate(self, *_args, **_kwargs):
+            started.set()
+            assert release.wait(10)
+            return output
+
+    monkeypatch.setattr(backing_dialog, "SeparationManager", Manager)
+    try:
+        assert window.generate_backing_track()
+        dialog = window._backing_dialog
+        dialog.keep_singing_choice.setChecked(True)
+        dialog.generate_button.click()
+        qtbot.waitUntil(started.is_set)
+        initial_revision = window.session.backing_revision
+        if change == "mode":
+            window.project.backing_generation_mode = REMOVE_ALL_VOCALS
+        elif change == "history":
+            window.action_undo.trigger()
+            qtbot.waitUntil(lambda: not window.edit_history.busy)
+            assert window.project.backing_generation_mode == REMOVE_ALL_VOCALS
+            window.action_redo.trigger()
+            qtbot.waitUntil(lambda: not window.edit_history.busy)
+            assert window.project.backing_generation_mode == KEEP_SINGING
+            assert window.session.backing_revision > initial_revision
+        elif change == "source":
+            window.session.source_revision += 1
+        elif change == "source-request":
+            window._source_request += 1
+        else:
+            window.clear_backing_track()
+        preserved = window.project.to_dict()
+        processing_before = window.processing.group_state("backing")
+        release.set()
+        qtbot.waitUntil(lambda: dialog.worker is None)
+        assert window.project.to_dict() == preserved
+        if change == "backing":
+            assert window.processing.group_state("backing") == processing_before
+        assert output.read_bytes() == b"new backing"
+        assert "newer source/backing choice was kept" in window.statusBar().currentMessage()
+    finally:
+        release.set()
+        qtbot.waitUntil(lambda: dialog.worker is None)
+        window.dirty = False
+        window.close()
+
+
+@pytest.mark.parametrize(
+    "change", ["mode", "history", "source", "source-request", "backing", "closed", "retained"],
+)
+def test_consent_and_retry_cannot_revive_obsolete_generation(
+    qtbot, tmp_path, monkeypatch, change,
+):
+    window = prepare_mode_window(qtbot, tmp_path, monkeypatch)
+    calls, modes = [], []
+    output = tmp_path / "generated.wav"
+    output.write_bytes(b"new backing")
+
+    class Manager:
+        model_download_bytes = 446680129
+        manifest = {"model": {"sha256": "bandit-checksum"}}
+
+        def __init__(self, _root, *, mode):
+            modes.append(mode)
+
+        def generate(self, *_args, allow_download, **_kwargs):
+            calls.append(allow_download)
+            if not allow_download:
+                raise SeparationDownloadRequired("Consent required")
+            return output
+
+    monkeypatch.setattr(backing_dialog, "SeparationManager", Manager)
+    editor = window.active_editor
+    try:
+        assert editor.generate_backing_track()
+        dialog = editor._backing_dialog
+        dialog.keep_singing_choice.setChecked(True)
+        dialog.generate_button.click()
+        qtbot.waitUntil(lambda: dialog._pending_consent)
+        consent = dialog._consent_callback
+        request = window.setup_consent._requests[0]
+        assert request.components == {
+            "separation:bandit-checksum":
+                "BandIt singing-preserving model (~426 MiB) — CC BY-NC 4.0, non-commercial use only",
+        }
+        assert "CC BY-NC 4.0" in window.setup_consent.box.text()
+        assert not dialog.keep_singing_choice.isEnabled()
+        if change == "mode":
+            editor.project.backing_generation_mode = REMOVE_ALL_VOCALS
+        elif change == "history":
+            editor.action_undo.trigger()
+            qtbot.waitUntil(lambda: not editor.edit_history.busy)
+            editor.action_redo.trigger()
+            qtbot.waitUntil(lambda: not editor.edit_history.busy)
+        elif change == "source":
+            editor.session.source_revision += 1
+        elif change == "source-request":
+            editor._source_request += 1
+        elif change == "backing":
+            editor.clear_backing_track()
+        elif change in {"closed", "retained"}:
+            monkeypatch.setattr(window, "_retire_closed_editors", lambda: None)
+            window._hide_editor(editor, retain=change == "retained")
+        preserved = editor.project.to_dict()
+        if window.setup_consent.box is not None:
+            window.setup_consent.box.button(QMessageBox.StandardButton.Yes).click()
+        else:
+            consent(True)
+        qtbot.waitUntil(lambda: dialog.worker is None)
+        assert modes == [KEEP_SINGING]
+        if change == "retained":
+            assert calls == [False, True]
+            assert editor.project.backing_track_path == str(output)
+        else:
+            assert calls == [False]
+            dialog.start()
+            assert editor.project.to_dict() == preserved
+            assert "no longer matches" in dialog.progress_label.text()
+            dialog.cancel_generation()
+            qtbot.wait(20)
+            assert calls == [False]
+    finally:
+        for item in window.editors.values():
+            item.dirty = False
+        window.close()
