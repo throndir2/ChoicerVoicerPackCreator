@@ -39,7 +39,7 @@ def test_setup_uses_selected_interpreter_and_stops_on_failure(tmp_path, explicit
         json.loads(line.removeprefix("CALL:"))
         for line in result.stdout.splitlines() if line.startswith("CALL:")
     ]
-    prefix = [] if explicit else ["-3.11"]
+    prefix = ["-I"] if explicit else ["-3.11", "-I"]
     assert calls[0][:-1] == [*prefix, "-c"]
     assert len(calls) == (1 if probe_exit else 2)
     if not probe_exit:
@@ -49,7 +49,7 @@ def test_setup_uses_selected_interpreter_and_stops_on_failure(tmp_path, explicit
     probe = calls[0][-1]
     for version, size, expected in [((3, 11), 8, 0), ((3, 12), 8, 1), ((3, 11), 4, 1)]:
         checked = subprocess.run(
-            [sys.executable, "-c",
+            [sys.executable, "-I", "-c",
              f"import sys, struct; sys.version_info = {version}; "
              f"struct.calcsize = lambda _: {size}; {probe}"],
             capture_output=True, text=True, check=False,

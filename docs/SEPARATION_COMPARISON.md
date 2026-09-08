@@ -69,9 +69,16 @@ uv python find 3.11 --managed-python --no-python-downloads
 Use the interpreter path printed by that command for `-PythonExecutable`; do not use
 the installed application's interpreter or modify global packages.
 
+Some Windows applications set a user-level `PYTHONPATH` to their own Python DLLs
+(for example, SVP's Python 3.12). That can break even a Python 3.11 virtual environment
+with `Module use of python312.dll conflicts with this version of Python`. Setup uses
+Python's isolated mode (`-I`) for its interpreter and pip commands. The comparison
+commands below use `-E -s` to ignore ambient Python overrides and user packages while
+still allowing the repository's `scripts` module. Neither changes global settings.
+
 ```powershell
 .\tools\separation-comparison\Setup-Gpu.ps1 -Backend BandIt -Environment C:\AudioComparison\venv-bandit
-& C:\AudioComparison\venv-bandit\Scripts\python.exe -m scripts.compare_separation --backend bandit --preflight
+& C:\AudioComparison\venv-bandit\Scripts\python.exe -E -s -m scripts.compare_separation --backend bandit --preflight
 ```
 
 Obtain `bandit-combined.ckpt` from the official record:
@@ -86,7 +93,7 @@ SHA-256 established after matching that publication:
 The loader verifies the checkpoint before weights-only, strict state loading.
 
 ```powershell
-& C:\AudioComparison\venv-bandit\Scripts\python.exe -m scripts.compare_separation --backend bandit --input C:\AudioComparison\input-with-context.wav --model C:\AudioComparison\bandit-combined.ckpt --output C:\AudioComparison\results-bandit
+& C:\AudioComparison\venv-bandit\Scripts\python.exe -E -s -m scripts.compare_separation --backend bandit --input C:\AudioComparison\input-with-context.wav --model C:\AudioComparison\bandit-combined.ckpt --output C:\AudioComparison\results-bandit
 ```
 
 BandIt uses 48 kHz, eight-second windows with a one-second hop, batch size one, float32,
@@ -98,7 +105,7 @@ For the current-model baseline, obtain the exact ONNX file described in
 bundle already contains it), then:
 
 ```powershell
-& C:\AudioComparison\venv-bandit\Scripts\python.exe -m scripts.compare_separation --backend htdemucs --input C:\AudioComparison\input-with-context.wav --model C:\AudioComparison\htdemucs.onnx --output C:\AudioComparison\results-htdemucs
+& C:\AudioComparison\venv-bandit\Scripts\python.exe -E -s -m scripts.compare_separation --backend htdemucs --input C:\AudioComparison\input-with-context.wav --model C:\AudioComparison\htdemucs.onnx --output C:\AudioComparison\results-htdemucs
 ```
 
 This baseline deliberately stays on ONNX Runtime CPU, like the app. It uses the same
@@ -115,7 +122,7 @@ C++ x64 runtime may also be needed.
 
 ```powershell
 .\tools\separation-comparison\Setup-Gpu.ps1 -Backend SamAudio -Environment C:\AudioComparison\venv-sam
-& C:\AudioComparison\venv-sam\Scripts\python.exe -m scripts.compare_separation --backend sam-audio --preflight --ffmpeg-bin C:\FFmpeg7Shared\bin
+& C:\AudioComparison\venv-sam\Scripts\python.exe -E -s -m scripts.compare_separation --backend sam-audio --preflight --ffmpeg-bin C:\FFmpeg7Shared\bin
 ```
 
 The profile pins torch 2.9.1/cu128, matching TorchAudio/TorchVision/xformers, TorchCodec
@@ -127,14 +134,17 @@ to silently downgrade packages or use CPU.
 Request access to [facebook/sam-audio-small](https://huggingface.co/facebook/sam-audio-small)
 in your browser and personally review/accept its terms. After approval, authenticate
 privately on the GPU machine; never send a token to an assistant or include it in a bundle.
+Successful login does not grant gated model approval: an HTTP 403 saying the request
+is awaiting review is a blocker until the model's authors approve it. Continue the
+other comparisons without trying to bypass that gate.
 The SAM checkpoint is about 5.1 GB; T5 adds about 0.9 GB. Model loading also needs
 substantial free system RAM in addition to VRAM.
 
 ```powershell
-& C:\AudioComparison\venv-sam\Scripts\hf.exe auth login
-& C:\AudioComparison\venv-sam\Scripts\hf.exe download facebook/sam-audio-small --revision 20b65f56888142eebe7c37448c6f6b3b32600e9b --include config.json checkpoint.pt LICENSE README.md --local-dir C:\AudioComparison\models\sam-audio-small
-& C:\AudioComparison\venv-sam\Scripts\hf.exe download google-t5/t5-base --revision a9723ea7f1b39c1eae772870f3b547bf6ef7e6c1 --include "*.json" "*.model" model.safetensors --local-dir C:\AudioComparison\models\t5-base
-& C:\AudioComparison\venv-sam\Scripts\python.exe -m scripts.compare_separation --backend sam-audio --input C:\AudioComparison\input-with-context.wav --sam-model C:\AudioComparison\models\sam-audio-small --t5-model C:\AudioComparison\models\t5-base --ffmpeg-bin C:\FFmpeg7Shared\bin --output C:\AudioComparison\results-sam
+& C:\AudioComparison\venv-sam\Scripts\python.exe -I -m huggingface_hub.cli.hf auth login
+& C:\AudioComparison\venv-sam\Scripts\python.exe -I -m huggingface_hub.cli.hf download facebook/sam-audio-small --revision 20b65f56888142eebe7c37448c6f6b3b32600e9b --include config.json checkpoint.pt LICENSE README.md --local-dir C:\AudioComparison\models\sam-audio-small
+& C:\AudioComparison\venv-sam\Scripts\python.exe -I -m huggingface_hub.cli.hf download google-t5/t5-base --revision a9723ea7f1b39c1eae772870f3b547bf6ef7e6c1 --include "*.json" "*.model" model.safetensors --local-dir C:\AudioComparison\models\t5-base
+& C:\AudioComparison\venv-sam\Scripts\python.exe -E -s -m scripts.compare_separation --backend sam-audio --input C:\AudioComparison\input-with-context.wav --sam-model C:\AudioComparison\models\sam-audio-small --t5-model C:\AudioComparison\models\t5-base --ffmpeg-bin C:\FFmpeg7Shared\bin --output C:\AudioComparison\results-sam
 ```
 
 Inference sets Hugging Face/Transformers offline mode before imports and uses only local
