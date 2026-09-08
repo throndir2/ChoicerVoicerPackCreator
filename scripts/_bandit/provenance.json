@@ -1,0 +1,96 @@
+{
+  "repository": "https://github.com/kwatcharasupat/bandit-v2",
+  "revision": "d5563d9031e95fdaa3e5a73d5020b9a0df61adb6",
+  "source_license": "Apache-2.0",
+  "upstream_notice": null,
+  "upstream_notice_note": "No NOTICE file is present in the pinned repository tree.",
+  "download_base_url": "https://raw.githubusercontent.com/kwatcharasupat/bandit-v2/d5563d9031e95fdaa3e5a73d5020b9a0df61adb6/",
+  "vendoring": "Files were downloaded unchanged from the pinned revision before applying the adaptations recorded below. Digests describe those original downloaded bytes.",
+  "adaptations": [
+    {
+      "path": "models/base.py",
+      "changes": [
+        "Replace the pytorch_lightning import and empty LightningModule superclass with torch.nn.Module.",
+        "Add a prominent notice identifying this inference-only adaptation."
+      ]
+    },
+    {
+      "path": "models/bandit/",
+      "changes": [
+        "None: the five vendored Python files retain their original bytes, including already-relative internal imports, TorchAudio transforms, librosa musical-band calculations, disabled compile wrappers, and combined module aliases."
+      ]
+    },
+    {
+      "path": "__init__.py",
+      "changes": [
+        "New local loader: lazy optional dependencies, public checkpoint metadata, published size/MD5 and independently pinned SHA-256 verification, CPU memory-mapped weights-only deserialization, strict model.* state loading, and evaluation/device setup. Loading is disabled for checkpoints without a SHA-256 pin.",
+        "New lightweight models/__init__.py and models/bandit/__init__.py define the local package namespace without upstream training-package imports."
+      ]
+    }
+  ],
+  "weights": {
+    "work": "Facing the Music",
+    "record_url": "https://zenodo.org/records/13327983",
+    "license": "CC-BY-NC-4.0",
+    "license_url": "https://creativecommons.org/licenses/by-nc/4.0/",
+    "distributed_here": false,
+    "checksum_note": "MD5 and byte lengths are the publication's integrity metadata; they are not cryptographic signatures. The combined SHA-256 was independently computed after an HTTPS download matched the published size and MD5. The loader requires the pinned SHA-256 as well as published size/MD5 before deserialization. Split loading remains disabled until a verified SHA-256 is pinned.",
+    "checkpoints": [
+      {
+        "filename": "bandit-combined.ckpt",
+        "url": "https://zenodo.org/records/13327983/files/bandit-combined.ckpt?download=1",
+        "size_bytes": 446680129,
+        "md5": "d04760e77bb947668d8f5582d36b45a0",
+        "sha256": "ebcd8a3c8c783aa8f3379c0cab925b76987f4f8959dfb595a84426817e1ffb60",
+        "stems": ["speech", "music", "sfx"]
+      },
+      {
+        "filename": "bandit-split.ckpt",
+        "url": "https://zenodo.org/records/13327983/files/bandit-split.ckpt?download=1",
+        "size_bytes": 551004479,
+        "md5": "e9f9054a452cb86b30a6f705266dbd7c",
+        "sha256": null,
+        "stems": ["speech", "music_instrumental", "music_vocals", "sfx"]
+      }
+    ],
+    "semantics": "These singing-aware checkpoints are distinct from ordinary DnR v3 weights. Combined music includes singing; split music_vocals is separate from speech.",
+    "validation": "The combined checkpoint download matched the published byte length and MD5, and its independently computed SHA-256 is pinned. The verified combined checkpoint loaded strictly into this constructor on CPU using Torch 2.8.0 (37,022,688 parameters). GPU inference and listening quality remain to be evaluated on the target machine."
+  },
+  "files": [
+    {
+      "upstream_path": "src/models/base.py",
+      "vendored_path": "models/base.py",
+      "original_sha256": "caf803b1e170afc1658bd916f0e81c4cc2338296458797c81e15d38d2f861d28"
+    },
+    {
+      "upstream_path": "src/models/bandit/bandit.py",
+      "vendored_path": "models/bandit/bandit.py",
+      "original_sha256": "40e81259c2c252f5b38a487729b7045a4a2ed30c45cb22b3628662f9b1509bc2"
+    },
+    {
+      "upstream_path": "src/models/bandit/bandsplit.py",
+      "vendored_path": "models/bandit/bandsplit.py",
+      "original_sha256": "acf700b1fbf3d84ace0527bd5aac2ab2f59bdb10208f28b718df72e351dfe625"
+    },
+    {
+      "upstream_path": "src/models/bandit/maskestim.py",
+      "vendored_path": "models/bandit/maskestim.py",
+      "original_sha256": "f277b923166fa8dd7831410f713c88b6a525f79ff066961df8a48ab9c2d714c4"
+    },
+    {
+      "upstream_path": "src/models/bandit/tfmodel.py",
+      "vendored_path": "models/bandit/tfmodel.py",
+      "original_sha256": "0417897e3957ccb16fe107ecbc724ed9bfdb28e9d14d7df03c2c2337151d2724"
+    },
+    {
+      "upstream_path": "src/models/bandit/utils.py",
+      "vendored_path": "models/bandit/utils.py",
+      "original_sha256": "6aec7c2a1bcfc8f4e680dce2940eae75415d26ecebb6c9839a78c7dfa213218e"
+    },
+    {
+      "upstream_path": "LICENSE",
+      "vendored_path": "LICENSE",
+      "original_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    }
+  ]
+}

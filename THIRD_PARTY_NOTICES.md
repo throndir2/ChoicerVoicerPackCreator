@@ -154,6 +154,23 @@ and downloaded model cache both retain these files.
 Separation is probabilistic and can leave voice remnants or remove desired music/effects.
 It is not an authoritative recovery of an original instrumental mix.
 
+## Optional developer separation comparison
+
+The source-only [comparison workflow](docs/SEPARATION_COMPARISON.md) is not part of the
+portable application or its dependency set. It contains a minimally adapted inference
+subset of [BandIt-v2](https://github.com/kwatcharasupat/bandit-v2/tree/d5563d9031e95fdaa3e5a73d5020b9a0df61adb6)
+under Apache-2.0, with upstream license, attribution, source hashes, and adaptation
+provenance retained in `scripts/_bandit`.
+
+The optional singing-aware **Facing the Music** BandIt checkpoint is separately licensed
+**CC BY-NC 4.0**; see its [official publication](https://zenodo.org/records/13327983).
+It is not bundled or covered by the application's MIT license.
+The optional, externally installed SAM Audio code and weights use the
+[SAM License](https://github.com/facebookresearch/sam-audio/blob/bb4c6999d2677c7402360e426afc01ddfad6dce0/LICENSE),
+and its standard dependency profile includes ImageBind under CC BY-NC-SA 4.0.
+No SAM code or weights are vendored here. Those external packages retain their own
+upstream notices; they must not be represented as unrestricted MIT application components.
+
 ## Optional local character voice matching
 
 Voice matching uses the **WeSpeaker VoxCeleb ResNet34-LM** speaker embedding model
