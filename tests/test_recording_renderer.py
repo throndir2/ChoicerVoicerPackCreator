@@ -354,6 +354,94 @@ def test_destination_race_never_overwrites_unconfirmed_output(tmp_path):
     assert destination.read_bytes() == b"other writer"
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_competing_output_during_published_validation_is_preserved(tmp_path, monkeypatch, existing):
+    pack, take = _fixture(tmp_path)
+    media = FakeMedia()
+    plan = prepare_recording(media, read_pack(pack), find_takes(take)[0])
+    destination = tmp_path / "result.mp4"
+    if existing:
+        destination.write_bytes(b"previous output")
+    original_validate = renderer._validate_output
+
+    def validate(media, plan, path, *, format):
+        if path == destination:
+            competing = tmp_path / "competing.mp4"
+            competing.write_bytes(b"other writer replacement")
+            os.replace(competing, destination)
+            raise MediaError("Published validation failure")
+        original_validate(media, plan, path, format=format)
+
+    monkeypatch.setattr(renderer, "_validate_output", validate)
+    with pytest.raises(SourceChangedError, match="competing output is preserved"):
+        render_recording(media, plan, destination, overwrite=existing)
+    assert destination.read_bytes() == b"other writer replacement"
+    backups = list(tmp_path.glob(".result.mp4.previous-*"))
+    assert len(backups) == int(existing)
+    if backups:
+        assert backups[0].read_bytes() == b"previous output"
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_competing_replacement_between_rollback_check_and_claim_is_preserved(
+    tmp_path, monkeypatch, existing,
+):
+    pack, take = _fixture(tmp_path)
+    media = FakeMedia()
+    media.fail_published = True
+    plan = prepare_recording(media, read_pack(pack), find_takes(take)[0])
+    destination = tmp_path / "result.mp4"
+    if existing:
+        destination.write_bytes(b"previous output")
+    original_rename = os.rename
+
+    def rename(source, target):
+        if ".rejected-" in Path(target).name:
+            competing = tmp_path / "competing.mp4"
+            competing.write_bytes(b"other writer during rollback")
+            os.replace(competing, destination)
+        return original_rename(source, target)
+
+    monkeypatch.setattr(renderer.os, "rename", rename)
+    with pytest.raises(SourceChangedError, match="competing output is preserved"):
+        render_recording(media, plan, destination, overwrite=existing)
+    assert destination.read_bytes() == b"other writer during rollback"
+    assert len(list(tmp_path.glob(".result.mp4.previous-*"))) == int(existing)
+
+
+def test_competing_output_after_approved_overwrite_claim_is_not_overwritten(tmp_path, monkeypatch):
+    pack, take = _fixture(tmp_path)
+    media = FakeMedia()
+    plan = prepare_recording(media, read_pack(pack), find_takes(take)[0])
+    destination = tmp_path / "result.mp4"
+    destination.write_bytes(b"previous output")
+    original_link = os.link
+
+    def link(source, target):
+        if Path(source).name == "render.mp4":
+            destination.write_bytes(b"other writer before publication")
+        return original_link(source, target)
+
+    monkeypatch.setattr(renderer.os, "link", link)
+    with pytest.raises(OSError, match="previous output is retained"):
+        render_recording(media, plan, destination, overwrite=True)
+    assert destination.read_bytes() == b"other writer before publication"
+    backup, = tmp_path.glob(".result.mp4.previous-*")
+    assert backup.read_bytes() == b"previous output"
+
+
+@pytest.mark.parametrize("alias", ["pack ", "pack.", "pack:stream", "pack?"])
+def test_ambiguous_destination_components_never_create_source_subdirectories(tmp_path, alias):
+    pack, take = _fixture(tmp_path)
+    media = FakeMedia()
+    plan = prepare_recording(media, read_pack(pack), find_takes(take)[0])
+    before = set(pack.iterdir())
+    with pytest.raises(ValueError, match="Unsafe filesystem path"):
+        render_recording(media, plan, tmp_path / alias / "new-output" / "result.mp4")
+    assert set(pack.iterdir()) == before
+    assert not media.encoded
+
+
 def test_cannot_export_over_inputs_or_into_source_folders(tmp_path):
     pack, take = _fixture(tmp_path)
     media = FakeMedia()
@@ -421,14 +509,14 @@ def test_rollback_failure_retains_previous_output_recovery_file(tmp_path, monkey
     plan = prepare_recording(media, read_pack(pack), find_takes(take)[0])
     destination = tmp_path / "out.mp4"
     destination.write_bytes(b"previous output")
-    original = os.replace
+    original = os.link
 
-    def replace_file(source, target):
+    def restore_file(source, target):
         if ".previous-" in Path(source).name:
             raise PermissionError("Synthetic rollback failure")
         return original(source, target)
 
-    monkeypatch.setattr(renderer.os, "replace", replace_file)
+    monkeypatch.setattr(renderer.os, "link", restore_file)
     with pytest.raises(OSError, match="previous output is retained"):
         render_recording(media, plan, destination, overwrite=True)
     backup, = tmp_path.glob(".out.mp4.previous-*")
@@ -554,6 +642,37 @@ def test_actual_preview_stream_copy_preserves_packets_and_starts_at_zero(
     samples = np.frombuffer(decoded.stdout, "<f4").reshape(-1, 2)
     assert np.max(np.abs(samples[2400:7200])) == 0
     assert np.mean(samples[12000:16800]) == pytest.approx(0.25, abs=0.001)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("rate,duration,frames", [
+    ("10", 1.0, 10), ("60000/1001", 1.001, 60),
+])
+def test_static_theora_mp4_export_reconstructs_duplicates_and_trailing_hold(
+    tmp_path, rate, duration, frames,
+):
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg and FFprobe are required for the integration fixture.")
+    media = MediaTools()
+    pack, take = _fixture(tmp_path, starts=(0.2,), duration=0.2)
+    (pack / "dub_video.mp4").unlink()
+    source = pack / "dub_video.ogv"
+    media.run([
+        media.ffmpeg, "-v", "error", "-y", "-f", "lavfi",
+        "-i", f"color=s=32x24:r={rate}:d={duration}",
+        "-an", "-c:v", "libtheora", "-q:v", "5", str(source),
+    ], "Creating static Theora fixture")
+    plan = prepare_recording(media, read_pack(pack), find_takes(take)[0])
+    target = tmp_path / "static-recording.mp4"
+    render_recording(media, plan, target)
+    stream = json.loads(media.run([
+        media.ffprobe, "-v", "error", "-select_streams", "v:0", "-count_frames",
+        "-show_entries", "stream=nb_read_frames,duration,avg_frame_rate",
+        "-of", "json", str(target),
+    ], "Reading reconstructed Theora frame count").stdout)["streams"][0]
+    assert int(stream["nb_read_frames"]) == frames
+    assert float(stream["duration"]) == pytest.approx(duration, abs=0.001)
+    assert media.probe(target).fps == pytest.approx(plan.fps, abs=0.001)
 
 
 @pytest.mark.integration

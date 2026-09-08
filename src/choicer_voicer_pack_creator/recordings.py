@@ -87,10 +87,16 @@ class _Budget:
 
 def _safe_path(path: Path, *, directory: bool = False) -> Path:
     """Reject links before resolving, including Windows junction/reparse ancestors."""
+    path = Path(path)
+    raw_components = path.parts[1:] if path.anchor else path.parts
+    if str(path).startswith(("\\\\?\\", "\\\\.\\")):
+        raise ValueError(f"Unsafe filesystem path: {path}")
     path = Path(os.path.abspath(path))
     if any(
-        ":" in part or _WINDOWS_RESERVED_NAME.fullmatch(part.split(".", 1)[0].rstrip(" "))
-        for part in path.parts[1:]
+        part.endswith((".", " "))
+        or any(ord(character) < 32 or character in '<>:"|?*' for character in part)
+        or _WINDOWS_RESERVED_NAME.fullmatch(part.split(".", 1)[0].rstrip(" "))
+        for part in (*raw_components, *path.parts[1:])
     ):
         raise ValueError(f"Unsafe filesystem path: {path}")
     for component in (*reversed(path.parents), path):
@@ -103,7 +109,7 @@ def _safe_path(path: Path, *, directory: bool = False) -> Path:
             raise ValueError(f"Links and reparse points are not allowed: {component}")
     if directory and not path.is_dir():
         raise ValueError(f"Folder does not exist: {path}")
-    return path
+    return path.resolve()
 
 
 def _entries(folder: Path, budget: _Budget) -> tuple[Path, ...]:

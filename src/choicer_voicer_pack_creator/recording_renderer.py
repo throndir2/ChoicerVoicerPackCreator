@@ -480,6 +480,17 @@ def _encode(
         else:
             input_options = []
             duration_options = ["-t", f"{plan.duration:.9f}"]
+            video_filter = "setpts=PTS-STARTPTS"
+            cadence = ["-fps_mode", "passthrough"]
+            if plan.video_codec == "theora":
+                # Empty Theora packets hold the previous picture but do not
+                # necessarily yield decoded frames, including at the video end.
+                video_filter += (
+                    f",tpad=stop_mode=clone:stop_duration={plan.duration:.9f}"
+                    f",fps=fps={plan.frame_rate}:start_time=0:round=near"
+                    f",trim=duration={plan.duration:.9f}"
+                )
+                cadence = ["-fps_mode", "cfr", "-r", plan.frame_rate]
             video_options = (
                 ["-c:v", "libopenh264", "-b:v", str(max(
                     2_000_000, int(width * height * plan.fps / 5),
@@ -488,8 +499,8 @@ def _encode(
                 ["-c:v", "mpeg4", "-q:v", "3", "-vtag", "mp4v"]
             )
             options = [
-                "-vf", f"setpts=PTS-STARTPTS,pad={width}:{height}:0:0,format=yuv420p",
-                *video_options, "-pix_fmt", "yuv420p", "-fps_mode", "passthrough",
+                "-vf", f"{video_filter},pad={width}:{height}:0:0,format=yuv420p",
+                *video_options, "-pix_fmt", "yuv420p", *cadence,
                 "-c:a", "aac", "-b:a", "192k",
             ]
             container = ["-movflags", "+faststart", "-f", "mp4"]
@@ -566,7 +577,7 @@ def _destination(plan: RecordingPlan, destination: Path, *, format: str) -> Path
     if destination.suffix.casefold() != suffix:
         raise ValueError(f"The {format} destination must have the {suffix} extension.")
     for root in (plan.pack.path, plan.take.path):
-        if destination.is_relative_to(root):
+        if destination.is_relative_to(_safe_path(root, directory=True)):
             raise ValueError("Save the rendered video outside the original pack and take folders.")
     for source in plan.snapshot.roots:
         path = Path(source)
@@ -580,6 +591,54 @@ def _destination(plan: RecordingPlan, destination: Path, *, format: str) -> Path
     if destination.exists() and not destination.is_file():
         raise ValueError(f"The destination is not a regular file: {destination}")
     return destination
+
+
+def _file_identity(path: Path) -> tuple[int, int, int, int]:
+    info = path.stat(follow_symlinks=False)
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _restore_output(recovery: Path, destination: Path) -> None:
+    try:
+        # Never restore over a file another writer created during publication.
+        os.link(recovery, destination)
+    except OSError as error:
+        raise OSError(
+            f"Could not restore {destination} without overwriting another file. "
+            f"The previous output is retained at {recovery}."
+        ) from error
+    recovery.unlink()
+
+
+def _claim_output(
+    destination: Path, expected: tuple[int, int, int, int], label: str,
+) -> Path:
+    if _file_identity(destination) != expected:
+        raise SourceChangedError(f"Another writer changed the export destination: {destination}")
+    claimed = destination.with_name(f".{destination.name}.{label}-{uuid.uuid4().hex}")
+    os.rename(destination, claimed)
+    # Checking before unlink/replace alone leaves a race. Claim the directory
+    # entry first, then check which file was actually moved before removing it.
+    if _file_identity(claimed) != expected:
+        _restore_output(claimed, destination)
+        raise SourceChangedError(f"Another writer replaced the export destination: {destination}")
+    return claimed
+
+
+def _rollback_output(
+    destination: Path, expected: tuple[int, int, int, int], backup: Path | None,
+) -> None:
+    try:
+        rejected = _claim_output(destination, expected, "rejected")
+    except (OSError, SourceChangedError) as error:
+        recovery = f" The previous output is retained at {backup}." if backup else ""
+        raise SourceChangedError(
+            "Recording publication failed, but the destination changed or cannot be safely "
+            f"rolled back. Any competing output is preserved.{recovery} {error}"
+        ) from error
+    if backup is not None:
+        _restore_output(backup, destination)
+    rejected.unlink()
 
 
 def render_recording(
@@ -616,6 +675,7 @@ def render_recording(
         if destination.exists() and not overwrite:
             raise FileExistsError(f"Destination exists; confirm overwrite first: {destination}")
         previous = SourceSnapshot.capture([destination]) if destination.exists() else None
+        previous_identity = _file_identity(destination) if previous is not None else None
         destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=".recording-", dir=destination.parent) as temporary:
             stage = Path(temporary)
@@ -647,38 +707,31 @@ def render_recording(
                     raise FileExistsError("The destination appeared during rendering; confirm overwrite.")
                 # Keep rollback outside the temporary tree: a failed restore must
                 # retain the previous output rather than delete its last copy.
-                backup = destination.with_name(f".{destination.name}.previous-{uuid.uuid4().hex}")
-                if previous is not None:
-                    os.link(destination, backup)
+                published_identity = _file_identity(staged)
+                backup = (
+                    _claim_output(destination, previous_identity, "previous")
+                    if previous_identity is not None else None
+                )
                 published = False
                 try:
-                    if previous is not None:
-                        os.replace(staged, destination)
-                    else:
-                        # Atomic no-clobber publication, even if another writer races this export.
-                        os.link(staged, destination)
+                    # Even an approved overwrite must not clobber a competing
+                    # file created after the old destination was claimed.
+                    os.link(staged, destination)
                     published = True
                     report("Validating published recording video...", 0.95)
                     _validate_output(media, plan, destination, format=format)
                     _verify_sources(plan)
+                    if _file_identity(destination) != published_identity:
+                        raise SourceChangedError(
+                            f"Another writer changed the published recording: {destination}"
+                        )
                 except BaseException:
-                    try:
-                        if published:
-                            if previous is not None:
-                                os.replace(backup, destination)
-                            else:
-                                destination.unlink()
-                    except OSError as error:
-                        raise OSError(
-                            f"Recording publication failed and could not be rolled back. "
-                            f"The previous output is retained at {backup}."
-                            if previous is not None else
-                            f"Recording validation failed; could not remove {destination}."
-                        ) from error
-                    if backup.exists():
-                        backup.unlink()
+                    if published:
+                        _rollback_output(destination, published_identity, backup)
+                    elif backup is not None:
+                        _restore_output(backup, destination)
                     raise
-                if backup.exists():
+                if backup is not None:
                     backup.unlink()
             report("Recording video ready.", 1.0)
             encoder = f"copy ({plan.video_codec})" if format == "preview" else plan.encoder
