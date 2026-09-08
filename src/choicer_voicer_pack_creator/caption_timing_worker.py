@@ -320,15 +320,18 @@ def _recognized_words(
             tokenizer, segment, times, probabilities, offset, token_offset=token_offset,
         )
         for word in aligned:
-            # DTW can assign preceding silence to a first word. Independently generated
-            # timestamp envelopes, not the supplied subtitle, constrain those spans.
-            first = max(previous_end, offset + start, word.start)
-            last = max(first, min(offset + end, word.end))
+            # Generated envelopes are approximate, not measured lexical boundaries.
+            # A long DTW span may include silence, but neither its length nor the
+            # envelope proves where speech starts. Flag uncertainty without clipping.
             probability = word.probability
-            if uncertain or last <= first or last - first > 1.4:
+            if (
+                uncertain or word.start < previous_end or word.end <= word.start
+                or word.end - word.start > 1.4
+                or word.end <= offset + start or word.start >= offset + end
+            ):
                 probability = min(probability, 0.2)
-            words.append(replace(word, start=first, end=last, probability=probability))
-            previous_end = last
+            words.append(replace(word, probability=probability))
+            previous_end = word.end
         token_offset += len(segment)
     return tuple(words)
 
