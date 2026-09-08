@@ -24,6 +24,31 @@ def test_new_projects_default_to_fast_video_profile() -> None:
     assert (restored.video_height, restored.video_fps) == (480, 30)
 
 
+def test_project_identity_is_distinct_and_persists_through_serialization():
+    project = PackProject()
+    assert project.pack_id != PackProject().pack_id
+    assert PackProject.from_dict(project.to_dict()).pack_id == project.pack_id
+    data = project.to_dict()
+    del data["pack_id"]
+    restored = PackProject.from_dict(data)
+    assert restored.pack_id and PackProject.from_dict(restored.to_dict()).pack_id == restored.pack_id
+
+
+@pytest.mark.parametrize("value", ["not-a-uuid", 123, [], {}])
+def test_project_identity_rejects_invalid_values(value):
+    with pytest.raises(ValueError, match="UUID"):
+        PackProject.from_dict({"schema_version": 1, "pack_id": value})
+
+
+@pytest.mark.parametrize(
+    "padding",
+    [[], [0], [0, 0, 0], [True, 0], [-1, 0], [3, 0], [float("nan"), 0], [10**400, 0]],
+)
+def test_segment_rejects_invalid_recording_padding(padding):
+    with pytest.raises(ValueError, match="Recording padding"):
+        Segment.from_dict({"start": 1, "end": 2, "recording_padding": padding})
+
+
 def test_saved_higher_quality_profile_is_preserved() -> None:
     project = PackProject(video_height=1080, video_fps=60)
     restored = PackProject.from_dict(project.to_dict())

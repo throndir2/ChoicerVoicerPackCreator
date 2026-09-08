@@ -168,7 +168,8 @@ def test_real_stdio_client_creates_reviews_exports_and_reimports_pack(tmp_path, 
             )
             assert Path(exported["zip_path"]).is_file()
             assert exported["validation"]["clip_count"] == 1
-            assert len(exported["file_hashes"]) == 7
+            assert len(exported["file_hashes"]) == 8
+            assert "_cvpc_metadata.json" in exported["file_hashes"]
             refused = await client.call_tool("export_pack", {
                 "output_parent": str(tmp_path / "output"), "expected_revision": saved["revision"],
             })
@@ -179,7 +180,9 @@ def test_real_stdio_client_creates_reviews_exports_and_reimports_pack(tmp_path, 
             assert validated["zip_valid"]
             imported = await call("import_pack", path=exported["pack_path"])
             assert imported["segments"][0]["audio_mode"] == "file"
-            assert not imported["segments"][0]["source_range_known"]
+            assert imported["segments"][0]["source_range_known"]
+            assert imported["segments"][0]["recording_padding"] is not None
+            assert imported["project"]["pack_id"] == saved["project"]["pack_id"]
             assert (await call("get_project"))["dirty"]
 
     anyio.run(exercise)

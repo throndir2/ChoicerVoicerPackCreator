@@ -274,6 +274,31 @@ def test_caption_alignment_returns_review_without_mutating_project(automation, m
     assert automation.get_project() == before
 
 
+@pytest.mark.parametrize("operation", ["caption", "move", "replace", "regenerate"])
+def test_manifest_recording_padding_follows_mcp_edits(automation, tmp_path, operation):
+    audio = tmp_path / "original.mp3"
+    replacement = tmp_path / "replacement.mp3"
+    audio.write_bytes(b"original")
+    replacement.write_bytes(b"replacement")
+    segment = Segment(
+        1, 3, "Line", ["Speaker"], "file", str(audio), recording_padding=(0.1, 0.15),
+    )
+    automation.access.current.project.segments.append(segment)
+    patch = {
+        "caption": {"caption": "Edited"},
+        "move": {"start": 2, "end": 4},
+        "replace": {"audio_path": str(replacement)},
+        "regenerate": {"audio_mode": "video"},
+    }[operation]
+    result = automation.edit_segments(
+        [SegmentPatch(id=segment.id, **patch)], [], automation.get_project()["revision"],
+    )
+    assert result["segments"][0]["recording_padding"] == (
+        [0.1, 0.15] if operation in {"caption", "move"} else None
+    )
+    assert audio.read_bytes() == b"original"
+
+
 def test_source_replacement_is_probed_and_invalid_paths_are_atomic(automation, tmp_path):
     automation.access.current.project.source_url = "https://www.youtube.com/watch?v=test"
     automation.access.current.project.caption_language = "en"

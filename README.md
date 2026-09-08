@@ -105,6 +105,7 @@ An exported pack contains:
 ```text
 My Pack/
 ├── _pack_info.ini
+├── _cvpc_metadata.json
 ├── icon.png
 ├── dub_video.ogv
 ├── _backing_track.mp3
@@ -126,6 +127,40 @@ dub_characters=["Speaker"]
 ```
 
 `dub_timestamps` values are seconds from the start of the video. Newly generated prompts receive physical head/tail silence, and their exported timestamp is moved earlier by the head-padding amount so synchronization remains exact.
+
+### App export manifest
+
+`_cvpc_metadata.json` is a versioned app manifest, separate from the game's INI/TXT
+metadata. It records the exporter name and **app version**, manifest schema version,
+stable pack and segment IDs, a unique export ID and UTC time, and SHA-256 hashes of
+every game file (excluding the manifest itself). Extracted scene packs receive new
+pack IDs and retain their parent pack ID; renaming, saving, cutting, and re-exporting
+the same project retain its identity.
+
+For known cuts, each segment records the exact unpadded In/Out range, actual head/tail
+padding, game trigger timestamp, and exported filenames. Times are relative to the
+exported video, not necessarily the original online video. Unknown imported cuts
+remain explicitly unknown. Verified manifests restore precise ranges on import while
+preserving the existing recordings and their playback alignment. Export padding
+settings and caption language are also retained.
+
+YouTube-derived packs include the original video's public canonical watch URL, with
+tracking, playlist, and seek parameters removed. This URL is included in the shared
+folder and ZIP. Local source paths, machine/user identifiers, analysis drafts, logs,
+and project history are never included. The manifest does not duplicate game captions,
+speakers, titles, authors, or readme text, and is not a substitute for saving the
+editable `.cvpack.json` project.
+
+The manifest schema, **not the exporter app version**, controls how it is read.
+Malformed, unsupported, or stale manifests produce an import warning; the app falls
+back to game metadata without applying the manifest's provenance or original cuts.
+Exports validate the manifest and full inventory before and after publication.
+Ordinary packs without a manifest remain supported. Hashes detect mismatched files,
+not authenticity: anyone can edit a manifest and recompute its hashes.
+
+JSON avoids the `.txt` clip discovery used by our Godot validator and the `.txt`/`.ini`
+discovery in our importer. This is not an in-game compatibility guarantee; actual
+ChoicerVoicer loading must also be checked when qualifying a release.
 
 ### Cutting video and creating scene projects
 
@@ -174,8 +209,8 @@ It does not require a system FFmpeg installation. Use
 The finished outputs are:
 
 ```text
-dist/v1.3.5/portable-<build-id>/Choicer Voicer Pack Creator/
-dist/v1.3.5/Choicer-Voicer-Pack-Creator-1.3.5-Windows-x64.zip
+dist/v1.3.6/portable-<build-id>/Choicer Voicer Pack Creator/
+dist/v1.3.6/Choicer-Voicer-Pack-Creator-1.3.6-Windows-x64.zip
 ```
 
 The script prints the exact generated application-folder path. Each rebuild uses a new path to avoid
@@ -800,8 +835,9 @@ and ZIP pass final validation.
    **File → Import Pack → ZIP** for an exported archive.
 2. Existing MP3 and PNG assets are preserved by default.
 3. Edit captions, speakers, or timeline positions.
-4. Existing packs store a trigger timestamp and padded recording, not the original spoken cut. To
-	regenerate one safely, mark the exact source-video In/Out range, click **Update Segment Timing**, and choose
+4. Packs with a valid app manifest restore the original spoken cut, so **Use source-video audio**
+	can explicitly regenerate it. Other packs store only a trigger timestamp and padded recording.
+	For those, mark the exact source-video In/Out range, click **Update Segment Timing**, and choose
 	**Yes** when asked whether to regenerate the prompt audio.
 5. Save as a `.cvpack.json` project, then export.
 
@@ -931,9 +967,9 @@ The source video's original mixed dialogue is never used as automatic backing.
 3. **Save Project As**, then **Export Pack + ZIP** into a new output directory.
 
 The existing dialogue text, speakers, trigger timestamps and imported prompt media are preserved.
-Do not start a new project or rerun transcription to repair backing. Imported packs cannot recover
-unsaved editor drafts or original unpadded cut boundaries that were never stored in the ZIP; they
-do recover the exported dialogue and recordings.
+Do not start a new project or rerun transcription to repair backing. Imported packs recover the
+exported dialogue and recordings, and valid app manifests also restore known unpadded cut boundaries.
+They cannot recover unsaved editor drafts or source information that was never stored in the ZIP.
 
 ## Validation levels
 
@@ -992,8 +1028,8 @@ with another compatible pair.
 .\Build-Portable.ps1
 ```
 
-The Windows application folder is written below `dist/v1.3.5/portable-<build-id>/`, with a
-shareable `Choicer-Voicer-Pack-Creator-1.3.5-Windows-x64.zip` beside it. The first build downloads
+The Windows application folder is written below `dist/v1.3.6/portable-<build-id>/`, with a
+shareable `Choicer-Voicer-Pack-Creator-1.3.6-Windows-x64.zip` beside it. The first build downloads
 about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. The stable sharing ZIP is not
 replaced until both the application folder and a clean ZIP extraction pass packaged smoke tests.
 Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or
