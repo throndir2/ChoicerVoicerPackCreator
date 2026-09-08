@@ -125,7 +125,7 @@ def test_workspace_menu_precedes_tabs_and_project_toolbar(
     assert 0 <= save_button.mapTo(workspace, QPoint(0, 0)).y() - tabs_bottom <= 12
     assert save_button.height() >= save_button.sizeHint().height()
     assert workspace.tools_menu.actions() == [
-        workspace.tasks_window.show_action, workspace.action_processing,
+        workspace.tasks_window.show_action, workspace.action_recordings, workspace.action_processing,
     ]
     assert workspace.action_backing in workspace.project_menu.actions()
     assert workspace.generate_backing_button.defaultAction() is workspace.action_backing
