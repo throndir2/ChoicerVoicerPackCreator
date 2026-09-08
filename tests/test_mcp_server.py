@@ -31,6 +31,11 @@ def test_tool_schemas_errors_and_headless_state(tmp_path):
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
             assert len(tools) == 26
             assert tools["get_project"].annotations.readOnlyHint
+            for name in ("analyze_video", "start_analysis"):
+                assert tools[name].inputSchema["properties"]["align_captions"]["default"] is False
+            denied_alignment = await client.call_tool("analyze_video", {"align_captions": True})
+            assert denied_alignment.isError
+            assert "allow_download=true" in denied_alignment.content[0].text
             assert "expected_revision" in tools["edit_segments"].inputSchema["required"]
             assert tools["update_project"].inputSchema["$defs"]["ProjectPatch"]["additionalProperties"] is False
             for name in ("new_project", "open_project", "import_pack"):
@@ -163,7 +168,8 @@ def test_real_stdio_client_creates_reviews_exports_and_reimports_pack(tmp_path, 
             )
             assert Path(exported["zip_path"]).is_file()
             assert exported["validation"]["clip_count"] == 1
-            assert len(exported["file_hashes"]) == 7
+            assert len(exported["file_hashes"]) == 8
+            assert "_cvpc_metadata.json" in exported["file_hashes"]
             refused = await client.call_tool("export_pack", {
                 "output_parent": str(tmp_path / "output"), "expected_revision": saved["revision"],
             })
@@ -174,7 +180,9 @@ def test_real_stdio_client_creates_reviews_exports_and_reimports_pack(tmp_path, 
             assert validated["zip_valid"]
             imported = await call("import_pack", path=exported["pack_path"])
             assert imported["segments"][0]["audio_mode"] == "file"
-            assert not imported["segments"][0]["source_range_known"]
+            assert imported["segments"][0]["source_range_known"]
+            assert imported["segments"][0]["recording_padding"] is not None
+            assert imported["project"]["pack_id"] == saved["project"]["pack_id"]
             assert (await call("get_project"))["dirty"]
 
     anyio.run(exercise)

@@ -48,6 +48,7 @@ from choicer_voicer_pack_creator.process_worker import (
     ProcessWorkerTimeout,
     run_process_worker,
 )
+from choicer_voicer_pack_creator.youtube_url import canonical_youtube_url
 
 METADATA_TIMEOUT = 60.0
 CAPTION_TIMEOUT = 30.0
@@ -229,28 +230,12 @@ def youtube_runtime_path() -> Path:
 
 @diagnostic_operation("youtube_url_validation")
 def normalize_youtube_url(value: str) -> str:
-    parsed = urlsplit(value.strip())
-    if (
-        parsed.scheme not in {"https", "http"}
-        or parsed.username or parsed.password or parsed.port
-    ):
-        raise YouTubeError("Enter an http(s) YouTube video URL without credentials or a port.")
-    host = (parsed.hostname or "").lower()
-    parts = parsed.path.strip("/").split("/")
-    video_id = ""
-    if host in {"youtu.be", "www.youtu.be"} and len(parts) == 1:
-        video_id = parts[0]
-    elif host in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}:
-        if parts == ["watch"]:
-            ids = parse_qs(parsed.query).get("v", [])
-            if len(ids) == 1:
-                video_id = ids[0]
-        elif len(parts) == 2 and parts[0] in {"shorts", "embed", "live"}:
-            video_id = parts[1]
-    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
-        raise YouTubeError("Enter a single YouTube video URL, not a channel or playlist URL.")
-    diagnostic_event("youtube_url_validated", host=host)
-    return f"https://www.youtube.com/watch?v={video_id}"
+    try:
+        url = canonical_youtube_url(value)
+    except ValueError as error:
+        raise YouTubeError(str(error)) from error
+    diagnostic_event("youtube_url_validated", host=urlsplit(url).hostname)
+    return url
 
 
 def select_caption_track(info: dict[str, Any], language: str) -> CaptionTrack | None:

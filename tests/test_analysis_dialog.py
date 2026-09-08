@@ -1542,7 +1542,8 @@ def test_source_labels_and_play_action_identify_the_selected_transcript(qtbot, t
     assert dialog.preview_button.isEnabled()
     assert dialog.preview_button.text() == "Play Selected YouTube Line"
     assert dialog.refined_status.text() == (
-        "1 YouTube rows. Music can hide pauses; speaker changes are not detected."
+        "1 YouTube rows. Quick pause draft; music can hide speech boundaries. "
+        "Use Align Words for word timing."
     )
     assert "'Use YouTube Transcript'" in dialog._recovery_hint(refine=True)
     previews = []

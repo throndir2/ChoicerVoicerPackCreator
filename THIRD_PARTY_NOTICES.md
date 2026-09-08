@@ -53,6 +53,46 @@ beside downloaded analysis components. Full immutable URLs and file inventory ar
 Whisper output is probabilistic review assistance. It is not represented as an exact transcript,
 speaker detector, or authoritative source boundary.
 
+## Optional high-accuracy local caption timing
+
+Caption timing uses **CTranslate2 4.8.1** (MIT), **Tokenizers 0.23.1** (Apache-2.0),
+and the NumPy/SoundFile runtime shared with audio processing. Native libraries and
+Python dependency metadata/notices are retained in the portable application, under
+`licenses/python/`. The two pinned wheels omit their own license texts; exact upstream
+license terms are retained in `resources/CTranslate2-MIT.txt`,
+`resources/Tokenizers-Attribution.txt`, and the shared Apache-2.0 license text.
+The portable build keeps CTranslate2's CPU DLLs but omits its unused cuDNN loader DLL;
+no CUDA installation is needed.
+
+The optional **Whisper large-v3-turbo** model is OpenAI's MIT-licensed model, converted
+to CTranslate2 FP16 format by the
+[`dropbox-dash/faster-whisper-large-v3-turbo`](https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo)
+repository (formerly `mobiuslabsgmbh/faster-whisper-large-v3-turbo`). It is loaded locally
+with CPU int8 computation. The model is **not included in the application ZIP**.
+Downloading missing files or repairing damaged files requires explicit permission.
+Verified installations work offline; audio is never uploaded by this feature.
+
+- Model revision: `0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf`
+- Weight size: 1,617,884,929 bytes, plus tokenizer/configuration files
+- Weight SHA-256: `e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da`
+- All immutable file URLs, sizes and hashes: `resources/caption-timing.json`
+- Model license: `resources/OpenAI-Whisper-MIT.txt`, copied beside installed weights
+
+Preprocessing, Unicode token grouping and word-boundary calculations adapt the
+[faster-whisper v1.2.1](https://github.com/SYSTRAN/faster-whisper/tree/v1.2.1) reference
+helpers; SYSTRAN's MIT notice and modifications are recorded in
+`resources/FasterWhisper-MIT.txt`. Neither faster-whisper nor its PyAV/FFmpeg
+decoder is shipped or required. The existing Tiny/Base whisper.cpp transcription
+option is unchanged.
+
+Alignment uses complete caption text in bounded audio contexts, plus independently
+recognized local speech. Uncertain words and unsupported/too-long captions remain
+review evidence, not authoritative transcript or timing ground truth.
+Trusted proposed cuts receive a separate local wording audit of their exact PCM ranges,
+using the same model instance. Missing, extra, or uncertain words flag the draft for
+review without rewriting caption text. This is not proof of intact phonemes and does not
+replace the exporter's encoded-media validation. Previously uncertain rows are not audited.
+
 ## YouTube import
 
 The application includes the pinned Python packages **yt-dlp 2026.8.19** (Unlicense),

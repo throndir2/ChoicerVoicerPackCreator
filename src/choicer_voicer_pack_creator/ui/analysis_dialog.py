@@ -259,6 +259,8 @@ class AnalysisWorker(JobWorker):
         *,
         source_captions: list[SourceCaption] | None = None,
         pause_threshold: float = 0.4,
+        align_captions: bool = False,
+        allow_alignment_download: bool = False,
     ) -> None:
         super().__init__()
         self.media = media
@@ -271,6 +273,8 @@ class AnalysisWorker(JobWorker):
         self.language = language
         self.source_captions = source_captions
         self.pause_threshold = pause_threshold
+        self.align_captions = align_captions
+        self.allow_alignment_download = allow_alignment_download
         self.worker_id = uuid.uuid4().hex[:12]
 
     def run(self) -> None:
@@ -295,6 +299,8 @@ class AnalysisWorker(JobWorker):
                     cancelled=self.isInterruptionRequested,
                     source_captions=self.source_captions,
                     pause_threshold=self.pause_threshold,
+                    align_captions=self.align_captions,
+                    allow_alignment_download=self.allow_alignment_download,
                 )
                 if self.isInterruptionRequested():
                     raise AnalysisCancelled("Video analysis was canceled")
@@ -347,6 +353,8 @@ class AnalysisDialog(QDialog):
         self.source_snapshot = source_snapshot
         self.background = background
         self._consent_callback: Callable[[bool], None] | None = None
+        self._alignment_consent_callback: Callable[[bool], None] | None = None
+        self._alignment_request: str | None = None
         if job_manager is not None:
             self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self._draft_revisions = {False: 0, True: 0}
@@ -529,7 +537,18 @@ class AnalysisDialog(QDialog):
         self.refine_button.clicked.connect(self.start_refinement)
         self.refine_button.setToolTip(
             "Create a separate draft from original imported captions, not your edited drafts. "
-            "Uses local audio only, independently of Whisper."
+            "Quick, model-free pause refinement. For whole-line caption timestamps, "
+            "use Align Words to locate the spoken words."
+        )
+        self.align_button = QPushButton("Align Words...")
+        self.align_button.setObjectName("alignYouTubeTimings")
+        self.align_button.setAutoDefault(False)
+        self.align_button.clicked.connect(self.start_alignment)
+        self.align_button.setToolTip(
+            "Higher-accuracy local word alignment using an optional ~1.5 GB model. "
+            "Keeps YouTube's text, corrects neighboring cuts together, and checks the proposed "
+            "audio ranges. Uncertain rows remain available but unchecked for review. "
+            "Does not change existing project segments or the Whisper draft."
         )
         if self.source_choice:
             splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -550,6 +569,7 @@ class AnalysisDialog(QDialog):
                     refine_options.addWidget(QLabel("Minimum pause"))
                     refine_options.addWidget(self.pause_spin)
                     refine_options.addWidget(self.refine_button)
+                    refine_options.addWidget(self.align_button)
                     panel_layout.addLayout(refine_options)
                 panel_layout.addWidget(table)
             splitter.addWidget(self.refined_panel)
@@ -561,6 +581,7 @@ class AnalysisDialog(QDialog):
             self.refined_panel.hide()
             self.pause_spin.hide()
             self.refine_button.hide()
+            self.align_button.hide()
             local_layout = QVBoxLayout(self.local_panel)
             self.local_status.setWordWrap(True)
             local_layout.addWidget(self.local_status)
@@ -620,7 +641,12 @@ class AnalysisDialog(QDialog):
             self.local_status.setText(f"Saved {self.local_source} draft: {len(review.local_rows)} rows.")
             if review.refined_rows:
                 self.refined_status.setText(
-                    f"Saved YouTube draft: {len(review.refined_rows)} rows."
+                    f"Saved YouTube draft: {len(review.refined_rows)} rows. "
+                    "Review timing notes in the Source column."
+                    if any(
+                        row.confidence is not None or "Review timing:" in row.source
+                        for row in review.refined_rows
+                    ) else f"Saved YouTube draft: {len(review.refined_rows)} rows."
                 )
         if not self.source_captions and not self.refined_table.rowCount():
             self.local_radio.setChecked(True)
@@ -828,6 +854,12 @@ class AnalysisDialog(QDialog):
         )
         if self.refinement_worker is not None:
             self.refine_button.setText("Refining YouTube...")
+        self.align_button.setEnabled(self.refine_button.isEnabled())
+        alignment_worker = self.refinement_worker if self.job_manager is not None else self.worker
+        self.align_button.setText(
+            "Aligning Words..." if alignment_worker is not None and alignment_worker.align_captions
+            else "Align Words..."
+        )
         self.pause_spin.setEnabled(
             (self.refinement_worker if self.job_manager is not None else self.worker) is None
             and not self._close_after_cancel
@@ -1028,9 +1060,108 @@ class AnalysisDialog(QDialog):
             return
         start(True)
 
+    def start_alignment(self) -> None:
+        running = self.refinement_worker if self.job_manager is not None else self.worker
+        if running is not None or self._close_after_cancel or self._pending_refine:
+            return
+        if not self.source_captions:
+            show_message(
+                self, "information", "No imported captions",
+                "Word alignment requires original YouTube captions. Reimport the video first.",
+            )
+            return
+        from choicer_voicer_pack_creator.caption_timing_runtime import CaptionTimingManager
+
+        try:
+            manager = CaptionTimingManager(self.data_root)
+        except (OSError, ValueError) as error:
+            diagnostic_exception("caption_timing_setup_unavailable", error)
+            report_processing(self, "refinement", "failed", str(error))
+            show_message(self, "critical", "Word alignment is unavailable", str(error))
+            return
+        self._commit_draft_editors()
+        request_revision = self._draft_revisions[True]
+        current = _current_dialog_request(self)
+        language = str(self.language_combo.currentData())
+        self._scan_canceled = False
+        self._pending_refine = True
+        request = uuid.uuid4().hex
+        self._alignment_request = request
+        self.cancel_button.setEnabled(True)
+        self._update_scan_button()
+
+        def start(accepted: bool) -> None:
+            if self._alignment_request != request:
+                diagnostic_event("caption_timing_stale_consent_ignored")
+                return
+            self._alignment_request = None
+            self._alignment_consent_callback = None
+            self._pending_refine = False
+            self._update_scan_button()
+            if accepted and current() and not self._close_after_cancel and not self._scan_canceled:
+                self._start_worker(
+                    use_whisper=False, refine=True, align_captions=True,
+                    allow_alignment_download=True, language=language,
+                )
+                self._run_revisions[True] = request_revision
+            else:
+                self.progress_label.setText("Word alignment not started; existing drafts kept.")
+                report_processing(
+                    self, "refinement", "cancelled",
+                    "Word alignment paused; existing drafts kept.",
+                )
+                self.cancel_button.setEnabled(
+                    self.worker is not None or self.refinement_worker is not None
+                )
+
+        def authorize(accepted: bool) -> None:
+            if self._alignment_request != request:
+                diagnostic_event("caption_timing_stale_confirmation_ignored")
+                return
+            if not accepted or not current() or self._close_after_cancel or self._scan_canceled:
+                start(False)
+                return
+            size_mib = manager.download_bytes / 1024**2
+            coordinator = getattr(_workspace_for(self), "setup_consent", None)
+            self._alignment_consent_callback = start
+            report_processing(
+                self, "refinement", "consent", "Waiting for word-alignment model permission.",
+            )
+            if coordinator is not None:
+                coordinator.request(
+                    self.project_id,
+                    {manager.component_key: f"{manager.model_name} timing model (up to {size_mib:.0f} MiB)"},
+                    start,
+                    lambda: current() and not self._scan_canceled and not self._close_after_cancel,
+                )
+            else:
+                show_message(
+                    self, "question", "Allow local word-alignment model setup?",
+                    f"Use {manager.model_name} to align the original caption words to audio, "
+                    "correct neighboring cuts, and check the resulting ranges?\n\n"
+                    f"Missing or invalid model files require up to {size_mib:.0f} MiB of "
+                    "checksum-verified downloads. Valid cached files are reused. "
+                    "Processing stays local; audio and captions are not uploaded. "
+                    "This can take several minutes. Uncertain rows will be unchecked for review.",
+                    start,
+                )
+
+        if self.refined_table.rowCount():
+            show_message(
+                self, "question", "Replace YouTube draft with aligned timings?",
+                "A successful alignment will replace only the YouTube draft, using the original "
+                "imported caption text. Existing project segments and the Whisper draft stay "
+                "unchanged. Edits made while waiting or processing are kept until you apply the "
+                "new result. Failed or canceled work keeps all drafts. Continue?",
+                authorize,
+            )
+        else:
+            authorize(True)
+
     def _start_worker(
         self, *, use_whisper: bool, refine: bool = False,
         model_key: str | None = None, language: str | None = None,
+        align_captions: bool = False, allow_alignment_download: bool = False,
     ) -> None:
         self._commit_draft_editors()
         self._run_revisions[refine] = self._draft_revisions[refine]
@@ -1039,6 +1170,7 @@ class AnalysisDialog(QDialog):
         self.cancel_button.setEnabled(True)
         target_status = self.refined_status if refine else self.local_status
         target_status.setText(
+            "Aligning and checking YouTube word timings..." if align_captions else
             "Measuring audio pauses for YouTube captions..." if refine else
             "Whisper is running..." if use_whisper else "Scanning audio activity..."
         )
@@ -1061,6 +1193,8 @@ class AnalysisDialog(QDialog):
             language or str(self.language_combo.currentData()),
             source_captions=list(self.source_captions) if refine else None,
             pause_threshold=self.pause_spin.value(),
+            align_captions=align_captions,
+            allow_alignment_download=allow_alignment_download,
         )
         if refine and self.job_manager is not None:
             self.refinement_worker = worker
@@ -1070,16 +1204,18 @@ class AnalysisDialog(QDialog):
             worker.configure_job(
                 self.job_manager, self.project_id,
                 "refinement" if refine else "analysis",
+                "Align YouTube word timings" if align_captions else
                 "Refine YouTube captions" if refine else
                 "Whisper transcription" if use_whisper else "Scan audio",
                 resource_class="cpu", read_paths=(self.video,),
-                resource_keys=("whisper-inference",) if use_whisper else (),
+                resource_keys=("whisper-inference",) if use_whisper or align_captions else (),
                 source_snapshot=self.source_snapshot,
                 priority=20,
             )
         diagnostic_event(
             "analysis_worker_start_requested", worker_id=worker.worker_id,
             use_whisper=use_whisper, refine=refine, model=worker.model_key, language=worker.language,
+            align_captions=align_captions,
         )
         self._update_scan_button()
         worker.progress.connect(self._progress)
@@ -1090,7 +1226,10 @@ class AnalysisDialog(QDialog):
         worker.finished.connect(worker.deleteLater)
         worker.start()
         register_job_detail(
-            self, worker, retry=self.start_refinement if refine else self.start_scan,
+            self, worker, retry=(
+                self.start_alignment if align_captions else
+                self.start_refinement if refine else self.start_scan
+            ),
             available=lambda: (
                 (self.refinement_worker if refine else self.worker) is None
                 and not self._close_after_cancel
@@ -1132,6 +1271,14 @@ class AnalysisDialog(QDialog):
         if not isinstance(value, AnalysisResult):
             self._failed("Analysis returned an unexpected result")
             return
+        timing = value.caption_timing
+        if timing is not None and (
+            value.refined_captions != list(timing.captions)
+            or len(timing.confidences) != len(timing.captions)
+            or len(timing.review_reasons) != len(timing.captions)
+        ):
+            self._failed("Word alignment returned inconsistent review data")
+            return
         refine = value.refined_captions is not None
         self._commit_draft_editors()
         revision = None if apply else self._run_revisions.pop(refine, None)
@@ -1160,12 +1307,26 @@ class AnalysisDialog(QDialog):
                 self._empty_result(refine=True)
                 return
             self._populate_rows(self.refined_table, [
-                AnalysisDraftRow(f"{cue.start:.3f}", f"{cue.end:.3f}", cue.text, cue.source)
-                for cue in value.refined_captions
+                AnalysisDraftRow(
+                    f"{cue.start:.3f}", f"{cue.end:.3f}", cue.text,
+                    (
+                        f"{cue.source} - Review timing: {timing.review_reasons[index]}"
+                        if timing is not None and timing.review_reasons[index] else cue.source
+                    ),
+                    timing.confidences[index] if timing is not None else None,
+                    not timing.review_reasons[index] if timing is not None else True,
+                )
+                for index, cue in enumerate(value.refined_captions)
             ])
             self.refined_status.setText(
                 f"{len(value.refined_captions)} YouTube rows. "
-                "Music can hide pauses; speaker changes are not detected."
+                + (
+                    f"{sum(bool(reason) for reason in timing.review_reasons)} need timing review "
+                    "(initially unchecked). See Source notes; audition boundaries before use."
+                    if timing is not None else
+                    "Quick pause draft; music can hide speech boundaries. "
+                    "Use Align Words for word timing."
+                )
             )
             self.refined_radio.setEnabled(bool(self.refined_table.rowCount()))
             if self.refined_radio.isEnabled():
@@ -1174,6 +1335,8 @@ class AnalysisDialog(QDialog):
             elif self.refined_radio.isChecked():
                 self.local_radio.setChecked(True)
             self.progress_label.setText(
+                "YouTube word alignment complete; the local draft is unchanged."
+                if timing is not None else
                 "YouTube refinement complete; the local draft is unchanged."
             )
             self.progress_bar.setRange(0, 1000)
@@ -1282,7 +1445,9 @@ class AnalysisDialog(QDialog):
     def _set_idle(self) -> None:
         self._update_scan_button()
         running = self.worker is not None or self.refinement_worker is not None
-        self.cancel_button.setEnabled(running and not self._scan_canceled)
+        self.cancel_button.setEnabled(
+            (running or self._alignment_request is not None) and not self._scan_canceled
+        )
         self.local_table.setEnabled(not self._close_after_cancel)
         self.refined_table.setEnabled(not self._close_after_cancel)
         self._update_selection_controls()
@@ -1476,6 +1641,16 @@ class AnalysisDialog(QDialog):
             coordinator = getattr(_workspace_for(self), "setup_consent", None)
             if coordinator is not None:
                 coordinator.cancel_request(self._consent_callback)
+        if self._alignment_request is not None:
+            self._alignment_request = None
+            self._pending_refine = False
+            callback, self._alignment_consent_callback = self._alignment_consent_callback, None
+            coordinator = getattr(_workspace_for(self), "setup_consent", None)
+            if coordinator is not None and callback is not None:
+                coordinator.cancel_request(callback)
+            self.progress_label.setText("Word alignment canceled; existing drafts kept.")
+            self.cancel_button.setEnabled(False)
+            self._update_scan_button()
         report_processing(self, "analysis", "cancelled", "Transcription paused; existing drafts kept.")
         if self.source_captions:
             report_processing(self, "refinement", "cancelled", "YouTube refinement paused.")

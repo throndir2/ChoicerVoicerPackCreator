@@ -393,3 +393,72 @@ def test_refinement_adds_source_handles_once_at_audio_edges():
     cue = _cue([("First ", 1), ("last.", 2.5)], start=1, end=3)
     row = refine_captions([cue], [(0.95, 3.04)], 5)[0]
     assert (row.start, row.end) == (0.85, 3.25)
+
+
+def test_json3_uses_shared_millisecond_boundaries_before_converting_to_seconds():
+    cues = parse_json3({"events": [
+        {"tStartMs": 18600, "dDurationMs": 1100, "segs": [
+            {"utf8": "First ", "tOffsetMs": 0},
+            {"utf8": "line", "tOffsetMs": 400},
+        ]},
+        {"tStartMs": 19700, "dDurationMs": 1000, "segs": [{"utf8": "Next line"}]},
+    ]}, 25, automatic=False, language="en")
+    assert cues[0].end == cues[1].start == 19.7
+    assert cues[0].fragments[1].start == 19.0
+    rows = refine_captions(cues, [], 25)
+    assert rows[0].start == pytest.approx(18.45)
+    assert rows[1].end == pytest.approx(20.95)
+    assert rows[0].end == rows[1].start
+    assert all("overlapping" not in cue.source for cue in rows)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("rounding", [0, 4e-15, 1e-10])
+def test_microscopic_overlap_shares_one_boundary_without_losing_outer_handles(reverse, rounding):
+    ranges = [(1, 2 + rounding), (2, 3)]
+    if reverse:
+        ranges.reverse()
+    originals = list(ranges)
+    padded = pad_source_ranges(ranges, 4)
+    left, right = sorted(padded)
+    assert left[0] == 0.85
+    assert right[1] == 3.25
+    assert left[1] == right[0]
+    assert ranges == originals
+    cues = [_cue([("Whole phrase", start)], start, end) for start, end in ranges]
+    rows = refine_captions(cues, [], 4)
+    assert all("overlapping" not in row.source for row in rows)
+    assert [row.fragments for row in rows] == [cue.fragments for cue in cues]
+    assert [(row.start, row.end) for row in rows] == padded
+
+
+@pytest.mark.parametrize("overlap", [0.001, 0.0005])
+def test_real_submillisecond_overlaps_stay_explicit_and_unpadded(overlap):
+    ranges = [(1, 2 + overlap), (2, 3)]
+    assert pad_source_ranges(ranges, 4) == ranges
+    cues = [_cue([("Whole phrase", start)], start, end) for start, end in ranges]
+    rows = refine_captions(cues, [], 4)
+    assert [(row.start, row.end) for row in rows] == ranges
+    assert all("overlapping" in row.source for row in rows)
+
+
+def test_precision_sharing_remains_inside_source_bounds():
+    ranges = [(0, 2 + 4e-15), (2, 4)]
+    padded = pad_source_ranges(ranges, 4)
+    assert padded[0][0] == 0
+    assert padded[1][1] == 4
+    assert padded[0][1] == padded[1][0]
+
+
+@pytest.mark.parametrize("ranges", [
+    [(0, 2 + 4e-15), (2, 3), (2.5, 4)],
+    [(0, 1.5), (1, 2 + 4e-15), (2, 4)],
+])
+def test_precision_sharing_does_not_extend_into_unchanged_truly_overlapping_rows(ranges):
+    padded = pad_source_ranges(ranges, 4)
+    for left, right in [(0, 1), (1, 2)]:
+        if ranges[left][1] - ranges[right][0] < 1e-7:
+            assert padded[left][1] <= padded[right][0]
+        else:
+            assert padded[left] == ranges[left]
+            assert padded[right] == ranges[right]
