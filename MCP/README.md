@@ -1,4 +1,9 @@
-# Use an assistant with MCP
+# MCP integration
+
+**This folder is for MCP-compatible assistant clients, not normal editor use.**
+To use the editor, run `Choicer Voicer Pack Creator.exe` in the parent application folder.
+Do not double-click `Choicer Voicer MCP.exe`: it is a server that waits for a client,
+not a chat application or a second editor launcher.
 
 Choicer Voicer Pack Creator includes a local [Model Context Protocol](https://modelcontextprotocol.io/)
 stdio server built with the official MCP Python SDK. A compatible assistant can inspect source
@@ -11,7 +16,7 @@ The client starts and stops the server process. **By default, starting the serve
 a visible editor.** The assistant and human review the same live project. No HTTP server, listening
 port, remote URL, authentication token, or separately started daemon is involved.
 
-1. Open **Help → LLM / MCP Help** to copy configuration for this installation.
+1. Copy the appropriate configuration below and replace the command with your absolute path.
 2. Merge the entry into your MCP client's existing configuration.
 3. **Save your work and close the existing editor before connecting in live mode.**
 4. Enable the server in the client. A new editor opens automatically.
@@ -23,10 +28,22 @@ than trying to work around that lock.
 
 ### Portable Windows build
 
-Extract the entire ZIP and keep `Choicer Voicer MCP.exe`, `Choicer Voicer Pack Creator.exe`,
-`_internal`, and `bin` in the same application folder. The MCP executable uses the console Windows
-subsystem so a client can pipe stdin/stdout; the normal editor remains windowed and is **not** a
-Windows stdio entry point.
+Extract the entire ZIP and keep this layout intact:
+
+```text
+Choicer Voicer Pack Creator\
+  Choicer Voicer Pack Creator.exe
+  MCP\
+    README.md
+    Choicer Voicer MCP.exe
+  _internal\
+  bin\
+```
+
+This guide is included as `MCP\README.md`. Do not move the MCP folder or its executable
+out of the application folder; it shares the editor's runtime and media tools.
+The MCP executable uses the console Windows subsystem so a client can pipe stdin/stdout;
+the normal editor remains windowed and is **not** a Windows stdio entry point.
 
 Typical `mcpServers` configuration (replace the command with your absolute path):
 
@@ -34,7 +51,7 @@ Typical `mcpServers` configuration (replace the command with your absolute path)
 {
   "mcpServers": {
     "choicer-voicer": {
-      "command": "C:\\Tools\\Choicer Voicer Pack Creator\\Choicer Voicer MCP.exe",
+      "command": "C:\\Tools\\Choicer Voicer Pack Creator\\MCP\\Choicer Voicer MCP.exe",
       "args": []
     }
   }
@@ -84,7 +101,7 @@ than the `mcpServers` wrapper above. For example, in `.vscode/mcp.json`:
   "servers": {
     "choicer-voicer": {
       "type": "stdio",
-      "command": "C:\\Tools\\Choicer Voicer Pack Creator\\Choicer Voicer MCP.exe",
+      "command": "C:\\Tools\\Choicer Voicer Pack Creator\\MCP\\Choicer Voicer MCP.exe",
       "args": []
     }
   }
@@ -96,12 +113,13 @@ selection, and data-retention policies still apply.
 
 ### Headless mode
 
-Append `"--headless"` to the `args` list for either launch method, or check **Run without an
-editor window** in the in-app help dialog before copying. Examples:
+Set the client configuration's `args` to `["--headless"]` for the portable executable.
+For a source configuration, append `"--headless"` to the existing `args` list.
+The equivalent commands are shown below for reference; the client should launch the process:
 
 ```powershell
 .\.venv\Scripts\python.exe -m choicer_voicer_pack_creator --mcp --headless
-& "C:\Tools\Choicer Voicer Pack Creator\Choicer Voicer MCP.exe" --headless
+& "C:\Tools\Choicer Voicer Pack Creator\MCP\Choicer Voicer MCP.exe" --headless
 ```
 
 Headless creates **no QApplication or window**. It has its own in-memory documents, independent of
@@ -455,7 +473,7 @@ credits and licenses. Format validation does not establish copyright permission.
 
 ## Troubleshooting
 
-- **No handshake on Windows:** configure `Choicer Voicer MCP.exe`, not the windowed editor EXE.
+- **No handshake on Windows:** configure `MCP\Choicer Voicer MCP.exe`, not the windowed editor EXE.
   Verify the complete portable folder was extracted, including `_internal` and `bin`.
 - **Editor already running:** save and close it, then reconnect. Live mode does not attach to it.
 - **Module/dependency not found:** select the Python environment where the project was installed,

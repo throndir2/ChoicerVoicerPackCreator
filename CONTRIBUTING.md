@@ -60,9 +60,10 @@ telemetry, but separate application processes do not share atomic reservations.
 
 ## MCP development
 
-See [docs/MCP.md](docs/MCP.md) and the bundled
+See [MCP/README.md](MCP/README.md) and the bundled
 `src/choicer_voicer_pack_creator/resources/mcp-help.md` for the user-facing contract. Keep those
-guides consistent with tool schemas and the standalone **Help → LLM / MCP Help** dialog.
+guides consistent with tool schemas. The portable package includes `MCP/README.md`
+beside the MCP executable; MCP setup is not exposed in the editor menus.
 
 - Use the official MCP Python SDK over stdin/stdout; send diagnostics only to stderr. Do not add
 	an HTTP listener or silently attach to an unrelated running editor.
@@ -80,9 +81,13 @@ guides consistent with tool schemas and the standalone **Help → LLM / MCP Help
 	no-upload behavior is not a promise about the assistant client.
 
 Windows packaging generates one PyInstaller analysis/shared runtime with two entry points:
-windowed `Choicer Voicer Pack Creator.exe` and console `Choicer Voicer MCP.exe`. Both must remain
-in one portable folder with `_internal` and `bin`. Collect the SDK's data and runtime distribution
+windowed `Choicer Voicer Pack Creator.exe` and console `MCP/Choicer Voicer MCP.exe`.
+Keep `MCP/README.md` beside the console entry point and retain the shared `_internal` and `bin`
+in the portable application root. Collect the SDK's data and runtime distribution
 metadata, and preserve the generated `licenses/python/` notices for MCP and its dependencies.
+The console entry point uses a native distlib launcher forwarding to the PyInstaller
+payload in `_internal`; both executables share that runtime. Retain the build-only
+distlib dependency and its bundled license notices.
 
 `scripts/smoke_packaged.py` checks the editor and launches the **bundled** MCP executable with
 `--headless` using the official SDK client: initialize, discover tools, and call `get_help`.

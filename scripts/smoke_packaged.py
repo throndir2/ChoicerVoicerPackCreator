@@ -15,6 +15,7 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from choicer_voicer_pack_creator.runtime_paths import application_directory
 from choicer_voicer_pack_creator.separation import write_json_atomic
 from choicer_voicer_pack_creator.updates import (
     EXECUTABLE,
@@ -79,7 +80,9 @@ def mcp_environment(environment: dict[str, str], executable: Path) -> dict[str, 
         )
     )
     isolated["PATH"] = os.pathsep.join(
-        str(path) for path in (executable.parent / "bin", system_root / "System32", system_root)
+        str(path) for path in (
+            application_directory(executable) / "bin", system_root / "System32", system_root
+        )
     )
     return isolated
 
@@ -130,6 +133,7 @@ async def smoke_mcp(executable: Path, environment: dict[str, str]) -> dict[str, 
 
 
 def smoke_separation(executable: Path) -> None:
+    app_dir = application_directory(executable)
     job = ROOT / "build" / "separation-smoke" / uuid.uuid4().hex
     job.mkdir(parents=True)
     try:
@@ -137,6 +141,7 @@ def smoke_separation(executable: Path) -> None:
         write_json_atomic(request, {"version": 1, "job_id": job.name, "smoke_test": True})
         completed = subprocess.run(
             [str(executable), "--separate-audio", str(request)],
+            env=mcp_environment(dict(os.environ), executable),
             check=False, timeout=60,
         )
         status_path = job / "status.json"
@@ -149,7 +154,7 @@ def smoke_separation(executable: Path) -> None:
             "onnxruntime": "1.26.0", "soundfile": "0.13.1", "qt_imported": False,
         }:
             raise RuntimeError(f"Unexpected packaged separation runtime: {report}")
-        resources = executable.parent / "_internal" / "choicer_voicer_pack_creator" / "resources"
+        resources = app_dir / "_internal" / "choicer_voicer_pack_creator" / "resources"
         manifest = json.loads((resources / "backing-separation.json").read_text())
         if manifest["model"]["sha256"] != (
             "68d0bf16428ef66e692cdff8a9ccf28f1ef3f69440d57e58605a4cc55fcc5e74"
@@ -157,13 +162,13 @@ def smoke_separation(executable: Path) -> None:
             raise RuntimeError("Packaged separation model provenance is incorrect")
         for name in ("StemSplit-MIT.txt", "Demucs-MIT.txt"):
             if not (resources / name).is_file() or not (
-                executable.parent / "licenses" / name
+                app_dir / "licenses" / name
             ).is_file():
                 raise RuntimeError(f"Missing separation license: {name}")
         for package in ("onnxruntime", "numpy", "soundfile", "cffi", "pycparser",
                         "flatbuffers", "protobuf", "packaging"):
             if not any(path.is_file() for path in (
-                executable.parent / "licenses" / package
+                app_dir / "licenses" / package
             ).rglob("*")):
                 raise RuntimeError(f"Missing separation dependency licenses: {package}")
         print("PACKAGED QT-FREE CPU SEPARATION + STREAMING AUDIO SMOKE PASSED")
@@ -172,6 +177,7 @@ def smoke_separation(executable: Path) -> None:
 
 
 def smoke_speaker_matching(executable: Path) -> None:
+    app_dir = application_directory(executable)
     job = ROOT / "build" / "speaker-smoke" / uuid.uuid4().hex
     job.mkdir(parents=True)
     try:
@@ -188,7 +194,7 @@ def smoke_speaker_matching(executable: Path) -> None:
             "qt_imported": False,
         }:
             raise RuntimeError(f"Packaged speaker-matching worker failed: {report}")
-        resources = executable.parent / "_internal" / "choicer_voicer_pack_creator" / "resources"
+        resources = app_dir / "_internal" / "choicer_voicer_pack_creator" / "resources"
         manifest = json.loads((resources / "speaker-matching.json").read_text())
         if manifest["model"]["sha256"] != (
             "e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012"
@@ -196,15 +202,15 @@ def smoke_speaker_matching(executable: Path) -> None:
             raise RuntimeError("Packaged speaker model provenance is incorrect")
         for name in ("WeSpeaker-Attribution.txt", "WeSpeaker-CC-BY-4.0.txt", "speaker-matching.json"):
             if not (resources / name).is_file() or not (
-                executable.parent / "licenses" / name
+                app_dir / "licenses" / name
             ).is_file():
                 raise RuntimeError(f"Missing speaker model attribution: {name}")
         if not any(path.is_file() for path in (
-            executable.parent / "licenses" / "kaldi-native-fbank"
+            app_dir / "licenses" / "kaldi-native-fbank"
         ).rglob("*")):
             raise RuntimeError("Missing kaldi-native-fbank license")
         if not (
-            executable.parent / "licenses" / "kaldi-native-fbank" / "KaldiNativeFbank-ThirdParty.txt"
+            app_dir / "licenses" / "kaldi-native-fbank" / "KaldiNativeFbank-ThirdParty.txt"
         ).is_file():
             raise RuntimeError("Missing kaldi-native-fbank native dependency notices")
         print("PACKAGED QT-FREE SPEAKER FILTERBANK + SUPERVISED WORKER SMOKE PASSED")
@@ -294,9 +300,15 @@ def main() -> int:
     executable = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else default_executable()
     if not executable.is_file():
         raise FileNotFoundError(executable)
-    mcp_executable = executable.with_name(MCP_NAME)
+    mcp_executable = executable.parent / "MCP" / MCP_NAME
     if not mcp_executable.is_file():
         raise FileNotFoundError(mcp_executable)
+    if not (mcp_executable.parent / "README.md").is_file():
+        raise RuntimeError("Packaged MCP README is missing")
+    if not (executable.parent / "_internal" / MCP_NAME).is_file():
+        raise RuntimeError("Packaged MCP runtime entry point is missing")
+    if executable.with_name(MCP_NAME).exists():
+        raise RuntimeError("The MCP launcher must not be beside the desktop executable")
     resources = executable.parent / "_internal" / "choicer_voicer_pack_creator" / "resources"
     if not (resources / "mcp-help.md").is_file():
         raise RuntimeError("Packaged MCP help is missing")

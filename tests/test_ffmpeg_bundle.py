@@ -101,3 +101,24 @@ def test_application_directory_ffmpeg_pair_precedes_path(
     ffmpeg, ffprobe = MediaTools._find_tool_pair()
     assert Path(ffmpeg) == (bundled / f"ffmpeg{suffix}").resolve()
     assert Path(ffprobe) == (bundled / f"ffprobe{suffix}").resolve()
+
+
+@pytest.mark.parametrize("entrypoint", ["MCP", "_internal"])
+def test_nested_frozen_mcp_finds_shared_ffmpeg_without_developer_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str,
+) -> None:
+    application = tmp_path / "Portable app ü"
+    bundled = application / "bin"
+    bundled.mkdir(parents=True)
+    suffix = ".exe" if sys.platform == "win32" else ""
+    for tool in ("ffmpeg", "ffprobe"):
+        (bundled / f"{tool}{suffix}").write_bytes(b"bundled")
+    executable = application / entrypoint / "Choicer Voicer MCP.exe"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(application / "_internal"), raising=False)
+    monkeypatch.setattr(sys, "executable", str(executable))
+    monkeypatch.setattr(sys, "argv", [str(executable)])
+    monkeypatch.setattr("choicer_voicer_pack_creator.media.shutil.which", lambda _name: None)
+    assert MediaTools._find_tool_pair() == (
+        str(bundled / f"ffmpeg{suffix}"), str(bundled / f"ffprobe{suffix}"),
+    )

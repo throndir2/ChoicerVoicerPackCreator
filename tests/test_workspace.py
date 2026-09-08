@@ -151,8 +151,8 @@ def test_workspace_groups_file_and_help_commands(workspace):
     assert [
         action for action in workspace.help_menu.actions() if not action.isSeparator()
     ] == [
-        workspace.action_mcp_help, workspace.updates_menu.menuAction(),
-        workspace.diagnostics_menu.menuAction(), workspace.action_about,
+        workspace.updates_menu.menuAction(), workspace.diagnostics_menu.menuAction(),
+        workspace.action_about,
     ]
     assert [
         action for action in workspace.updates_menu.actions() if not action.isSeparator()
@@ -168,8 +168,14 @@ def test_workspace_groups_file_and_help_commands(workspace):
         workspace.help_menu, workspace.updates_menu, workspace.diagnostics_menu,
     ):
         assert menu.toolTipsVisible()
+        assert not menu.actions()[0].isSeparator()
         assert not menu.actions()[-1].isSeparator()
     assert not any(action.text() == "Exit" for action in workspace.findChildren(QAction))
+    assert not any(
+        term in action.text().upper()
+        for action in workspace.findChildren(QAction)
+        for term in ("LLM", "MCP")
+    )
 
 
 def test_global_commands_survive_project_replacement_and_close(workspace, qtbot):

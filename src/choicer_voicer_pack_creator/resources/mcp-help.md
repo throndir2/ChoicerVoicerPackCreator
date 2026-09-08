@@ -1,4 +1,4 @@
-# LLM / MCP help
+# MCP setup and tool guide
 
 ## Connect an assistant
 
@@ -6,9 +6,10 @@ MCP lets a compatible client ask Choicer Voicer Pack Creator to inspect media,
 draft segments, edit a project, and export a validated pack. It is optional; the
 editor works without an assistant or model account.
 
-1. Copy the configuration below into your client's MCP settings, merging it with
-   any existing servers.
-2. **Save your work and close this editor before connecting in live mode.**
+1. Copy a configuration from `MCP\README.md` in the portable application or source
+   repository. Replace the command with your absolute
+   executable path and merge it into your client's existing MCP settings.
+2. **Save your work and close any existing editor before connecting in live mode.**
 3. Enable the server in your client. The client starts the process and a visible
    editor automatically. Ask the assistant to call `get_help` first.
 4. Review edits in that editor and save the editable project explicitly.
@@ -18,10 +19,12 @@ The transport is local **stdin/stdout**, not HTTP. There is no port to open,
 URL to visit, API key to enter here, or separate daemon to start. Protocol output
 owns stdout; diagnostics use stderr. Your client controls process lifetime.
 
-The portable configuration uses **Choicer Voicer MCP.exe**, the console
-executable beside the usual windowed **Choicer Voicer Pack Creator.exe**.
-Keep both files, `_internal`, and `bin` together. The receiving computer does not
-need Python. After moving the portable folder, copy configuration again.
+The portable configuration uses **MCP\Choicer Voicer MCP.exe**, in the `MCP`
+subfolder alongside its `README.md`. Keep the entire application folder intact,
+including the root **Choicer Voicer Pack Creator.exe**, `_internal`, and `bin`.
+The receiving computer does not need Python. Update the configured path after moving
+the portable folder. Do not double-click the MCP executable; it waits for a client
+and does not provide a chat prompt. For normal editor use, run the root editor executable.
 
 Source configuration uses the current Python executable with
 `-m choicer_voicer_pack_creator --mcp`. Install the project into that environment

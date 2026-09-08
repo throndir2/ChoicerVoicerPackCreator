@@ -22,7 +22,7 @@ SPEC.loader.exec_module(SMOKE)
 def test_mcp_environment_removes_source_python_and_developer_path(
     tmp_path: Path, path_key: str, root_key: str
 ) -> None:
-    executable = tmp_path / "portable app" / SMOKE.MCP_NAME
+    executable = tmp_path / "portable app" / "MCP" / SMOKE.MCP_NAME
     environment = {
         path_key: r"C:\Source\.venv\Scripts;C:\Developer\ffmpeg",
         "PYTHONPATH": r"C:\Source\src",
@@ -38,7 +38,7 @@ def test_mcp_environment_removes_source_python_and_developer_path(
     assert not {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"} & isolated.keys()
     assert "CHOICER_VOICER_SMOKE_REPORT" not in isolated
     assert isolated["PATH"].split(os.pathsep) == [
-        str(executable.parent / "bin"),
+        str(executable.parent.parent / "bin"),
         r"D:\Windows\System32",
         r"D:\Windows",
     ]
@@ -54,7 +54,7 @@ def test_mcp_environment_removes_source_python_and_developer_path(
 def test_packaged_mcp_smoke_initializes_lists_and_calls_help(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None
 ) -> None:
-    executable = tmp_path / SMOKE.MCP_NAME
+    executable = tmp_path / "MCP" / SMOKE.MCP_NAME
     calls = []
 
     @asynccontextmanager
@@ -135,11 +135,13 @@ def test_main_checks_editor_youtube_mcp_both_separation_entrypoints_and_optional
 ) -> None:
     application = tmp_path / "portable app"
     executable = application / SMOKE.EXECUTABLE
-    mcp_executable = application / SMOKE.MCP_NAME
+    mcp_executable = application / "MCP" / SMOKE.MCP_NAME
     resources = application / "_internal" / "choicer_voicer_pack_creator" / "resources"
     for path in (
         executable,
         mcp_executable,
+        application / "MCP" / "README.md",
+        application / "_internal" / SMOKE.MCP_NAME,
         application / "bin" / "ffmpeg.exe",
         application / "bin" / "ffprobe.exe",
         resources / "mcp-help.md",
@@ -214,12 +216,14 @@ def test_main_checks_editor_youtube_mcp_both_separation_entrypoints_and_optional
 
 
 @pytest.mark.parametrize("failure", ["", "runtime", "provenance", "license"])
+@pytest.mark.parametrize("mcp", [False, True])
 def test_speaker_smoke_checks_native_worker_provenance_and_notices(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, mcp: bool,
 ) -> None:
-    executable = tmp_path / "app" / SMOKE.EXECUTABLE
-    resources = executable.parent / "_internal" / "choicer_voicer_pack_creator" / "resources"
-    notices = executable.parent / "licenses"
+    application = tmp_path / "app"
+    executable = application / "MCP" / SMOKE.MCP_NAME if mcp else application / SMOKE.EXECUTABLE
+    resources = application / "_internal" / "choicer_voicer_pack_creator" / "resources"
+    notices = application / "licenses"
     resources.mkdir(parents=True)
     (notices / "kaldi-native-fbank").mkdir(parents=True)
     for name in ("WeSpeaker-Attribution.txt", "WeSpeaker-CC-BY-4.0.txt", "speaker-matching.json"):

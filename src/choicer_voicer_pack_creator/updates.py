@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from choicer_voicer_pack_creator import __version__
+from choicer_voicer_pack_creator.runtime_paths import application_directory
 
 REPOSITORY = "throndir2/ChoicerVoicerPackCreator"
 RELEASES_URL = f"https://github.com/{REPOSITORY}/releases"
@@ -335,7 +336,7 @@ def read_portable_manifest(root: Path, expected_version: str | None = None) -> d
 def installation_directory() -> Path | None:
     if sys.platform != "win32" or not getattr(sys, "frozen", False):
         return None
-    return Path(sys.executable).absolute().parent
+    return application_directory()
 
 
 def verify_installation(

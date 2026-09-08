@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import io
 import json
 import os
 import shutil
@@ -12,6 +13,7 @@ import uuid
 import zipfile
 from datetime import UTC, datetime
 from importlib import metadata
+from importlib.resources import files
 from pathlib import Path
 from textwrap import dedent
 
@@ -27,6 +29,7 @@ DIST = ROOT / "dist" / f"v{APP_VERSION}"
 BUILD = ROOT / "build" / f"pyinstaller-v{APP_VERSION}"
 APP_NAME = "Choicer Voicer Pack Creator"
 MCP_NAME = "Choicer Voicer MCP"
+MCP_DIRECTORY = "MCP"
 FFMPEG_STAGE = ROOT / "build" / "ffmpeg-windows-x64-562ea50b4f2d213e"
 LATEST_BUILD_MANIFEST = DIST / "latest-portable.json"
 PENDING_BUILD_MANIFEST = DIST / "pending-portable.json"
@@ -172,6 +175,11 @@ def _write_spec() -> Path:
         import sys
         from pathlib import Path
 
+        # The native MCP launcher adds its own archive path before the user's arguments.
+        # Normalize these before freeze_support and the Qt-free worker dispatchers.
+        if sys.argv[1:2] == ["--cvpc-mcp-launcher"]:
+            del sys.argv[1:3]
+
         # Spawned inference must enter its target before automatic Qt runtime hooks.
         multiprocessing.freeze_support()
 
@@ -282,6 +290,8 @@ def _write_spec() -> Path:
                 pyz, scripts_for(entrypoints[1]), [],
                 exclude_binaries=True,
                 name={MCP_NAME!r},
+                # This console payload is installed inside the shared runtime directory.
+                contents_directory=".",
                 console=True,
                 debug=False,
                 strip=False,
@@ -300,10 +310,34 @@ def _write_spec() -> Path:
     return spec
 
 
+def _assemble_mcp(app_dir: Path) -> None:
+    """Use distlib's portable native launcher, not an unsupported parent contents directory."""
+    payload = app_dir / f"{MCP_NAME}.exe"
+    payload.replace(app_dir / "_internal" / payload.name)
+    destination = app_dir / MCP_DIRECTORY
+    destination.mkdir()
+    # distlib resolves <launcher_dir> against the EXE, not the client's working directory.
+    # Its standard Windows launcher preserves stdio, waits, and forwards the exit status.
+    shebang = (
+        f'#!"<launcher_dir>\\..\\_internal\\{MCP_NAME}.exe" --cvpc-mcp-launcher\n'
+    ).encode()
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr("__main__.py", "")
+    (destination / payload.name).write_bytes(
+        files("distlib").joinpath("t64.exe").read_bytes() + shebang + archive.getvalue()
+    )
+    shutil.copy2(ROOT / MCP_DIRECTORY / "README.md", destination / "README.md")
+
+
 def _copy_mcp_licenses(app_dir: Path) -> None:
     _copy_python_licenses(
         app_dir, _mcp_distribution_names(), "MCP SDK and Python dependencies",
         "The local stdio server uses the official MCP Python SDK.",
+    )
+    _copy_python_licenses(
+        app_dir, ["distlib"], "MCP native launcher",
+        "The portable MCP entry point uses distlib's native Windows console launcher.",
     )
 
 
@@ -359,7 +393,7 @@ def _copy_python_licenses(
                     destination / filename,
                 )
                 copied += 1
-        if name in {"mcp", *CAPTION_TIMING_LICENSES} and not copied:
+        if name in {"mcp", "distlib", *CAPTION_TIMING_LICENSES} and not copied:
             raise RuntimeError(f"The installed {name} package does not provide its license file")
         notices.append(
             f"| {distribution.metadata['Name']} | {distribution.version} | "
@@ -402,13 +436,12 @@ def build_candidate() -> int:
     for name in (APP_NAME, MCP_NAME):
         if not (app_dir / f"{name}.exe").is_file():
             raise RuntimeError(f"PyInstaller did not produce {name}.exe")
+    _assemble_mcp(app_dir)
     _copy_tree_streamed(FFMPEG_STAGE / "bin", app_dir / "bin")
     shutil.copytree(FFMPEG_STAGE / "licenses", app_dir / "licenses", dirs_exist_ok=True)
     shutil.copy2(FFMPEG_STAGE / "THIRD_PARTY_NOTICES.md", app_dir / "THIRD_PARTY_NOTICES.md")
     shutil.copy2(ROOT / "LICENSE", app_dir / "LICENSE.txt")
     shutil.copy2(ROOT / "README.md", app_dir / "README.md")
-    (app_dir / "docs").mkdir(exist_ok=True)
-    shutil.copy2(ROOT / "docs" / "MCP.md", app_dir / "docs" / "MCP.md")
     _copy_mcp_licenses(app_dir)
     _copy_caption_timing_licenses(app_dir)
     shutil.copy2(
@@ -497,7 +530,9 @@ def build_candidate() -> int:
         "build_id": build_id,
         "application_directory": app_dir.relative_to(ROOT).as_posix(),
         "executable": (app_dir / f"{APP_NAME}.exe").relative_to(ROOT).as_posix(),
-        "mcp_executable": (app_dir / f"{MCP_NAME}.exe").relative_to(ROOT).as_posix(),
+        "mcp_executable": (
+            app_dir / MCP_DIRECTORY / f"{MCP_NAME}.exe"
+        ).relative_to(ROOT).as_posix(),
         "candidate_archive": candidate_archive.relative_to(ROOT).as_posix(),
         "archive": stable_archive.relative_to(ROOT).as_posix(),
     }
@@ -528,8 +563,14 @@ def promote_candidate(expected_build_id: str) -> int:
         or not mcp_executable.is_file()
     ):
         raise RuntimeError("Pending portable build is incomplete")
-    if mcp_executable != executable.with_name(f"{MCP_NAME}.exe"):
-        raise RuntimeError("The MCP executable must share the editor's application folder")
+    if mcp_executable != executable.parent / MCP_DIRECTORY / f"{MCP_NAME}.exe":
+        raise RuntimeError("The MCP executable must be in the editor's MCP subfolder")
+    if (
+        not (mcp_executable.parent / "README.md").is_file()
+        or not (executable.parent / "_internal" / f"{MCP_NAME}.exe").is_file()
+        or (executable.parent / f"{MCP_NAME}.exe").exists()
+    ):
+        raise RuntimeError("Pending portable build has an incomplete MCP launcher layout")
 
     backup = DIST / f".{stable_archive.name}.previous-{expected_build_id}"
     stable_existed = stable_archive.is_file()

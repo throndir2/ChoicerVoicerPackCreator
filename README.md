@@ -268,13 +268,13 @@ older `portable-*` generation folders can be deleted when no copy of the app is 
 This is a **portable application folder**, not an installer. To use or share it:
 
 1. Extract the complete ZIP; do not run the executable from inside the ZIP viewer.
-2. Keep the extracted directory together, including both EXEs and its `bin` and `_internal`
+2. Keep the extracted directory together, including its `MCP`, `bin`, and `_internal`
 	directories.
 3. Run `Choicer Voicer Pack Creator.exe`.
 
-`Choicer Voicer MCP.exe` is the separate **console** entry point for assistant clients; the normal
-editor EXE stays windowed. Both share one bundled runtime. Let an MCP client launch the console
-executable rather than double-clicking it.
+The optional assistant integration is in the `MCP` folder, with its executable and `README.md`.
+It is not needed for normal editor use. Let an MCP client launch that executable rather than
+double-clicking it.
 
 The receiving computer does not need Python, FFmpeg, FFprobe, Godot, administrator access, or an
 installation step. The folder can be moved or deleted as a unit. The app stores recent-project,
@@ -338,29 +338,11 @@ py -3.12 -m venv .venv
 
 If `py` is unavailable, invoke your installed Python executable directly.
 
-## Use an LLM / MCP assistant
+## MCP integration
 
-Open **Help → LLM / MCP Help** for a copyable client configuration and an offline safety guide.
-See [docs/MCP.md](docs/MCP.md) for portable/source configuration, VS Code's configuration shape,
-tool examples, and troubleshooting.
-
-- The client starts/stops a **local stdio** server; there is no HTTP port or separate daemon.
-- **Live editor is the default.** The server opens a visible editor automatically. Save and close
-	an already-running editor before connecting: it does not attach to that window, and the
-	single-instance lock rejects a second visible editor.
-- Opt into `--headless` for an independent in-memory project with no QApplication/window.
-	Save explicitly before disconnecting, and never edit the same project file concurrently.
-- Source entry points are `python -m choicer_voicer_pack_creator --mcp` and
-	`choicer-voicer-mcp`; packaged clients use the sibling `Choicer Voicer MCP.exe`.
-- **Preview audio/images and other tool results may be sent to your client's model provider.**
-	Local stdio is not a local-only AI guarantee. Unlike optional local ASR, assistant previews
-	can leave the machine.
-
-Assistant output is review evidence, not authoritative captions, speaker identity, or timing.
-Review against the source and respect media permissions and author credits. The editor supports
-YouTube import and local backing-track separation, but these MCP tools do not expose those
-workflows yet. Use the editor for those operations, then save and open the project through MCP,
-or reference prepared local assets. The MCP tools also do not provide OCR or wiki/dialogue search.
+See [MCP/README.md](MCP/README.md) for client configuration, tool usage, privacy information,
+and troubleshooting. The portable package includes this guide at `MCP\README.md`, beside
+`MCP\Choicer Voicer MCP.exe`. MCP setup is not part of the editor's menus.
 
 ## Create a pack
 
@@ -421,7 +403,7 @@ and **ZIP**. **File** also contains open/recent projects and the active project'
 commands. **Project** contains video analysis and backing-track generation; **Segments** contains
 segment editing and preview commands. **Tools > Tasks** and **Help** apply to the whole application.
 **Help → Updates** groups update commands and preferences, and **Help → Diagnostics** groups log
-collection commands; MCP help and About remain directly under Help.
+collection commands; **About** remains directly under **Help**.
 
 Each tab has a compact **Save / Export / Analyze** toolbar above the video in the left pane,
 leaving the full workspace height available to the right-side panels. Its commands and the
