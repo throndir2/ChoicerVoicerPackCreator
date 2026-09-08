@@ -31,6 +31,8 @@ dependencies = [
   "soundfile==0.13.1",
   "kaldi-native-fbank==1.22.3",
   "flatbuffers==25.12.19",
+  "ctranslate2==4.8.1",
+  "tokenizers==0.23.1",
 ]
 
 [project.optional-dependencies]

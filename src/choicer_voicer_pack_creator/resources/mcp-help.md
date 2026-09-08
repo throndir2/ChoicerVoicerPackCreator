@@ -64,6 +64,14 @@ the client stops the process.**
   Whisper transcription is off by default and requires explicit
   `allow_download=true`, even when cached components may only need repair.
   `language` accepts `auto` or a two-/three-letter lowercase code such as `en`.
+- For a project with original YouTube captions, `analyze_video` or `start_analysis`
+  with `align_captions=true` uses the optional high-accuracy local timing model
+  (approximately 1.5 GB; explicit `allow_download=true` is required).
+  It preserves caption text and returns `refined_captions` plus `caption_timing`
+  arrays for captions, confidences, and review reasons. Nonempty `review_reasons`
+  require manual review. Audition the ranges before applying them; nothing is
+  added automatically. In the analysis dialog, `alignYouTubeTimings` opens
+  **Align Words...** and the same model-consent flow.
 - Use `get_frame`, bounded `preview_audio`, and `preview_segment` to inspect
   evidence. Segment preview follows the exporter's prompt-audio behavior.
 - Submit metadata with `update_project` or segment changes with `edit_segments`.

@@ -487,7 +487,7 @@ def test_analysis_job_keeps_submitted_snapshot_without_applying_stale_result(
     before = in_worker(qtbot, automation.get_project)
     release = threading.Event()
 
-    def analyze(frozen, *args):
+    def analyze(frozen, *args, **_kwargs):
         snapshot = frozen.access.snapshot()
         while not release.wait(0.01):
             args[-1]()  # Exercise the scheduler's cancellation callback.
@@ -535,7 +535,7 @@ def test_queued_processing_rejects_assets_changed_since_submission(
         )
         for _ in range(window.job_manager.limits["cpu"])
     ]
-    monkeypatch.setattr(PackAutomation, "analyze", lambda *_args: processed.set())
+    monkeypatch.setattr(PackAutomation, "analyze", lambda *_args, **_kwargs: processed.set())
     jobs = LiveJobs(bridge)
     bound = in_worker(qtbot, automation.for_project)
     try:

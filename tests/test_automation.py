@@ -234,6 +234,46 @@ def test_analysis_requires_download_consent_before_work(automation):
         automation.analyze(True, False, "balanced", "tiny", "auto", lambda *_: None, lambda: False)
 
 
+def test_caption_alignment_requires_consent_and_source_evidence(automation):
+    with pytest.raises(ValueError, match="allow_download=true"):
+        automation.analyze(
+            False, False, "balanced", "base", "en", lambda *_: None, lambda: False,
+            align_captions=True,
+        )
+    with pytest.raises(ValueError, match="original imported YouTube captions"):
+        automation.analyze(
+            False, True, "balanced", "base", "en", lambda *_: None, lambda: False,
+            align_captions=True,
+        )
+
+
+def test_caption_alignment_returns_review_without_mutating_project(automation, monkeypatch):
+    from choicer_voicer_pack_creator import automation as module
+    from choicer_voicer_pack_creator.analysis import AnalysisResult, detect_hardware
+    from choicer_voicer_pack_creator.caption_timing_types import CaptionTimingResult
+
+    cue = SourceCaption(1, 2, "Original words", "YouTube")
+    automation.access.current.project.source_captions = [cue]
+    before = automation.get_project()
+    timing = CaptionTimingResult((cue,), (None,), ("Opening word uncertain",))
+    calls = []
+
+    def analyze(*_args, **kwargs):
+        calls.append(kwargs)
+        return AnalysisResult([], 0, 0, None, None, None, detect_hardware(), [cue], timing)
+
+    monkeypatch.setattr(module, "analyze_video", analyze)
+    result = automation.analyze(
+        False, True, "balanced", "base", "en", lambda *_: None, lambda: False,
+        align_captions=True,
+    )
+    assert calls[0]["source_captions"] == [cue]
+    assert calls[0]["align_captions"]
+    assert calls[0]["allow_alignment_download"]
+    assert result["caption_timing"]["review_reasons"] == ("Opening word uncertain",)
+    assert automation.get_project() == before
+
+
 def test_source_replacement_is_probed_and_invalid_paths_are_atomic(automation, tmp_path):
     automation.access.current.project.source_url = "https://www.youtube.com/watch?v=test"
     automation.access.current.project.caption_language = "en"

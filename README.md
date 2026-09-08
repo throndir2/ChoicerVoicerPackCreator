@@ -649,6 +649,35 @@ suggested boundary: this pass measures audio energy, not speaker identity, so mu
 hide pauses and two speakers without a pause can still share a row. It does not correct
 misrecognized words, perform forced alignment, or separate overlapping voices.
 
+For more accurate cuts, choose **Align Words...** in the **YouTube** panel. This optional
+pass uses a larger local Whisper model to align the original caption words against audio
+with neighboring-caption context. It corroborates the alignment with independent recognition,
+corrects shared boundaries together, adds bounded real-source audio margins, and recognizes
+the proposed cuts again to flag missing opening/closing words or neighboring speech. Caption
+text is preserved; the independent transcript is evidence, not replacement text. This is
+especially useful for creator captions that contain only whole-line display timestamps.
+
+The first use requests permission for approximately 1.5 GB of checksum-verified model files.
+Valid cached files are reused; permission also covers repairing invalid components. The model
+is not included in the portable ZIP. Processing is CPU-based, stays local, and may take several
+minutes. It has its own cancellable task, shares the inference resource with ordinary Whisper,
+and requires enough available memory to leave room for the editor and operating system.
+No audio or captions are uploaded.
+
+Uncertain rows remain in the draft with **Review timing** notes in **Source**, but start
+unchecked. Audition and adjust them before checking them for use. Recognition and confidence
+scores cannot guarantee that every syllable is intact; translations, overlapping voices,
+unusual names, repeated words, long captions, and unsupported alignment can require manual
+review. Continuous sentences are not automatically joined across potential speaker changes.
+Both quick refinement and alignment leave original caption evidence and existing project
+segments untouched. Replacing a completed draft requires confirmation; edits made while
+alignment is waiting or running are kept until the new result is explicitly applied. Saved
+drafts retain corrected boundaries, review notes, confidence, and checked states.
+
+**Export head/tail padding adds silence**, not missing source audio. Use corrected In/Out
+boundaries to recover clipped words; increasing export padding alone cannot fix an early
+ending or late start.
+
 Click **Use YouTube Transcript** or **Use Whisper Transcript** directly below the
 draft you want. Both buttons remain visible; you do not need to select that source first.
 Each button is enabled when its draft is ready and at least one row is checked.
