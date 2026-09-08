@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from uuid import uuid4
 
@@ -197,6 +198,38 @@ def _assert_stopped(pids):
     while any(_is_running(pid) for pid in pids) and time.monotonic() < until:
         time.sleep(0.05)
     assert not any(_is_running(pid) for pid in pids)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("callback_failure", [False, True])
+def test_owned_subprocess_reaps_before_joining_readers_and_closing_pipes(cancel, callback_failure):
+    callbacks = []
+    error = ValueError("reader join failed")
+
+    def on_reaped():
+        assert process.poll() is not None
+        assert not process.stdout.closed and not process.stderr.closed
+        callbacks.append(True)
+        if callback_failure:
+            raise error
+
+    expected = (
+        pytest.raises(ValueError, match="reader join failed") if callback_failure
+        else pytest.raises(OperationCancelled) if cancel else nullcontext()
+    )
+    with expected, process_worker.owned_subprocess(
+        [sys.executable, "-u", "-c", "import time; print('ready'); time.sleep(60)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        on_reaped=on_reaped,
+    ) as process:
+        assert process.stdout.readline().rstrip(b"\r\n") == b"ready"
+        if cancel:
+            raise OperationCancelled("Operation cancelled")
+    assert callbacks == [True]
+    assert process.poll() is not None
+    assert process.stdout.closed and process.stderr.closed
+    if callback_failure and cancel:
+        assert isinstance(error.__context__, OperationCancelled)
 
 
 @pytest.mark.parametrize("mode", ["capture", "video-progress"])

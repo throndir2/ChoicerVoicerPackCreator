@@ -16,6 +16,7 @@ from array import array
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from choicer_voicer_pack_creator.diagnostics import (
     diagnostic_event,
@@ -23,6 +24,7 @@ from choicer_voicer_pack_creator.diagnostics import (
     diagnostic_operation,
     diagnostic_text,
 )
+from choicer_voicer_pack_creator.export_resources import current_ffmpeg_threads
 from choicer_voicer_pack_creator.operations import (
     OperationCancelled,
     check_cancelled,
@@ -70,6 +72,50 @@ class DecodedAudioStats:
     leading_quiet: float
     trailing_quiet: float
     has_activity: bool
+
+
+def _read_audio_samples(
+    stream: BinaryIO, threshold: int,
+) -> tuple[int, int | None, int | None]:
+    count = 0
+    first = last = None
+    remainder = b""
+    while chunk := stream.read(64 * 1024):
+        chunk = remainder + chunk
+        end = len(chunk) - len(chunk) % 2
+        remainder = chunk[end:]
+        samples = array("h")
+        samples.frombytes(chunk[:end])
+        if sys.byteorder != "little":
+            samples.byteswap()
+        if first is None:
+            first = next(
+                (count + index for index, value in enumerate(samples) if abs(value) >= threshold),
+                None,
+            )
+        active_end = next(
+            (
+                count + len(samples) - 1 - index
+                for index, value in enumerate(reversed(samples)) if abs(value) >= threshold
+            ),
+            None,
+        )
+        if active_end is not None:
+            last = active_end
+        count += len(samples)
+    if remainder:
+        raise MediaError("Decoded audio ended with an incomplete PCM sample")
+    return count, first, last
+
+
+def _decode_thread_options() -> tuple[list[str], list[str]]:
+    threads = current_ffmpeg_threads()
+    if threads is None:
+        return [], []
+    return (
+        ["-filter_threads", str(threads), "-filter_complex_threads", str(threads)],
+        ["-threads", str(threads)],
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,10 +409,32 @@ class MediaTools:
         sample_rate: int = 48000,
         quiet_threshold_dbfs: float = -60.0,
     ) -> DecodedAudioStats:
+        return self._decoded_audio_stats(path, sample_rate, quiet_threshold_dbfs, validate_all=False)
+
+    def validated_audio_stats(
+        self,
+        path: Path,
+        sample_rate: int = 48000,
+        quiet_threshold_dbfs: float = -60.0,
+    ) -> DecodedAudioStats:
+        """Measure first-audio activity while fully decoding every input stream."""
+        return self._decoded_audio_stats(path, sample_rate, quiet_threshold_dbfs, validate_all=True)
+
+    def _decoded_audio_stats(
+        self, path: Path, sample_rate: int, quiet_threshold_dbfs: float, *, validate_all: bool,
+    ) -> DecodedAudioStats:
+        if not isinstance(sample_rate, int) or isinstance(sample_rate, bool) or sample_rate <= 0:
+            raise ValueError("Audio statistics sample rate must be a positive integer")
+        if not math.isfinite(quiet_threshold_dbfs):
+            raise ValueError("Audio statistics quiet threshold must be finite")
+        threshold = round(32767 * 10 ** (quiet_threshold_dbfs / 20.0))
+        filter_options, thread_options = _decode_thread_options()
         command = [
             self.ffmpeg,
             "-v",
             "error",
+            *filter_options,
+            *thread_options,
             "-i",
             str(path),
             "-map",
@@ -379,45 +447,90 @@ class MediaTools:
             "s16le",
             "-c:a",
             "pcm_s16le",
+            *thread_options,
             "pipe:1",
         ]
+        if validate_all:
+            # Both outputs share input decoders; the null output retains decode()'s all-stream check.
+            command.extend(["-map", "0", *thread_options, "-f", "null", os.devnull])
         started = self._command_started(command, "Decoding audio statistics")
-        try:
-            completed = self._capture(command)
-        except OSError as error:
-            diagnostic_exception(
-                "media_command_launch_failed", error, command=command,
-                duration_seconds=round(time.monotonic() - started[0], 3), command_id=started[1],
-            )
-            raise
-        self._command_finished(completed.returncode, completed.stderr, started)
-        if completed.returncode != 0:
-            detail = completed.stderr.decode("utf-8", "replace").strip()
-            raise MediaError(f"Decoding {path.name} failed: {detail}")
-        samples = array("h")
-        samples.frombytes(completed.stdout)
-        if sys.byteorder != "little":
-            samples.byteswap()
-        if not samples:
+        results: queue.Queue[tuple[int, int | None, int | None] | BaseException] = queue.Queue(1)
+        reader: threading.Thread | None = None
+        process = None
+        counts = None
+        canceled = False
+
+        def join_reader() -> None:
+            if reader is not None:
+                reader.join()
+
+        with tempfile.TemporaryFile() as errors:
+            try:
+                with owned_subprocess(
+                    command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors,
+                    startupinfo=self._startup_info(), on_reaped=join_reader,
+                ) as process:
+                    assert process.stdout is not None
+                    stream = process.stdout
+
+                    def read_samples() -> None:
+                        try:
+                            results.put(_read_audio_samples(stream, threshold))
+                        except BaseException as error:
+                            # Transfer failures to the owner instead of losing them in a thread.
+                            results.put(error)
+
+                    thread = threading.Thread(target=read_samples, name="ffmpeg-audio-statistics")
+                    thread.start()
+                    reader = thread
+                    while counts is None:
+                        check_cancelled()
+                        try:
+                            value = results.get(timeout=0.1)
+                        except queue.Empty:
+                            continue
+                        if isinstance(value, BaseException):
+                            raise value
+                        counts = value
+                    while process.poll() is None:
+                        check_cancelled()
+                        time.sleep(0.05)
+                    check_cancelled()
+            except OperationCancelled:
+                canceled = True
+                raise
+            except OSError as error:
+                diagnostic_exception(
+                    "media_audio_statistics_failed", error, command=command,
+                    duration_seconds=round(time.monotonic() - started[0], 3), command_id=started[1],
+                )
+                raise
+            finally:
+                join_reader()
+                errors.seek(0, os.SEEK_END)
+                errors.seek(max(0, errors.tell() - 16384))
+                detail = errors.read().decode("utf-8", "replace").strip()
+                self._command_finished(
+                    process.returncode if process is not None else -1, detail, started,
+                    canceled=canceled,
+                )
+                if not results.empty():
+                    value = results.get_nowait()
+                    if isinstance(value, BaseException):
+                        raise value
+            if process.returncode != 0:
+                raise MediaError(f"Decoding {path.name} failed: {detail or 'Unknown FFmpeg error'}")
+        assert counts is not None
+        count, first, last = counts
+        if count == 0:
             raise MediaError(f"{path.name} decoded to no audio samples")
-        check_cancelled()
-        threshold = round(32767 * 10 ** (quiet_threshold_dbfs / 20.0))
-        first = next((index for index, value in enumerate(samples) if abs(value) >= threshold), None)
-        last = next(
-            (
-                len(samples) - 1 - reverse_index
-                for reverse_index, value in enumerate(reversed(samples))
-                if abs(value) >= threshold
-            ),
-            None,
-        )
         if first is None or last is None:
-            quiet = len(samples) / sample_rate
+            quiet = count / sample_rate
             return DecodedAudioStats(quiet, quiet, quiet, False)
         return DecodedAudioStats(
-            duration=len(samples) / sample_rate,
+            duration=count / sample_rate,
             leading_quiet=first / sample_rate,
-            trailing_quiet=(len(samples) - 1 - last) / sample_rate,
+            trailing_quiet=(count - 1 - last) / sample_rate,
             has_activity=True,
         )
 
@@ -651,6 +764,7 @@ class MediaTools:
             if duration is not None
             else []
         )
+        filter_options, thread_options = _decode_thread_options()
         self.run(
             [
                 self.ffmpeg,
@@ -658,6 +772,8 @@ class MediaTools:
                 "-loglevel",
                 "error",
                 "-y",
+                *filter_options,
+                *thread_options,
                 "-i",
                 str(source),
                 "-vn",
@@ -670,6 +786,7 @@ class MediaTools:
                 "48000" if mono else "44100",
                 "-ac",
                 "1" if mono else "2",
+                *thread_options,
                 str(destination),
             ],
             f"Converting {source.name}",
@@ -677,6 +794,7 @@ class MediaTools:
 
     def create_silent_backing(self, destination: Path, duration: float) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
+        filter_options, thread_options = _decode_thread_options()
         self.run(
             [
                 self.ffmpeg,
@@ -684,6 +802,8 @@ class MediaTools:
                 "-loglevel",
                 "error",
                 "-y",
+                *filter_options,
+                *thread_options,
                 "-f",
                 "lavfi",
                 "-i",
@@ -696,6 +816,7 @@ class MediaTools:
                 "44100",
                 "-ac",
                 "2",
+                *thread_options,
                 str(destination),
             ],
             "Creating silent backing track",
@@ -732,6 +853,7 @@ class MediaTools:
             "[head][voice][tail]concat=n=3:v=0:a=1,asetpts=N/SR/TB[out]"
         )
         destination.parent.mkdir(parents=True, exist_ok=True)
+        filter_options, thread_options = _decode_thread_options()
         self.run(
             [
                 self.ffmpeg,
@@ -739,6 +861,8 @@ class MediaTools:
                 "-loglevel",
                 "error",
                 "-y",
+                *filter_options,
+                *thread_options,
                 "-ss",
                 f"{seek:.6f}",
                 "-t",
@@ -757,6 +881,7 @@ class MediaTools:
                 "48000",
                 "-ac",
                 "1",
+                *thread_options,
                 str(destination),
             ],
             f"Extracting prompt at {start:.3f}s",
@@ -773,10 +898,13 @@ class MediaTools:
         duration = end - start
         if duration <= 0:
             return False
+        filter_options, thread_options = _decode_thread_options()
         command = [
             self.ffmpeg,
             "-v",
             "error",
+            *filter_options,
+            *thread_options,
             "-ss",
             f"{start:.6f}",
             "-t",
@@ -793,6 +921,7 @@ class MediaTools:
             "s16le",
             "-c:a",
             "pcm_s16le",
+            *thread_options,
             "pipe:1",
         ]
         started = self._command_started(command, "Checking source audio activity")
@@ -831,6 +960,7 @@ class MediaTools:
                 "-vf",
                 f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}",
             ]
+        filter_options, thread_options = _decode_thread_options()
         self.run(
             [
                 self.ffmpeg,
@@ -838,6 +968,8 @@ class MediaTools:
                 "-loglevel",
                 "error",
                 "-y",
+                *filter_options,
+                *thread_options,
                 # Input seeking still decodes from the preceding keyframe for accuracy.
                 "-ss",
                 f"{max(0.0, timestamp):.6f}",
@@ -846,6 +978,7 @@ class MediaTools:
                 "-frames:v",
                 "1",
                 *image_args,
+                *thread_options,
                 str(destination),
             ],
             f"Extracting frame at {timestamp:.3f}s",
@@ -861,6 +994,7 @@ class MediaTools:
         height: int,
     ) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
+        filter_options, thread_options = _decode_thread_options()
         self.run(
             [
                 self.ffmpeg,
@@ -868,12 +1002,15 @@ class MediaTools:
                 "-loglevel",
                 "error",
                 "-y",
+                *filter_options,
+                *thread_options,
                 "-i",
                 str(source),
                 "-frames:v",
                 "1",
                 "-vf",
                 f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}",
+                *thread_options,
                 str(destination),
             ],
             f"Converting image {source.name}",
@@ -882,6 +1019,7 @@ class MediaTools:
     def make_icon(self, source: Path, destination: Path, is_video: bool) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         input_args = ["-ss", "0.500", "-i", str(source)] if is_video else ["-i", str(source)]
+        filter_options, thread_options = _decode_thread_options()
         self.run(
             [
                 self.ffmpeg,
@@ -889,18 +1027,25 @@ class MediaTools:
                 "-loglevel",
                 "error",
                 "-y",
+                *filter_options,
+                *thread_options,
                 *input_args,
                 "-frames:v",
                 "1",
                 "-vf",
                 "scale=660:364:force_original_aspect_ratio=increase,crop=660:364",
+                *thread_options,
                 str(destination),
             ],
             "Creating pack icon",
         )
 
     def decode(self, path: Path) -> None:
+        filter_options, thread_options = _decode_thread_options()
         self.run(
-            [self.ffmpeg, "-v", "error", "-i", str(path), "-map", "0", "-f", "null", os.devnull],
+            [
+                self.ffmpeg, "-v", "error", *filter_options, *thread_options, "-i", str(path),
+                "-map", "0", *thread_options, "-f", "null", os.devnull,
+            ],
             f"Decoding {path.name}",
         )
