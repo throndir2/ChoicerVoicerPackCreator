@@ -943,6 +943,10 @@ bass and other stems, excluding vocals, into a full-length backing aligned with 
 is approximate: some dialogue can bleed through and some effects or singing may be removed. Listen
 to the result before sharing. Prompt extraction still uses the source video's original audio.
 
+Developers can use the separate [singing-preservation comparison](docs/SEPARATION_COMPARISON.md)
+to evaluate singing-aware BandIt and SAM Audio on a GPU machine. This optional research
+workflow does not change the editor's separator or add either model to the portable application.
+
 Use **Generate backing** in Pack Details or **Project → Generate Backing Track** at any time.
 If backing is already selected, regeneration asks before replacing the project's selection. It writes
 a new durable audio file under per-user application data, never over the original backing or video.
