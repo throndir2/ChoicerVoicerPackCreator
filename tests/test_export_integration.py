@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import shutil
 import zipfile
 from pathlib import Path
@@ -13,6 +15,7 @@ from choicer_voicer_pack_creator.exporter import PackExporter
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import PackProject, Segment, SourceCaption
 from choicer_voicer_pack_creator.pack_io import PackImporter
+from choicer_voicer_pack_creator.validation import PackValidator
 
 
 def file_hash(path: Path) -> str:
@@ -74,6 +77,7 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> Non
         ],
         "Creating test video",
     )
+    source_hash = file_hash(source)
     project = PackProject(
         title="Integration Pack",
         authors=["Test Creator"],
@@ -92,6 +96,14 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> Non
 
     updates = []
     cache_root = tmp_path / "receipts"
+    commands = []
+    command_started = media._command_started
+
+    def record_command(command, description):
+        commands.append((command, updates[-1].step if updates else None))
+        return command_started(command, description)
+
+    monkeypatch.setattr(media, "_command_started", record_command)
     result = PackExporter(media, cache_root=cache_root).export(
         project, tmp_path / "output", progress=updates.append,
     )
@@ -132,7 +144,18 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> Non
     assert messages[-1] == "Cleaning up export staging files..."
     assert result.pack_path.is_dir()
     assert result.zip_path and result.zip_path.is_file()
+    expected_names = {
+        "_pack_info.ini", "icon.png", "dub_video.ogv", "_backing_track.mp3",
+        "001_Alice.mp3", "001_Alice.png", "001_Alice.txt",
+        "002_Bob.mp3", "002_Bob.png", "002_Bob.txt",
+    }
+    assert set(result.file_hashes) == expected_names
+    assert result.file_hashes == {
+        path.name: file_hash(path) for path in result.pack_path.iterdir()
+    }
     with zipfile.ZipFile(result.zip_path) as archive:
+        assert len(archive.infolist()) == len(expected_names)
+        assert set(archive.namelist()) == {f"Integration Pack/{name}" for name in expected_names}
         for entry in archive.infolist():
             suffix = Path(entry.filename).suffix
             assert entry.compress_type == (
@@ -140,14 +163,54 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> Non
                 else zipfile.ZIP_DEFLATED
             )
             assert archive.read(entry) == (result.pack_path / Path(entry.filename).name).read_bytes()
-    assert result.validation["status"] == "passed"
-    assert result.validation["clip_count"] == 2
-    assert result.validation["file_count"] == 10
+    video = media.probe(result.pack_path / "dub_video.ogv")
+    assert result.validation == {
+        "status": "passed", "title": "Integration Pack", "clip_count": 2, "file_count": 10,
+        "video": {
+            "duration": video.duration, "width": video.width, "height": video.height,
+            "fps": video.fps, "video_codec": "theora", "audio_codec": "vorbis",
+        },
+        "first_timestamp": 0.1, "last_timestamp": 0.9,
+    }
+    assert json.loads(PackValidator.report_json(result.validation)) == result.validation
+    decode_evidence = {}
+    for name in ("001_Alice.mp3", "002_Bob.mp3", "dub_video.ogv"):
+        decodes = [
+            (command, phase) for command, phase in commands
+            if command[0] == media.ffmpeg and "-i" in command
+            and Path(command[command.index("-i") + 1]).name == name
+        ]
+        phases = ["staged-validation", "published-validation"]
+        if name.endswith(".mp3"):
+            phases.insert(0, "prompts")
+        assert [phase for _, phase in decodes] == phases
+        decode_evidence[name] = [
+            {"phase": phase, "command": command} for command, phase in decodes
+        ]
+        for command, phase in decodes:
+            assert command.count("-i") == 1
+            assert not {"-ss", "-t", "-to", "-frames:v", "-frames:a"}.intersection(command)
+            input_path = Path(command[command.index("-i") + 1])
+            assert (input_path == result.pack_path / name) == (phase == "published-validation")
+            maps = [command[index + 1] for index, arg in enumerate(command) if arg == "-map"]
+            if name.endswith(".mp3"):
+                assert maps == (["0:a:0"] if phase == "prompts" else ["0:a:0", "0"])
+                assert command.count("pipe:1") == 1
+            else:
+                assert maps == ["0"]
+            if phase != "prompts":
+                assert command[-3:] == ["-f", "null", os.devnull]
     assert any("without backing music" in warning for warning in result.warnings)
     assert media.audio_peak_dbfs(result.pack_path / "_backing_track.mp3") == float("-inf")
     metadata = read_config(result.pack_path / "001_Alice.txt")["data"]
     assert metadata["dub_timestamps"] == [0.1]
     assert metadata["caption"] == "First line"
+    assert metadata["dub_characters"] == ["Alice"]
+    assert metadata["image"] == "001_Alice.png"
+    assert read_config(result.pack_path / "_pack_info.ini")["data"] == {
+        "title": "Integration Pack", "authors": ["Test Creator"],
+        "readme": "Generated by the integration test.", "icon": "icon.png",
+    }
 
     with monkeypatch.context() as patch:
         def unexpected_conversion(*args, **kwargs):
@@ -227,6 +290,23 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> Non
     assert combined_metadata["dub_timestamps"] == [0.1]
     combined_duration = media.probe_audio_duration(combined.pack_path / "001_Alice.mp3")
     assert combined_duration == pytest.approx(1.55 - 0.2 + 0.1 + 0.15, abs=0.05)
+    assert file_hash(source) == source_hash
+    (tmp_path / "export-validation-evidence.json").write_text(
+        json.dumps({
+            "pack_path": str(result.pack_path),
+            "zip_path": str(result.zip_path),
+            "validation": result.validation,
+            "repeated_validation": repeated.validation,
+            "file_hashes": result.file_hashes,
+            "repeated_file_hashes": repeated.file_hashes,
+            "decoded_commands": decode_evidence,
+            "source_sha256_before": source_hash,
+            "source_sha256_after": file_hash(source),
+            "preserved_imported_audio_sha256": original_audio_hash,
+            "preserved_imported_image_sha256": original_image_hash,
+        }, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 @pytest.mark.integration
@@ -237,7 +317,7 @@ def test_default_export_encodes_480p_and_higher_quality_remains_opt_in(tmp_path:
     source = tmp_path / "source.mp4"
     media.run([
         media.ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
-        "testsrc2=s=960x540:r=30:d=1.5", "-f", "lavfi", "-i",
+        "testsrc2=s=1280x720:r=30:d=1.5", "-f", "lavfi", "-i",
         "sine=frequency=440:sample_rate=48000:duration=1.5",
         "-shortest", "-c:v", "mpeg4", "-c:a", "aac", str(source),
     ], "Creating export quality fixture")
@@ -249,9 +329,10 @@ def test_default_export_encodes_480p_and_higher_quality_remains_opt_in(tmp_path:
     fast = exporter.export(project, tmp_path / "output", create_zip=False)
     assert fast.validation["video"]["height"] == 480
     assert fast.validation["video"]["fps"] == 30
-    project.video_height = 540
+    project.video_height = 720
     high = exporter.export(project, tmp_path / "output", create_zip=False)
-    assert high.validation["video"]["height"] == 540
+    assert high.validation["video"]["height"] == 720
+    assert high.validation["video"]["fps"] == 30
     assert fast.file_hashes["dub_video.ogv"] != high.file_hashes["dub_video.ogv"]
 
 
