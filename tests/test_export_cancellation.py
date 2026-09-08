@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import threading
@@ -29,6 +30,7 @@ from choicer_voicer_pack_creator.operations import (
     operation_scope,
     path_leases,
 )
+from choicer_voicer_pack_creator.pack_manifest import MANIFEST_NAME
 from choicer_voicer_pack_creator.validation import PackValidator
 
 
@@ -178,7 +180,7 @@ def test_export_resource_wait_recovers_through_both_complete_validation_passes(
             progress=export_updates.append if callbacks in {"export", "both"} else None,
         )
     assert result.validation["status"] == "passed"
-    assert result.validation["clip_count"] == 1 and result.validation["file_count"] == 7
+    assert result.validation["clip_count"] == 1 and result.validation["file_count"] == 8
     assert state.waits == [("staged-validation", 0.1), ("published-validation", 0.1)]
     names = ["dub_video.ogv", "icon.png", "_backing_track.mp3", "001_Speaker.mp3", "001_Speaker.png"]
     assert state.decoded == [
@@ -437,7 +439,7 @@ def test_stream_copy_checks_cancellation_between_chunks() -> None:
 def test_hash_checks_cancellation_between_chunks(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "source"
     source.write_bytes(b"x" * (3 * 1024 * 1024))
-    original_sha256 = exporter_module.hashlib.sha256
+    original_sha256 = hashlib.sha256
     stopped = False
 
     class Digest:
@@ -449,7 +451,7 @@ def test_hash_checks_cancellation_between_chunks(tmp_path: Path, monkeypatch) ->
             self.digest.update(chunk)
             stopped = True
 
-    monkeypatch.setattr(exporter_module.hashlib, "sha256", Digest)
+    monkeypatch.setattr(hashlib, "sha256", Digest)
     with operation_scope(cancelled=lambda: stopped), pytest.raises(OperationCancelled):
         exporter_module.sha256(source)
 
@@ -635,7 +637,9 @@ def test_parallel_prompts_are_bounded_with_serial_progress_and_identical_outputs
     monkeypatch.setattr(exporter, "_write_audio", original_write)
     exporter.prompt_workers = 1
     serial = exporter.export(project, tmp_path / "serial")
-    assert serial.file_hashes == parallel.file_hashes
+    assert {name: digest for name, digest in serial.file_hashes.items() if name != MANIFEST_NAME} == {
+        name: digest for name, digest in parallel.file_hashes.items() if name != MANIFEST_NAME
+    }
 
 
 @pytest.mark.parametrize("failure", ["cancel", "callback", "worker"])

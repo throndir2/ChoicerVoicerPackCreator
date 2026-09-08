@@ -100,6 +100,17 @@ def _remap_project(project: PackProject, plan: SceneEditPlan) -> tuple[PackProje
             removed_segments += 1
             continue
         clipped = _clipped(segment.start, segment.end, mapped)
+        if segment.audio_mode == "file" and segment.recording_padding is not None:
+            head, tail = segment.recording_padding
+            recording_start, recording_end = segment.start - head, segment.end + tail
+            if not any(
+                recording_start >= first - 1e-6 and recording_end <= last + 1e-6
+                for first, last in plan.kept_ranges
+            ):
+                raise ValueError(
+                    f"Segment {index}'s preserved recording padding crosses the edit boundary. "
+                    "Keep the entire padded recording or explicitly regenerate it first."
+                )
         if clipped and (segment.audio_mode == "file" or not segment.source_range_known):
             raise ValueError(
                 f"Segment {index} partially intersects the edit and uses a preserved recording "
@@ -398,6 +409,9 @@ def execute_scene_edit(
         project = copy.deepcopy(project)
         plan = plan_scene_edit(project, start, end, mode)
         result, _ = _remap_project(project, plan)
+        if mode == "extract":
+            result.parent_pack_id = project.pack_id
+            result.pack_id = uuid.uuid4().hex
         if title is not None:
             if not isinstance(title, str) or not title.strip():
                 raise ValueError("A scene title must not be empty.")

@@ -34,6 +34,7 @@ from choicer_voicer_pack_creator.operations import (
     path_leases,
     report,
 )
+from choicer_voicer_pack_creator.pack_manifest import MANIFEST_NAME, read_manifest
 
 _DIGITS = re.compile(r"(\d+)")
 _MAX_ZIP_MEMBERS = 10_000
@@ -416,6 +417,7 @@ class PackImporter:
             has_video=video is not None, has_backing_track=backing is not None,
         )
         segments: list[Segment] = []
+        imported_clips: dict[str, tuple[Segment, float]] = {}
         logged_progress = DiagnosticProgress("pack_import_progress")
         for index, metadata_path in enumerate(candidates, 1):
             _notify(
@@ -512,6 +514,7 @@ class PackImporter:
                         source_range_known=False,
                     )
                 )
+                imported_clips[metadata_path.name] = (segments[-1], audio_duration)
             if len(timestamps) > 1:
                 warnings.append(
                     f"{metadata_path.name} reused one recording at {len(timestamps)} timestamps; "
@@ -520,6 +523,36 @@ class PackImporter:
 
         if not segments:
             raise ValueError("No clip metadata with dub_timestamps was found in the selected folder")
+
+        manifest = None
+        manifest_path = root / MANIFEST_NAME
+        if manifest_path.exists() or manifest_path.is_symlink():
+            _notify("Checking app manifest and file checksums...")
+            try:
+                candidate = read_manifest(root)
+                if len(candidate.segments) != len(segments) or {
+                    clip.metadata for clip in candidate.segments
+                } != imported_clips.keys():
+                    raise ValueError("Manifest clip inventory differs from the imported segments")
+                for clip in candidate.segments:
+                    clip.validate_timing(duration, imported_clips[clip.metadata][1])
+                manifest = candidate
+            except (OSError, ValueError, UnicodeError, RecursionError) as error:
+                diagnostic_exception("pack_import_manifest_ignored", error)
+                warnings.append(
+                    f"{MANIFEST_NAME} was not applied: {error}. Imported game metadata and "
+                    "recordings instead; app provenance and original cuts could not be restored. "
+                    "The original manifest remains in the source and will not be copied on export."
+                )
+            recognized_files.add(manifest_path.resolve())
+        if manifest is not None:
+            for clip in manifest.segments:
+                segment, _audio_duration = imported_clips[clip.metadata]
+                segment.id = clip.id
+                if clip.source_range is not None:
+                    segment.start, segment.end, head, tail = clip.source_range
+                    segment.recording_padding = (head, tail)
+                    segment.source_range_known = True
 
         _notify("Checking source pack inventory...")
         unrecognized_files = []
@@ -552,6 +585,13 @@ class PackImporter:
             import_warnings=list(warnings),
         )
         project.sort_segments()
+        if manifest is not None:
+            project.pack_id = manifest.pack_id
+            project.parent_pack_id = manifest.parent_pack_id
+            project.source_url = manifest.source_youtube_url
+            project.caption_language = manifest.caption_language
+            project.head_padding = manifest.head_padding
+            project.tail_padding = manifest.tail_padding
         _notify("Pack import ready", 1.0)
         logged_progress.report("Pack import ready", 1.0)
         diagnostic_event(

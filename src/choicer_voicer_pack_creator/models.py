@@ -12,6 +12,7 @@ AudioMode = Literal["video", "file"]
 SpeakerAssignment = Literal["manual", "automatic", "excluded"]
 DEFAULT_VIDEO_HEIGHT = 480
 DEFAULT_VIDEO_FPS = 30
+TIMING_EPSILON = 1e-6
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +171,7 @@ class Segment:
     source_range_known: bool = True
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     speaker_assignment: SpeakerAssignment = "manual"
+    recording_padding: tuple[float, float] | None = None
 
     @property
     def duration(self) -> float:
@@ -190,6 +192,7 @@ class Segment:
             image_path=self.image_path,
             source_range_known=self.source_range_known,
             speaker_assignment=self.speaker_assignment,
+            recording_padding=self.recording_padding,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -204,6 +207,7 @@ class Segment:
             "image_path": self.image_path,
             "source_range_known": self.source_range_known,
             "speaker_assignment": self.speaker_assignment,
+            "recording_padding": list(self.recording_padding) if self.recording_padding else None,
         }
 
     @classmethod
@@ -219,6 +223,16 @@ class Segment:
             "manual", "automatic", "excluded",
         }:
             raise ValueError("Unknown segment speaker assignment")
+        padding = value.get("recording_padding")
+        if padding is not None and (
+            not isinstance(padding, list) or len(padding) != 2
+            or any(
+                isinstance(item, bool) or not isinstance(item, (int, float))
+                or not 0 <= item <= 2
+                for item in padding
+            )
+        ):
+            raise ValueError("Recording padding must contain two finite values from 0 to 2 seconds")
         return cls(
             id=str(value.get("id") or uuid.uuid4().hex),
             start=float(value.get("start", 0.0)),
@@ -230,6 +244,7 @@ class Segment:
             image_path=str(value.get("image_path", "")),
             source_range_known=bool(value.get("source_range_known", mode == "video")),
             speaker_assignment=assignment,
+            recording_padding=(float(padding[0]), float(padding[1])) if padding is not None else None,
         )
 
 
@@ -257,6 +272,8 @@ class PackProject:
     source_captions: list[SourceCaption] = field(default_factory=list)
     analysis_review: AnalysisReview | None = None
     auto_speaker_matching: bool = True
+    pack_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    parent_pack_id: str | None = None
 
     @property
     def speakers(self) -> list[str]:
@@ -376,6 +393,19 @@ class PackProject:
             if not segment.characters or not all(name.strip() for name in segment.characters):
                 errors.append(f"{prefix} needs at least one speaker.")
             if segment.audio_mode == "file":
+                if segment.recording_padding is not None:
+                    head, tail = segment.recording_padding
+                    if (
+                        not segment.source_range_known
+                        or not all(math.isfinite(item) and 0 <= item <= 2 for item in (head, tail))
+                        or segment.start + TIMING_EPSILON < head
+                        or (self.video_duration > 0
+                            and segment.end + tail > self.video_duration + 0.05)
+                    ):
+                        errors.append(
+                            f"{prefix} has invalid preserved recording padding. Keep the entire "
+                            "padded recording inside the video, or regenerate its audio."
+                        )
                 if not segment.audio_path:
                     errors.append(f"{prefix} is set to file audio but no audio file is selected.")
                 elif not Path(segment.audio_path).is_file():
@@ -392,6 +422,8 @@ class PackProject:
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": 1,
+            "pack_id": self.pack_id,
+            "parent_pack_id": self.parent_pack_id,
             "title": self.title,
             "authors": list(self.authors),
             "readme": self.readme,
@@ -444,6 +476,16 @@ class PackProject:
         auto_speaker_matching = value.get("auto_speaker_matching", True)
         if not isinstance(auto_speaker_matching, bool):
             raise ValueError("Automatic speaker matching must be a boolean")
+        identifiers = {}
+        for key in ("pack_id", "parent_pack_id"):
+            identifier = value.get(key)
+            if identifier is not None:
+                if not isinstance(identifier, str):
+                    raise ValueError(f"Project {key} must be a UUID")
+                try:
+                    identifiers[key] = uuid.UUID(identifier).hex
+                except ValueError as error:
+                    raise ValueError(f"Project {key} must be a UUID") from error
         project = cls(
             title=str(value.get("title", "Untitled Dub Pack")),
             authors=[str(item).strip() for item in authors if str(item).strip()],
@@ -465,6 +507,7 @@ class PackProject:
             analysis_review=AnalysisReview.from_dict(review_value) if review_value is not None else None,
             auto_speaker_matching=auto_speaker_matching,
             segments=[Segment.from_dict(item) for item in segments_value],
+            **identifiers,
         )
         project.sort_segments()
         return project

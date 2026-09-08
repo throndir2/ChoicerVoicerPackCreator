@@ -103,6 +103,28 @@ def execute(project, tmp_path, start, end, mode="cut", **kwargs):
     )
 
 
+def test_extracted_scene_has_its_own_pack_identity_and_parent(project, tmp_path):
+    result = execute(project, tmp_path, 2, 8, "extract")
+    assert result.pack_id != project.pack_id
+    assert result.parent_pack_id == project.pack_id
+    saved = ProjectStore.load(Path(result.video_path).parent / "project.cvpack.json")
+    assert saved.pack_id == result.pack_id and saved.parent_pack_id == project.pack_id
+
+
+def test_cut_preserves_pack_identity(project, tmp_path):
+    result = execute(project, tmp_path, 2, 4)
+    assert result.pack_id == project.pack_id
+
+
+def test_scene_edit_preserves_or_rejects_whole_recording_padding(project):
+    project.segments = [Segment(
+        3, 4, "Line", ["Hero"], audio_mode="file", recording_padding=(0.1, 0.15),
+    )]
+    with pytest.raises(ValueError, match="padding crosses"):
+        plan_scene_edit(project, 3, 6, "extract")
+    assert plan_scene_edit(project, 2, 6, "extract").duration == 4
+
+
 @pytest.mark.parametrize("origin", [0.0, 5.0])
 @pytest.mark.parametrize("has_packets", [False, True])
 def test_video_timing_reads_sequentially_after_empty_seek(
