@@ -54,6 +54,21 @@ Install 64-bit Python 3.11, Git, and a current NVIDIA driver. Use a new environm
 not the editor's environment or a `--system-site-packages` environment. Setup may
 download several GB of packages and stops on any installation failure.
 
+The setup script defaults to the Windows `py -3.11` launcher. If Python was installed
+without that launcher (for example, with `uv`), pass
+`-PythonExecutable C:\Path\To\Python311\python.exe` to either setup profile. The script
+checks for 64-bit Python 3.11 before creating the environment. An isolated `uv` install
+can stay entirely inside the experiment without changing PATH or registering Python:
+
+```powershell
+$env:UV_PYTHON_INSTALL_DIR = "C:\AudioComparison\python"
+uv python install 3.11 --no-bin --no-registry
+uv python find 3.11 --managed-python --no-python-downloads
+```
+
+Use the interpreter path printed by that command for `-PythonExecutable`; do not use
+the installed application's interpreter or modify global packages.
+
 ```powershell
 .\tools\separation-comparison\Setup-Gpu.ps1 -Backend BandIt -Environment C:\AudioComparison\venv-bandit
 & C:\AudioComparison\venv-bandit\Scripts\python.exe -m scripts.compare_separation --backend bandit --preflight

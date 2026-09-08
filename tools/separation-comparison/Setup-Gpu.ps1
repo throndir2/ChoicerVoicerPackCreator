@@ -3,7 +3,8 @@ param(
     [ValidateSet("BandIt", "SamAudio")]
     [string]$Backend,
     [Parameter(Mandatory = $true)]
-    [string]$Environment
+    [string]$Environment,
+    [string]$PythonExecutable
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,7 +25,14 @@ if (Test-Path -LiteralPath $Environment) {
     throw "Choose a new environment directory. Existing environments are never modified."
 }
 
-Invoke-Checked "py" @("-3.11", "-m", "venv", $Environment)
+$launcherArguments = @()
+if (-not $PythonExecutable) {
+    $PythonExecutable = "py"
+    $launcherArguments = @("-3.11")
+}
+$pythonProbe = "import struct, sys; sys.exit(0 if sys.version_info[:2] == (3, 11) and struct.calcsize('P') == 8 else 'This profile requires 64-bit Python 3.11.')"
+Invoke-Checked $PythonExecutable ($launcherArguments + @("-c", $pythonProbe))
+Invoke-Checked $PythonExecutable ($launcherArguments + @("-m", "venv", $Environment))
 $python = Join-Path $Environment "Scripts\python.exe"
 Invoke-Checked $python @("-m", "pip", "install", "pip==25.3")
 
