@@ -695,6 +695,9 @@ attempt access-restriction workarounds. An authorized local copy can still be op
 
 - Zoom in to reveal finer waveform detail rather than widely spaced overview lines. Peaks are
   drawn at the visible pixel scale, and ruler labels show hundredths or milliseconds when needed.
+- Hold the right mouse button and drag to pan a zoomed-in timeline without moving the playhead
+  or editing ranges. Right-click a segment block without dragging to open its context menu;
+  empty waveform space has no context menu.
 - Drag the white playback line or its top arrow to scrub without changing any ranges. The arrow
   remains draggable when the line overlaps an In/Out handle or a segment block.
 - Drag across empty waveform space to define a new In/Out range.

@@ -47,6 +47,7 @@ def test_controls_share_one_row_with_help_only_in_tooltips(window, qtbot, styles
         for label in window.findChildren(QLabel)
     )
     assert "Drag the white playback line" in window.timeline.toolTip()
+    assert "Right-drag to pan" in window.timeline.toolTip()
     assert window.apply_range_button.accessibleName() == "Update Segment Timing"
     assert window.split_button.accessibleName() == "Split at Playhead"
     assert window.preview_segment_button.accessibleName() == "Play Selected Segment"

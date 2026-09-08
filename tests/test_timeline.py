@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QContextMenuEvent, QImage, QWheelEvent
+from PySide6.QtWidgets import QApplication
 
 from choicer_voicer_pack_creator.models import Segment
 from choicer_voicer_pack_creator.ui.timeline import TimelineWidget, segment_lanes
@@ -16,6 +17,211 @@ def _render(widget: TimelineWidget) -> QImage:
     image = QImage(widget.size(), QImage.Format.Format_ARGB32)
     widget.render(image)
     return image
+
+
+@pytest.fixture
+def pannable_timeline(qtbot):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 220)
+    timeline.set_duration(100)
+    segment = Segment(50, 52, "Line", ["Speaker"])
+    timeline.set_segments([segment])
+    timeline.set_selected(segment.id)
+    timeline.set_marks(segment.start, segment.end, segment.id)
+    timeline.set_playhead(50)
+    timeline.set_zoom(5, anchor_time=50)
+    timeline.show()
+    return timeline
+
+
+def _context_event(timeline, point, reason=QContextMenuEvent.Reason.Mouse):
+    QApplication.sendEvent(
+        timeline, QContextMenuEvent(reason, point, timeline.mapToGlobal(point)),
+    )
+
+
+@pytest.mark.parametrize("surface", ["ruler", "handle", "waveform", "segment", "empty-lane"])
+def test_right_drag_pans_without_seeking_selecting_or_editing(pannable_timeline, qtbot, surface):
+    timeline = pannable_timeline
+    segment = timeline.segments[0]
+    y = {
+        "ruler": 4, "handle": 30, "waveform": 65,
+        "segment": round(timeline._segment_rect(segment).center().y()), "empty-lane": 210,
+    }[surface]
+    changes = []
+    for signal in (
+        timeline.seek_requested, timeline.segment_selected, timeline.selection_changed,
+        timeline.boundary_changed, timeline.range_edit_started, timeline.range_changed,
+        timeline.range_edit_finished, timeline.zoom_changed, timeline.segment_context_menu_requested,
+    ):
+        signal.connect(lambda *values: changes.append(values))
+    qtbot.mousePress(timeline, Qt.MouseButton.RightButton, pos=QPoint(500, y))
+    assert timeline.is_panning
+    for x, expected_offset in ((400, 42), (650, 37)):
+        qtbot.mouseMove(timeline, QPoint(x, y))
+        assert timeline.offset == pytest.approx(expected_offset)
+        assert timeline._time_to_x(50) == pytest.approx(x)
+        assert timeline.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+    qtbot.mouseRelease(timeline, Qt.MouseButton.RightButton, pos=QPoint(700, y))
+    _context_event(timeline, QPoint(700, y))
+
+    assert timeline.offset == pytest.approx(36)
+    assert timeline.zoom == 5
+    assert timeline.playhead == 50
+    assert (timeline.mark_in, timeline.mark_out) == (50, 52)
+    assert timeline.mark_segment_id == segment.id
+    assert timeline.selected_ids == {segment.id}
+    assert (segment.start, segment.end) == (50, 52)
+    assert changes == []
+    assert not timeline.is_panning
+    assert timeline.cursor().shape() == Qt.CursorShape.ArrowCursor
+    qtbot.mouseMove(timeline, QPoint(800, y))
+    assert timeline.offset == pytest.approx(36)
+
+
+@pytest.mark.parametrize("zoom", [1, 2, 80])
+@pytest.mark.parametrize("x", [-100_000, 100_000])
+def test_right_drag_clamps_view_and_can_return_from_bounds(pannable_timeline, qtbot, zoom, x):
+    timeline = pannable_timeline
+    timeline.set_zoom(zoom, anchor_time=50)
+    original_offset = timeline.offset
+    point = QPoint(500, 65)
+    qtbot.mousePress(timeline, Qt.MouseButton.RightButton, pos=point)
+    qtbot.mouseMove(timeline, QPoint(x, 65))
+    expected = timeline.duration - timeline.visible_duration if x < 0 else 0
+    assert timeline.offset == pytest.approx(expected)
+    qtbot.mouseMove(timeline, point)
+    qtbot.mouseRelease(timeline, Qt.MouseButton.RightButton, pos=point)
+    assert timeline.offset == pytest.approx(original_offset)
+
+
+def test_right_drag_release_without_move_event_still_pans(pannable_timeline, qtbot):
+    timeline = pannable_timeline
+    menus = []
+    timeline.segment_context_menu_requested.connect(lambda *values: menus.append(values))
+    y = round(timeline._segment_rect(timeline.segments[0]).center().y())
+    qtbot.mousePress(timeline, Qt.MouseButton.RightButton, pos=QPoint(500, y))
+    qtbot.mouseRelease(timeline, Qt.MouseButton.RightButton, pos=QPoint(600, y))
+    _context_event(timeline, QPoint(600, y))
+    assert timeline.offset == pytest.approx(38)
+    assert not menus
+
+
+@pytest.mark.parametrize("early_context", [False, True], ids=["release-menu", "press-menu"])
+@pytest.mark.parametrize("jitter", [False, True])
+def test_right_click_opens_one_segment_menu_only_on_release(
+    pannable_timeline, qtbot, early_context, jitter,
+):
+    timeline = pannable_timeline
+    segment = timeline.segments[0]
+    point = timeline._segment_rect(segment).center().toPoint()
+    menus = []
+    timeline.segment_context_menu_requested.connect(lambda *values: menus.append(values))
+    for _ in range(2):
+        qtbot.mousePress(timeline, Qt.MouseButton.RightButton, pos=point)
+        if early_context:
+            _context_event(timeline, point)
+        release = point + QPoint(QApplication.startDragDistance() // 2, 0) if jitter else point
+        qtbot.mouseMove(timeline, release)
+        assert timeline.offset == 40
+        assert not menus
+        qtbot.mouseRelease(timeline, Qt.MouseButton.RightButton, pos=release)
+        assert menus == [(segment.id, timeline.mapToGlobal(release))]
+        _context_event(timeline, release)
+        assert len(menus) == 1
+        menus.clear()
+
+
+@pytest.mark.parametrize("delta", [QPoint(100, 0), QPoint(0, 100)])
+def test_drag_back_to_start_still_suppresses_menu_but_keyboard_menu_works(
+    pannable_timeline, qtbot, delta,
+):
+    timeline = pannable_timeline
+    segment = timeline.segments[0]
+    point = timeline._segment_rect(segment).center().toPoint()
+    menus = []
+    timeline.segment_context_menu_requested.connect(lambda *values: menus.append(values))
+    qtbot.mousePress(timeline, Qt.MouseButton.RightButton, pos=point)
+    _context_event(timeline, point)
+    qtbot.mouseMove(timeline, point + delta)
+    qtbot.mouseMove(timeline, point)
+    qtbot.mouseRelease(timeline, Qt.MouseButton.RightButton, pos=point)
+    _context_event(timeline, point)
+    assert timeline.offset == 40
+    assert not menus
+    _context_event(timeline, point, QContextMenuEvent.Reason.Keyboard)
+    assert menus == [(segment.id, timeline.mapToGlobal(point))]
+
+
+def test_escape_restores_pan_and_does_not_open_menu_on_release(pannable_timeline, qtbot):
+    timeline = pannable_timeline
+    point = timeline._segment_rect(timeline.segments[0]).center().toPoint()
+    menus, edits = [], []
+    timeline.segment_context_menu_requested.connect(lambda *values: menus.append(values))
+    timeline.range_edit_finished.connect(lambda *values: edits.append(values))
+    qtbot.mousePress(timeline, Qt.MouseButton.RightButton, pos=point)
+    qtbot.mouseMove(timeline, point + QPoint(100, 0))
+    assert timeline.offset == 38
+    qtbot.keyClick(timeline, Qt.Key.Key_Escape)
+    assert timeline.offset == 40
+    assert not timeline.is_panning
+    assert timeline.cursor().shape() == Qt.CursorShape.ArrowCursor
+    qtbot.mouseRelease(timeline, Qt.MouseButton.RightButton, pos=point)
+    _context_event(timeline, point)
+    assert not menus
+    assert not edits
+
+
+def test_other_mouse_buttons_do_not_replace_or_finish_pan(pannable_timeline, qtbot):
+    timeline = pannable_timeline
+    point = QPoint(500, 65)
+    qtbot.mousePress(timeline, Qt.MouseButton.RightButton, pos=point)
+    qtbot.mouseMove(timeline, point + QPoint(100, 0))
+    qtbot.mouseClick(timeline, Qt.MouseButton.LeftButton, pos=point + QPoint(100, 0))
+    assert timeline.is_panning
+    qtbot.mouseRelease(timeline, Qt.MouseButton.RightButton, pos=point + QPoint(200, 0))
+    assert timeline.offset == 36
+    assert timeline.playhead == 50
+    assert (timeline.mark_in, timeline.mark_out) == (50, 52)
+
+
+def test_wheel_zoom_waits_until_pan_finishes(pannable_timeline, qtbot):
+    timeline = pannable_timeline
+    point = QPoint(500, 65)
+
+    def wheel():
+        QApplication.sendEvent(timeline, QWheelEvent(
+            QPointF(point), QPointF(timeline.mapToGlobal(point)), QPoint(), QPoint(0, 120),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False,
+        ))
+
+    qtbot.mousePress(timeline, Qt.MouseButton.RightButton, pos=point)
+    qtbot.mouseMove(timeline, point + QPoint(100, 0))
+    wheel()
+    assert timeline.zoom == 5
+    assert timeline.offset == 38
+    qtbot.mouseRelease(timeline, Qt.MouseButton.RightButton, pos=point + QPoint(100, 0))
+    wheel()
+    assert timeline.zoom == 6.25
+
+
+def test_right_button_does_not_interrupt_left_drag(pannable_timeline, qtbot):
+    timeline = pannable_timeline
+    menus = []
+    timeline.segment_context_menu_requested.connect(lambda *values: menus.append(values))
+    point = QPoint(500, 4)
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, pos=point)
+    qtbot.mousePress(timeline, Qt.MouseButton.RightButton, pos=point)
+    qtbot.mouseRelease(timeline, Qt.MouseButton.RightButton, pos=point)
+    _context_event(timeline, point)
+    assert timeline._drag_kind == "playhead"
+    qtbot.mouseMove(timeline, point + QPoint(100, 0))
+    qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=point + QPoint(100, 0))
+    assert timeline.playhead == 52
+    assert timeline.offset == 40
+    assert not menus
 
 
 def test_zoomed_waveform_renders_separate_transients_at_their_times(qtbot):
