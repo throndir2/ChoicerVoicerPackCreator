@@ -24,12 +24,14 @@ class SegmentChecksInput:
     audio_path: str
     image_path: str
     source_range_known: bool
+    recording_padding: tuple[float, float] | None = None
 
     @classmethod
     def capture(cls, segment: Segment) -> SegmentChecksInput:
         return cls(
             segment.id, segment.start, segment.end, segment.caption, tuple(segment.characters),
             segment.audio_mode, segment.audio_path, segment.image_path, segment.source_range_known,
+            segment.recording_padding,
         )
 
     def segment(self) -> Segment:
@@ -38,6 +40,7 @@ class SegmentChecksInput:
             characters=list(self.characters), audio_mode=self.audio_mode,
             audio_path=self.audio_path, image_path=self.image_path,
             source_range_known=self.source_range_known,
+            recording_padding=self.recording_padding,
         )
 
 

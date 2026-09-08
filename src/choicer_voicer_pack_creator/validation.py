@@ -16,6 +16,7 @@ from choicer_voicer_pack_creator.export_resources import (
 )
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.operations import check_cancelled, operation_scope
+from choicer_voicer_pack_creator.pack_manifest import MANIFEST_NAME, read_manifest
 
 
 class PackValidationError(RuntimeError):
@@ -49,6 +50,13 @@ class PackValidator:
 
         notify("checking required files and pack metadata")
         root = folder.resolve()
+        manifest_clips = {}
+        if (root / MANIFEST_NAME).exists() or (root / MANIFEST_NAME).is_symlink():
+            try:
+                manifest = read_manifest(root)
+            except (OSError, ValueError, UnicodeError, RecursionError) as error:
+                raise PackValidationError(f"Invalid {MANIFEST_NAME}: {error}") from error
+            manifest_clips = {clip.metadata: clip for clip in manifest.segments}
         required = [
             root / "_pack_info.ini",
             root / "icon.png",
@@ -110,6 +118,8 @@ class PackValidator:
             "dub_video.ogv",
             "_backing_track.mp3",
         }
+        if manifest_clips:
+            expected_names.add(MANIFEST_NAME)
         notify("checking and decoding backing track")
         backing_info = self.media.probe_audio(root / "_backing_track.mp3")
         if (
@@ -160,6 +170,11 @@ class PackValidator:
             self._require_png_signature(image_path)
             notify(f"{prompt_status}: checking and decoding audio")
             audio_info = self.media.probe_audio(audio_path)
+            if metadata_path.name in manifest_clips:
+                try:
+                    manifest_clips[metadata_path.name].validate_timing(video.duration, audio_info.duration)
+                except ValueError as error:
+                    raise PackValidationError(str(error)) from error
             if (
                 audio_info.codec != "mp3"
                 or audio_info.sample_rate != 48000

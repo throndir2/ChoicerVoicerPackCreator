@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 import os
 import queue
 import re
@@ -33,7 +32,7 @@ from choicer_voicer_pack_creator.export_progress import (
     format_time,
 )
 from choicer_voicer_pack_creator.media import MediaInfo, MediaTools, VideoEncodingProgress
-from choicer_voicer_pack_creator.models import PackProject, Segment
+from choicer_voicer_pack_creator.models import TIMING_EPSILON, PackProject, Segment
 from choicer_voicer_pack_creator.operations import (
     OperationCancelled,
     SourceSnapshot,
@@ -43,7 +42,9 @@ from choicer_voicer_pack_creator.operations import (
     path_leases,
     report,
 )
+from choicer_voicer_pack_creator.pack_manifest import MANIFEST_NAME, render_manifest, sha256
 from choicer_voicer_pack_creator.validation import PackValidator
+from choicer_voicer_pack_creator.youtube_url import canonical_youtube_url
 
 ProgressCallback = Callable[[ExportProgress], None]
 
@@ -63,17 +64,6 @@ def slug(value: str, fallback: str = "Voice") -> str:
     ascii_value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
     cleaned = re.sub(r"[^A-Za-z0-9]+", "-", ascii_value).strip("-")
     return cleaned[:32] or fallback
-
-
-def sha256(path: Path) -> str:
-    check_cancelled()
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            check_cancelled()
-            digest.update(chunk)
-    check_cancelled()
-    return digest.hexdigest()
 
 
 def _copy_stream(source: BinaryIO, destination: BinaryIO) -> None:
@@ -152,8 +142,8 @@ def export_plan(
     ))
     validation_time = 1.0 + duration / 20 + len(segments) * 2
     steps.extend((
-        ExportStep("staged-validation", "Validating staged pack", "validation", validation_time),
         ExportStep("hashing", "File checksums", "hashing", 0.5 + duration / 100),
+        ExportStep("staged-validation", "Validating staged pack", "validation", validation_time),
     ))
     if create_zip:
         steps.extend((
@@ -273,6 +263,8 @@ class PackExporter:
         if not source_info.has_audio:
             raise ValueError("The source video has no audio stream, so prompts cannot be created.")
         notify("Checking project metadata and segment timings...")
+        if project.source_url:
+            project.source_url = canonical_youtube_url(project.source_url)
         validated_project = PackProject.from_dict(project.to_dict())
         validated_project.video_duration = source_info.duration
         errors = validated_project.validate()
@@ -447,20 +439,28 @@ class PackExporter:
             )
             diagnostic_event("pack_export_prompts_built", segment_count=total)
 
+            files = sorted(path for path in stage.iterdir() if path.is_file())
+            file_hashes = {}
+            for index, path in enumerate(files, start=1):
+                notify(
+                    f"Hashing staged file {index}/{len(files) + 1}...", step="hashing",
+                )
+                file_hashes[path.name] = sha256(path)
+            (stage / MANIFEST_NAME).write_bytes(render_manifest(
+                project,
+                [(segment, f"{index:03d}_{slug(segment.primary_character)}")
+                 for index, segment in enumerate(segments, 1)],
+                stage, source_info.duration, file_hashes,
+            ))
+            notify(f"Hashing staged file {len(files) + 1}/{len(files) + 1}...")
+            file_hashes[MANIFEST_NAME] = sha256(stage / MANIFEST_NAME)
+            files = sorted([*files, stage / MANIFEST_NAME])
             notify("Validating staged pack…", step="staged-validation")
             with diagnostic_operation("pack_export_validation", path=stage, expected_clips=total):
                 validation = self.validator.validate_folder(
                     stage, expected_clips=total,
                     progress=lambda message: notify(f"Validating staged pack: {message}"),
                 )
-            files = sorted(path for path in stage.iterdir() if path.is_file())
-            file_hashes = {}
-            for index, path in enumerate(files, start=1):
-                notify(
-                    f"Hashing staged file {index}/{len(files)}...", step="hashing",
-                )
-                file_hashes[path.name] = sha256(path)
-
             staged_zip: Path | None = None
             if create_zip:
                 notify("Creating and testing ZIP archive…", step="zip")
@@ -640,6 +640,15 @@ class PackExporter:
         if segment.audio_mode == "file":
             source = Path(segment.audio_path).resolve()
             audio_info = self.media.probe_audio(source)
+            head, tail = segment.recording_padding or (0.0, 0.0)
+            if segment.recording_padding is not None and (
+                segment.start + TIMING_EPSILON < head
+                or abs(audio_info.duration - (segment.duration + head + tail)) > 0.05
+            ):
+                raise ValueError(
+                    "Preserved recording no longer matches its source range and padding. "
+                    "Restore the recording or explicitly regenerate its audio."
+                )
             if (
                 audio_info.codec == "mp3"
                 and audio_info.sample_rate == 48000
@@ -648,7 +657,7 @@ class PackExporter:
                 _copy_file(source, destination)
             else:
                 self.media.convert_audio(source, destination, mono=True)
-            return segment.start
+            return max(0.0, segment.start - head)
         tail = min(project.tail_padding, max(0.0, video_duration - segment.end))
         return self.media.extract_prompt(
             source_video,

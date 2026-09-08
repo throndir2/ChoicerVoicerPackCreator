@@ -162,6 +162,15 @@ Opening an already-open canonical project path focuses that document without rel
 its edits. `open_project` requires a `.cvpack.json` project with an explicit supported
 `schema_version`.
 
+Folder and ZIP exports also include `_cvpc_metadata.json`: exporter app version,
+versioned provenance, file hashes, and known original cuts/padding. A public canonical
+YouTube URL is included when the project has one; local paths and editing history are not.
+Import restores original cuts only from a supported manifest matching the pack files.
+The persistent `pack_id` is separate from the process-local document `project_id`.
+For restored file-audio segments, `recording_padding` preserves playback alignment;
+move both In and Out by the same amount to retain the known recording duration.
+Replacing the audio file or explicitly regenerating from video clears that padding.
+
 Every project result includes a process-local stable `project_id` and opaque `revision`.
 `loading` identifies an initial open/probe placeholder or an in-progress history restore:
 inspection is allowed, but mutations and saving are refused until it finishes.

@@ -420,6 +420,8 @@ class PackAutomation:
             for name in ("audio_path", "image_path"):
                 if fields.get(name):
                     fields[name] = str(local_path(fields[name]))
+            if "audio_path" in fields and fields["audio_path"] != segment.audio_path:
+                segment.recording_padding = None
             for name, value in fields.items():
                 setattr(segment, name, value)
             if "characters" in fields and "speaker_assignment" not in fields:
@@ -438,6 +440,7 @@ class PackAutomation:
                 if fields.get("audio_path"):
                     raise ValueError("Set audio_mode=file when supplying an external audio_path.")
                 segment.audio_path = ""
+                segment.recording_padding = None
             changed_ids.append(segment.id)
         project.sort_segments()
         updated.dirty = True

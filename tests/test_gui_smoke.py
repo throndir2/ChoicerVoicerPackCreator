@@ -89,6 +89,39 @@ def test_main_window_starts_with_empty_editor(qtbot) -> None:
     window.close()
 
 
+@pytest.mark.parametrize("start", [4.1, 5.1])
+def test_preserving_manifest_recording_keeps_exact_cut_not_mp3_frame_duration(
+    qtbot, tmp_path, monkeypatch, start,
+):
+    window = MainWindow(UnusedMedia())  # type: ignore[arg-type]
+    qtbot.addWidget(window)
+    video = tmp_path / "source.ogv"
+    video.write_bytes(b"video")
+    audio = tmp_path / "prompt.mp3"
+    audio.write_bytes(b"audio")
+    segment = Segment(
+        4.1, 6.35, "Hello", ["Hero"], audio_mode="file", audio_path=str(audio),
+        recording_padding=(0.1, 0.15),
+    )
+    window._set_project(PackProject(
+        video_path=str(video), video_duration=20, segments=[segment],
+    ), None, mark_dirty=False)
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.No)
+    monkeypatch.setattr(
+        window.media, "probe_audio_duration",
+        lambda _path: pytest.fail("Known cuts must not be reconstructed from encoded MP3 duration"),
+    )
+    segment.start = start
+    with window.active_editor._range_decision():
+        window.active_editor._complete_segment_range_edit(
+            segment, 4.1, 6.35, False, review_file_audio=True,
+        )
+    assert segment.end == pytest.approx(start + 2.25)
+    assert segment.source_range_known and segment.recording_padding == (0.1, 0.15)
+    window.dirty = False
+    window.close()
+
+
 def test_segment_help_only_shows_empty_states_and_preserved_audio(qtbot, tmp_path) -> None:
     window = MainWindow(UnusedMedia())  # type: ignore[arg-type]
     qtbot.addWidget(window)
