@@ -11,6 +11,123 @@ def _point(widget: TimelineWidget, timestamp: float, y: int) -> QPoint:
     return QPoint(round(widget._time_to_x(timestamp)), y)
 
 
+def test_zoomed_waveform_renders_separate_transients_at_their_times(qtbot):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 176)
+    timeline.set_duration(60)
+    peaks = [0.0] * 120_000
+    peaks[60_000] = 1.0
+    peaks[60_020] = 0.75
+    timeline.set_waveform(peaks)
+    timeline.set_zoom(80, anchor_time=30)
+    timeline.set_marks(0, 0)
+
+    visible = timeline._visible_waveform_peaks()
+    assert len(visible) == 1000
+    assert visible[500] == 1.0
+    assert visible[501:513] == [0.0] * 12
+    assert visible[513] == 0.75
+    image = timeline.grab().toImage()
+    assert image.pixelColor(500, 50).name() == "#32c6d5"
+    assert image.pixelColor(507, 50).name() != "#32c6d5"
+    assert image.pixelColor(513, 50).name() == "#32c6d5"
+
+
+def test_zoomed_waveform_fills_each_peak_time_interval_without_gaps(qtbot):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 176)
+    timeline.set_duration(10)
+    timeline.set_waveform([0.5] * 100)
+    timeline.set_marks(0, 0)
+    timeline.set_zoom(80, anchor_time=5)
+
+    assert timeline._visible_waveform_peaks() == [0.5] * 1000
+    image = timeline.grab().toImage()
+    assert all(image.pixelColor(x, 60).name() == "#32c6d5" for x in range(1000))
+
+
+def test_waveform_pixel_buckets_preserve_peaks_when_zoomed_out(qtbot):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(100, 176)
+    timeline.set_duration(100)
+    peaks = [0.0] * 10_003
+    peaks[100] = 0.75
+    peaks[-1] = 1.0
+    timeline.set_waveform(peaks)
+
+    visible = timeline._visible_waveform_peaks()
+    assert visible[0] == 0.75
+    assert visible[1] == 0.75
+    assert visible[-1] == 1.0
+    assert not any(visible[2:-1])
+    timeline.set_zoom(80, anchor_time=100)
+    assert timeline._visible_waveform_peaks()[-1] == 1.0
+
+
+def test_waveform_cache_tracks_view_changes_but_not_playhead_or_height(qtbot):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 176)
+    timeline.set_duration(10)
+    timeline.set_waveform([0.25] * 10_000)
+    cached = timeline._visible_waveform_peaks()
+    timeline.set_playhead(5)
+    timeline.resize(1000, 300)
+    assert timeline._visible_waveform_peaks() is cached
+
+    timeline.set_zoom(2, anchor_time=5)
+    zoomed = timeline._visible_waveform_peaks()
+    assert zoomed is not cached
+    timeline.ensure_visible(9)
+    panned = timeline._visible_waveform_peaks()
+    assert panned is not zoomed
+    timeline.resize(500, 300)
+    resized = timeline._visible_waveform_peaks()
+    assert resized is not panned
+    assert len(resized) == 500
+    timeline.set_duration(20)
+    assert timeline._visible_waveform_peaks() is not resized
+    timeline.set_waveform([0.75] * 10_000)
+    assert timeline._visible_waveform_peaks() == [0.75] * 500
+    timeline.set_waveform([])
+    assert timeline._visible_waveform_peaks() == []
+    assert timeline._waveform_cache == []
+
+
+@pytest.mark.parametrize(("duration", "precision"), [(60, 1), (6, 2), (0.6, 3)])
+def test_zoomed_ruler_labels_distinguish_subsecond_ticks(qtbot, duration, precision):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 176)
+    timeline.set_duration(duration)
+    timeline.set_zoom(80, anchor_time=0)
+    labels = []
+
+    class Painter:
+        def fillRect(self, *_args):
+            pass
+
+        def setFont(self, *_args):
+            pass
+
+        def setPen(self, *_args):
+            pass
+
+        def drawLine(self, *_args):
+            pass
+
+        def drawText(self, _point, text):
+            labels.append(text)
+
+    timeline._paint_ruler(Painter())
+    assert len(labels) >= 5
+    assert len(labels) == len(set(labels))
+    assert all(len(label.split(".")[1]) == precision for label in labels)
+
+
 def test_segment_release_applies_final_pointer_after_last_move(qtbot):
     timeline = TimelineWidget()
     qtbot.addWidget(timeline)
