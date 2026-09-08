@@ -204,7 +204,7 @@ class TasksWindow(QDialog):
 
     @staticmethod
     def _output(record: JobRecord) -> Path | None:
-        if record.state != "succeeded":
+        if record.state != "succeeded" or record.kind in {"recording-library", "recording-prepare"}:
             return None
         value = record.result
         if isinstance(value, Path):
@@ -214,7 +214,7 @@ class TasksWindow(QDialog):
                 path = value.get(key)
                 if isinstance(path, str) and Path(path).is_absolute():
                     return Path(path)
-        for attribute in ("pack_path", "video_path"):
+        for attribute in ("pack_path", "video_path", "path"):
             path = getattr(value, attribute, None)
             if isinstance(path, Path):
                 return path

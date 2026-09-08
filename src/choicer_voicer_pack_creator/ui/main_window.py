@@ -111,6 +111,7 @@ from choicer_voicer_pack_creator.ui.processing import (
     ProcessingStatus,
 )
 from choicer_voicer_pack_creator.ui.project_checks import ProjectChecks
+from choicer_voicer_pack_creator.ui.recordings_dialog import RecordingsDialog
 from choicer_voicer_pack_creator.ui.scene_dialog import SceneEditDialog
 from choicer_voicer_pack_creator.ui.segment_table import SegmentTableWidget
 from choicer_voicer_pack_creator.ui.setup_consent import SetupConsent
@@ -1011,6 +1012,10 @@ class ProjectEditor(QWidget):
         self.prompt_audio_output = QAudioOutput(self)
         self.prompt_audio_output.setVolume(0.8)
         self.prompt_player.setAudioOutput(self.prompt_audio_output)
+        self.prompt_player.playbackStateChanged.connect(
+            lambda state: self.workspace.pause_recording_playback()
+            if state == QMediaPlayer.PlaybackState.PlayingState else None
+        )
         self.volume_slider.valueChanged.connect(self._set_volume)
 
     def _set_volume(self, value: int) -> None:
@@ -1816,6 +1821,8 @@ class ProjectEditor(QWidget):
         self.play_button.setText("Pause" if playing else "Play")
         self.play_button.setIcon(command_icon("pause" if playing else "play"))
         self.play_button.setAccessibleName("Pause video" if playing else "Play video")
+        if playing:
+            self.workspace.pause_recording_playback()
         if state == QMediaPlayer.PlaybackState.PlayingState:
             self._follow_playback_segment(self.current_position())
 
@@ -3533,6 +3540,7 @@ class MainWindow(QMainWindow):
         self._closed_ids: set[str] = set()
         self._exit_discarded: set[str] = set()
         self.tasks_window = TasksWindow(self.job_manager, self)
+        self.recordings_dialog: RecordingsDialog | None = None
         self.setup_consent = SetupConsent(self)
         self.job_manager.changed.connect(
             lambda record: QTimer.singleShot(0, self._retire_closed_editors)
@@ -3708,6 +3716,10 @@ class MainWindow(QMainWindow):
         self.action_reset_layout.triggered.connect(self.reset_ui_layout)
         self.view_menu.addAction(self.action_reset_layout)
         self.tools_menu.addAction(self.tasks_window.show_action)
+        self.action_recordings = QAction("Recordings...", self)
+        self.action_recordings.setObjectName("showRecordings")
+        self.action_recordings.triggered.connect(self.show_recordings)
+        self.tools_menu.addAction(self.action_recordings)
         self.action_mcp_help = QAction("LLM / MCP Help", self)
         self.action_mcp_help.triggered.connect(lambda: self.active_editor.show_mcp_help())
         self.help_menu.addAction(self.action_mcp_help)
@@ -3741,6 +3753,7 @@ class MainWindow(QMainWindow):
             (self.action_close_project, "close", "Close the active project tab; unsaved work and running tasks are protected."),
             (self.action_reset_layout, "restore", "Restore the default window size and pane layout for all tabs without changing projects."),
             (self.tasks_window.show_action, "tasks", "View and manage background tasks across all projects."),
+            (self.action_recordings, "play", "Find game recordings, preview dubbed playback, and export a video without changing your projects."),
             (self.action_mcp_help, "help", "Open assistant connection instructions and the MCP safety guide."),
             (self.updater.check_action, "restore", "Check GitHub for application updates."),
             (self.updater.auto_action, "restore", "Check for application updates automatically on startup."),
@@ -3750,6 +3763,15 @@ class MainWindow(QMainWindow):
             (self.action_about, "info", "Show application version, credits, and licensing information."),
         ):
             describe_action(action, icon, description)
+
+    def show_recordings(self) -> None:
+        if self.recordings_dialog is None:
+            self.recordings_dialog = RecordingsDialog(self)
+        self.recordings_dialog.open_library()
+
+    def pause_recording_playback(self) -> None:
+        if self.recordings_dialog is not None:
+            self.recordings_dialog.pause_playback()
 
     def _bind_project_menus(
         self, previous: ProjectEditor | None, current: ProjectEditor | None,
@@ -3941,6 +3963,8 @@ class MainWindow(QMainWindow):
             previous.prompt_player.stop()
         self._active_editor = current if isinstance(current, ProjectEditor) else None
         self._bind_project_menus(previous, self._active_editor)
+        if self.recordings_dialog is not None and self._active_editor is not None:
+            self.recordings_dialog.sync_workspace_status()
         if "tasks_window" in self.__dict__:
             self.tasks_window.project_id = current.session.id if self._active_editor else None
             self.tasks_window.refresh()
@@ -4539,6 +4563,8 @@ class MainWindow(QMainWindow):
             self._save_window_layout()
             self.setup_consent.cancel_all()
             self.tasks_window.close()
+            if self.recordings_dialog is not None:
+                self.recordings_dialog.shutdown()
             for editor in self.editors.values():
                 editor._close_derived_work()
                 editor._layout_save_timer.stop()
@@ -4634,6 +4660,8 @@ class MainWindow(QMainWindow):
         if not self.updater.install_on_close():
             self._closing = False
             return
+        if self.recordings_dialog is not None:
+            self.recordings_dialog.shutdown()
         self._save_window_layout()
         for editor in self.editors.values():
             editor._close_derived_work()

@@ -72,6 +72,8 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Saves a relocatable editable `.cvpack.json` project (media beside the project is stored by relative path).
 - Reopens the last 10 saved or opened projects from **File > Open Recent**, even after restarting.
 - Atomically exports a game-ready folder and sharing ZIP.
+- Finds game recording takes, previews their dubbed video, and exports standalone MP4 videos
+  from **Tools > Recordings**, without changing packs, recordings, or open projects.
 - Validates metadata, references, inventory, PNG signatures, timestamps, codecs, complete media decoding, and ZIP CRC before publishing.
 - Lets an MCP-compatible assistant work with a live visible editor, or an explicitly headless
 	project, using local stdio tools for media review, editing, saving, and validated export.
@@ -97,6 +99,52 @@ Saving and exporting, downloads, filesystem changes, creating/closing tabs, play
 and application preferences are not project edits and are not rolled back. Undo does
 not remove or rewrite saved/exported files; save the restored project explicitly to
 update its project file.
+
+## Recording playback and video export
+
+Open **Tools > Recordings** to browse recording takes and export them as ordinary videos.
+The first use asks for the Choicer Voicer **game data folder**, normally
+`%APPDATA%\YeahMaybe\ChoicerVoicer\game` on Windows. The application remembers this
+location for all projects and looks for packs in `packs_voice` and takes under
+`recordings\dub_recordings`. Setup is on demand, never a startup prompt. If the saved
+location moves or becomes unavailable, use **Game Location** to locate it again.
+
+The game does not need to be installed: **Open Recording Folder** also accepts an
+individual dated take, a pack's recording folder, or a recordings collection.
+Use **Choose Pack > Folder / ZIP** to supply its original pack. ZIP imports are kept
+in application-local storage; the ZIP is not changed. Refresh the library to discover
+new takes. Selecting a recording does not import it into the segment editor.
+
+Recordings are matched to prompt filenames after removing the game's `_dubrecord_`
+prefix. Playback timestamps come from the original pack's metadata, not numbers in
+filenames or the currently edited project's segment timings. Ambiguous matches require
+choosing a pack. Matching filenames alone cannot prove that an installed pack is the
+exact version used when the recording was made.
+
+Select a take and choose **Play**. Preparing the first preview mixes the recorded WAVs
+on the video's timeline, including overlapping voices, then plays one synchronized
+video/audio file. Space in the recording list or video toggles playback. The seek bar,
+listening volume, and fullscreen controls do not edit the source files. Starting
+recording playback pauses the editor, and starting editor playback pauses the recording.
+**Clip Details** lists the recorded files, speakers, timestamps, durations, and warnings.
+
+The mix uses recorded voices and the pack's separate backing track only; it never adds
+the video's embedded dialogue or substitutes original prompts for missing recordings.
+Without backing, playback is **voices only**. Choose a clean backing file if desired.
+The **Voices** and **Backing** percentages affect both preview and export; **Volume**
+affects listening only. Changes to the mix require preparing a new preview.
+
+**Export Video** saves an MP4 using the source resolution and frame rate. Review warnings
+about missing clips, unknown files, or recordings extending past the video before
+continuing. The video keeps its original length; recorded audio past its end is cut off.
+Software OpenH264 is used when available in the selected FFmpeg; otherwise the app
+warns before using MPEG-4 Part 2/AAC, which is not accepted by every browser or sharing
+service. Recording export does not require adding a GPL encoder to the portable build.
+Exports run in **Tools > Tasks**, can be cancelled, and are staged before replacing an
+existing output after confirmation. Closing the Recordings window hides it and pauses
+playback, but does not cancel a running export. **Open Video** and **Show in Folder** are
+available when export completes. Keep the original pack and recordings unchanged while
+processing; changed inputs require refreshing and preparing again.
 
 ## Pack format
 
