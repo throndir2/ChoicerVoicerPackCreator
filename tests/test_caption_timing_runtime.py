@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import time
 from dataclasses import replace
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +14,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from choicer_voicer_pack_creator import analysis
+from choicer_voicer_pack_creator import analysis, caption_timing
 from choicer_voicer_pack_creator import caption_timing_runtime as runtime
 from choicer_voicer_pack_creator import caption_timing_worker as worker
 from choicer_voicer_pack_creator.caption_timing_types import (
@@ -370,24 +371,177 @@ def test_timestamp_envelopes_reject_unterminated_or_backwards_text():
         worker._timestamp_segments([20100, *tokens, 20050], tokenizer, 5)
 
 
-def test_independent_envelope_excludes_first_word_silence_and_punctuation():
-    tokenizer = _WordsTokenizer()
-    tokens = tokenizer.encode("Hello . there")
+def _recognition_model(tokenizer, segments, boundaries):
+    sequence = []
+    token_count = 0
+    for text, start, end in segments:
+        tokens = tokenizer.encode(text)
+        token_count += len(tokens)
+        sequence.extend([
+            tokenizer.timestamp_begin + round(start * 50), *tokens,
+            tokenizer.timestamp_begin + round(end * 50),
+        ])
+    assert len(boundaries) == token_count + 1
     generated = SimpleNamespace(
-        sequences_ids=[[20100, *tokens, 20200, 10000]], no_speech_prob=0.01, scores=[-0.1],
+        sequences_ids=[[*sequence, tokenizer.eot]], no_speech_prob=0.01, scores=[-0.1],
     )
     alignment = SimpleNamespace(
-        alignments=[(0, 0), (1, 120), (2, 180), (3, 200)], text_token_probs=[0.9] * 3,
+        alignments=[(index, round(time * 50)) for index, time in enumerate(boundaries)],
+        text_token_probs=[0.9] * token_count,
     )
-    model = SimpleNamespace(
+    return SimpleNamespace(
+        encode=lambda _features: object(),
         generate=lambda *_args, **_kwargs: [generated],
         align=lambda *_args: [alignment],
     )
+
+
+@pytest.mark.parametrize("envelope", [(1, 2.2), (0.8, 2), (1, 2)])
+def test_normal_recognized_words_keep_support_outside_approximate_envelope(envelope):
+    tokenizer = _WordsTokenizer()
+    model = _recognition_model(tokenizer, [("Hello world", *envelope)], (0.9, 1.1, 2.1))
+    words = worker._recognized_words(model, tokenizer, object(), 300, 3, 100)
+    assert [(word.start, word.end) for word in words] == [
+        pytest.approx((100.9, 101.1)), pytest.approx((101.1, 102.1)),
+    ]
+    assert [word.probability for word in words] == [0.9, 0.9]
+
+
+@pytest.mark.parametrize("boundaries,probabilities", [
+    ((0.5, 0.9, 1.3), (0.2, 0.9)),
+    ((1.7, 2.1, 2.5), (0.9, 0.2)),
+    ((0.1, 0.3, 0.5), (0.2, 0.2)),
+])
+def test_disjoint_envelopes_lower_confidence_without_moving_words(boundaries, probabilities):
+    tokenizer = _WordsTokenizer()
+    model = _recognition_model(tokenizer, [("Hello world", 1, 2)], boundaries)
+    words = worker._recognized_words(model, tokenizer, object(), 300, 3, 0)
+    assert [(word.start, word.end) for word in words] == [
+        pytest.approx(pair) for pair in pairwise(boundaries)
+    ]
+    assert tuple(word.probability for word in words) == probabilities
+    assert "Low-confidence" in caption_timing.audit_caption_text("Hello world", words)
+
+
+def test_long_first_word_is_reviewed_without_inventing_onset_or_punctuation_duration():
+    tokenizer = _WordsTokenizer()
+    model = _recognition_model(
+        tokenizer, [("Hello . there", 2, 4)], (0, 2.4, 3.6, 4),
+    )
     words = worker._recognized_words(model, tokenizer, object(), 500, 5, 100)
     assert words[0].text == "Hello."
-    assert words[0].start == 102 and words[0].end == 102.4
-    assert words[0].probability > 0.8
+    assert words[0].start == 100 and words[0].end == 102.4
+    assert words[0].probability == 0.2
     assert words[1].start == 103.6 and words[1].end == 104
+    assert words[1].probability == 0.9
+    assert "Low-confidence" in caption_timing.audit_caption_text("Hello there", words)
+
+
+def test_uncertain_long_onset_keeps_independent_supported_closing_correction():
+    tokenizer = _WordsTokenizer()
+    model = _recognition_model(
+        tokenizer, [("Hello friendly wide world", 2, 3.3)], (0, 2.4, 2.7, 3, 3.3),
+    )
+    words = worker._recognized_words(model, tokenizer, object(), 500, 5, 0)
+    cue = SourceCaption(0, 3.8, "Hello friendly wide world", "test")
+    forced = tuple(replace(word, probability=0.9) for word in words)
+    proposed = caption_timing.correct_caption_timings(
+        (cue,), (CaptionTimingEvidence(0, forced, words),), 5,
+    )
+    assert proposed.captions[0].start == cue.start
+    assert proposed.captions[0].end == pytest.approx(3.55)
+    assert "Opening unchanged" in proposed.review_reasons[0]
+    assert "Closing unchanged" not in proposed.review_reasons[0]
+    reviewed = worker._audit_proposed_cuts(
+        lambda *_: None, object(), (cue,), proposed, model, tokenizer, object(),
+    )
+    assert reviewed.captions == proposed.captions
+    assert reviewed.confidences == (None,)
+    assert reviewed.review_reasons == proposed.review_reasons
+
+
+def test_contiguous_caption_edges_preserve_words_without_relying_on_padding():
+    tokenizer = _WordsTokenizer()
+    model = _recognition_model(
+        tokenizer,
+        [("Before", 0.4, 0.9), ("Hello world", 1, 2), ("After", 2.1, 2.4)],
+        (0.4, 0.9, 1.1, 2.1, 2.4),
+    )
+    words = worker._recognized_words(model, tokenizer, object(), 300, 3, 0)
+    forced = (
+        (TimingWord("Before", 0.4, 0.9, 0.9),),
+        (TimingWord("Hello", 0.9, 1.1, 0.9), TimingWord("world", 1.1, 2.1, 0.9)),
+        (TimingWord("After", 2.1, 2.4, 0.9),),
+    )
+    cues = (
+        SourceCaption(0.3, 1, "Before", "test"),
+        SourceCaption(1, 2, "Hello world", "test"),
+        SourceCaption(2, 2.5, "After", "test"),
+    )
+    result = caption_timing.correct_caption_timings(
+        cues, tuple(CaptionTimingEvidence(i, span, words) for i, span in enumerate(forced)), 3,
+    )
+    assert result.review_reasons == ("", "", "")
+    assert result.captions[0].end == result.captions[1].start == pytest.approx(0.9)
+    assert result.captions[1].end == result.captions[2].start == pytest.approx(2.1)
+    assert [cue.text for cue in result.captions] == [cue.text for cue in cues]
+
+
+@pytest.mark.parametrize("boundaries", [(-0.1, 0.2, 0.8), (0.4, 0.2, 0.8)])
+def test_invalid_recognized_alignment_is_rejected_not_clamped(boundaries):
+    tokenizer = _WordsTokenizer()
+    model = _recognition_model(tokenizer, [("Hello world", 0, 1)], boundaries)
+    with pytest.raises(runtime.CaptionTimingError, match="nonmonotonic"):
+        worker._recognized_words(model, tokenizer, object(), 100, 1, 0)
+
+
+def test_zero_length_recognized_word_remains_invalid_not_repaired():
+    tokenizer = _WordsTokenizer()
+    model = _recognition_model(tokenizer, [("Hello world", 0, 1)], (0.4, 0.4, 0.8))
+    words = worker._recognized_words(model, tokenizer, object(), 100, 1, 0)
+    assert words[0].start == words[0].end == 0.4
+    assert words[0].probability == 0.2
+    assert "Invalid word timestamps" in caption_timing.audit_caption_text("Hello world", words)
+
+
+@pytest.mark.parametrize("envelope,boundaries,review", [
+    ((0.2, 1.2), (0.1, 0.3, 1.3), False),
+    ((2, 2.8), (0, 2.4, 2.8), True),
+    ((1, 2), (0.1, 0.3, 0.5), True),
+])
+def test_post_cut_audit_uses_unclipped_lexical_support(
+    tmp_path, monkeypatch, envelope, boundaries, review,
+):
+    tokenizer = _WordsTokenizer()
+    model = _recognition_model(tokenizer, [("Hello world", *envelope)], boundaries)
+    path = tmp_path / "audit.wav"
+    sf.write(path, np.full(16000 * 4, 0.1, dtype=np.float32), 16000, subtype="PCM_16")
+    cue = SourceCaption(0.5, 3.5, "Hello world", "test")
+    proposed = CaptionTimingResult((cue,), (0.9,), ("",))
+    audited_words = []
+    actual_audit = caption_timing.audit_caption_text
+
+    def audit(text, words):
+        audited_words.extend(words)
+        return actual_audit(text, words)
+
+    monkeypatch.setattr(caption_timing, "audit_caption_text", audit)
+    with sf.SoundFile(path) as audio:
+        result = worker._audit_proposed_cuts(
+            lambda *_: None, audio, (cue,), proposed, model, tokenizer, worker.mel_filters(),
+        )
+    assert [(word.start, word.end) for word in audited_words] == [
+        pytest.approx((cue.start + start, cue.start + end))
+        for start, end in pairwise(boundaries)
+    ]
+    assert result.confidences == ((None,) if review else (0.9,))
+    assert result.review_reasons == (
+        ("Proposed-cut audit: Low-confidence opening or closing word in the proposed cut",)
+        if review else ("",)
+    )
+    assert (result.captions[0].start, result.captions[0].end) == (cue.start, cue.end)
+    assert result.captions[0].text == cue.text
+    assert ("wording corroborated locally" in result.captions[0].source) is not review
 
 
 @pytest.mark.parametrize("language", ["en", "auto"])
@@ -481,8 +635,6 @@ def test_post_cut_audit_reuses_model_and_reads_only_trusted_exact_ranges(
     local_model, tmp_path, monkeypatch,
 ):
     import ctranslate2
-
-    from choicer_voicer_pack_creator import caption_timing
 
     manager, payloads = local_model
     _install(manager, payloads)
