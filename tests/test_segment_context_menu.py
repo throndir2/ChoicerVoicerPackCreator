@@ -289,6 +289,43 @@ def test_context_menu_keeps_target_during_playback_and_loading_closes_it(
     assert window.action_delete.isEnabled()
 
 
+def test_right_drag_keeps_playback_follow_from_shifting_view_or_selection(
+    window, qtbot, monkeypatch,
+):
+    click_block(window, qtbot, 0)
+    timeline = window.timeline
+    before = window.project.to_dict()
+    selected = window.selected_segment()
+    timeline.set_zoom(2, anchor_time=3)
+    original_offset = timeline.offset
+    point = timeline._segment_rect(window.project.segments[1]).center().toPoint()
+    seeks = []
+    monkeypatch.setattr(window.player, "setPosition", seeks.append)
+    monkeypatch.setattr(
+        window.player, "playbackState", lambda: QMediaPlayer.PlaybackState.PlayingState,
+    )
+    qtbot.mousePress(timeline, Qt.MouseButton.RightButton, pos=point)
+    qtbot.mouseMove(timeline, point - QPoint(100, 0))
+    offset = timeline.offset
+    assert offset > original_offset
+    window.player.positionChanged.emit(5500)
+    assert timeline.playhead == 5.5
+    assert timeline.offset == offset
+    assert window.selected_segment() is selected
+    assert window._range_edit_record is None
+    qtbot.mouseRelease(timeline, Qt.MouseButton.RightButton, pos=point - QPoint(100, 0))
+    QApplication.sendEvent(timeline, QContextMenuEvent(
+        QContextMenuEvent.Reason.Mouse, point, timeline.mapToGlobal(point),
+    ))
+    assert not window._segment_context_menu.isVisible()
+    assert not seeks
+    assert window.project.to_dict() == before
+    assert not window.dirty
+    assert not window.edit_history.history.can_undo
+    window.player.positionChanged.emit(5500)
+    assert window.selected_segment() is window.project.segments[2]
+
+
 @pytest.mark.parametrize("surface", ["timeline", "table"])
 def test_right_click_does_not_move_playhead_before_split(window, qtbot, monkeypatch, surface):
     click_block(window, qtbot, 0)

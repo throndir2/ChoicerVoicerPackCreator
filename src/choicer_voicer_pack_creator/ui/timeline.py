@@ -81,11 +81,17 @@ class TimelineWidget(QWidget):
         self._drag_previous_mark_start = 0.0
         self._drag_previous_mark_end = 0.0
         self._drag_previous_mark_segment_id = ""
+        self._pan_press_position = QPointF()
+        self._suppress_mouse_context_menu = False
         self._segment_lanes: dict[str, int] = {}
 
     @property
     def visible_duration(self) -> float:
         return self.duration / max(1.0, self.zoom)
+
+    @property
+    def is_panning(self) -> bool:
+        return self._drag_kind == "pan"
 
     def set_duration(self, duration: float) -> None:
         self.duration = max(0.1, duration)
@@ -306,9 +312,18 @@ class TimelineWidget(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.RightButton:
-            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self._suppress_mouse_context_menu = True
+            if not self._drag_kind:
+                self.setFocus(Qt.FocusReason.MouseFocusReason)
+                self._pan_press_position = event.position()
+                self._prepare_drag("pan", "", self.offset, self.offset, event.position().x())
+                QToolTip.hideText()
             event.accept()
             return
+        if self._drag_kind:
+            event.accept()
+            return
+        self._suppress_mouse_context_menu = False
         if event.button() != Qt.MouseButton.LeftButton:
             return
         self.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -370,27 +385,38 @@ class TimelineWidget(QWidget):
         self.seek_requested.emit(self._x_to_time(x))
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802
-        if self._drag_kind:
+        keyboard = event.reason() == QContextMenuEvent.Reason.Keyboard
+        # Mouse menus are handled on release, after distinguishing a click from a pan.
+        # Native context-menu events can arrive on either press or release.
+        if self._drag_kind or (not keyboard and self._suppress_mouse_context_menu):
             event.accept()
             return
-        keyboard = event.reason() == QContextMenuEvent.Reason.Keyboard
+        self._request_segment_context_menu(event.pos(), event.globalPos(), keyboard=keyboard)
+        event.accept()
+
+    def _request_segment_context_menu(
+        self, position: QPoint, global_position: QPoint, *, keyboard: bool = False,
+    ) -> None:
         segment = next(
             (
                 item for item in (self.segments if keyboard else reversed(self.segments))
                 if (item.id in self.selected_ids if keyboard
-                    else self._segment_rect(item).contains(QPointF(event.pos())))
+                    else self._segment_rect(item).contains(QPointF(position)))
             ),
             None,
         )
         if segment is not None:
-            position = (
+            menu_position = (
                 self.mapToGlobal(self._segment_rect(segment).center().toPoint())
-                if keyboard else event.globalPos()
+                if keyboard else global_position
             )
-            self.segment_context_menu_requested.emit(segment.id, position)
-        event.accept()
+            self.segment_context_menu_requested.emit(segment.id, menu_position)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self.is_panning:
+            self._update_pan(event.position())
+            event.accept()
+            return
         if self._drag_kind:
             if not self._drag_active:
                 distance = abs(event.position().x() - self._drag_press_x)
@@ -431,6 +457,7 @@ class TimelineWidget(QWidget):
                     f"{segment.primary_character}\n{segment.start:.3f}–{segment.end:.3f}s\n"
                     f"Click to cue the start; drag the center to move; drag an edge to trim.\n"
                     "Shift/Ctrl-click to add or remove a selection; right-click for segment actions.\n"
+                    "Right-drag to pan without moving the playhead or editing segments.\n"
                     f"{segment.caption}",
                     self,
                 )
@@ -438,6 +465,18 @@ class TimelineWidget(QWidget):
         self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self.is_panning:
+            if event.button() == Qt.MouseButton.RightButton:
+                self._update_pan(event.position())
+                clicked = not self._drag_active
+                self._clear_drag()
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+                if clicked:
+                    self._request_segment_context_menu(
+                        event.position().toPoint(), event.globalPosition().toPoint(),
+                    )
+            event.accept()
+            return
         if event.button() != Qt.MouseButton.LeftButton or not self._drag_kind:
             return
         if self._drag_kind == "playhead":
@@ -462,7 +501,11 @@ class TimelineWidget(QWidget):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if event.key() == Qt.Key.Key_Escape and self._drag_kind:
-            if self._drag_kind == "playhead":
+            if self.is_panning:
+                self.offset = self._drag_original_start
+                self._clamp_offset()
+                self.update()
+            elif self._drag_kind == "playhead":
                 self._seek_playhead(self._drag_original_start)
             elif self._drag_active:
                 if self._drag_kind == "mark-new":
@@ -511,11 +554,19 @@ class TimelineWidget(QWidget):
         self._drag_original_start = segment.start if segment else start
         self._drag_original_end = segment.end if segment else end
 
+    def _update_pan(self, position: QPointF) -> None:
+        if not self._drag_active:
+            distance = (position - self._pan_press_position).manhattanLength()
+            if distance < QApplication.startDragDistance():
+                return
+            self._activate_drag()
+        self._update_drag(position.x())
+
     def _activate_drag(self) -> None:
         if self._drag_active:
             return
         self._drag_active = True
-        if self._drag_kind == "playhead":
+        if self._drag_kind in {"playhead", "pan"}:
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             QToolTip.hideText()
             return
@@ -531,6 +582,14 @@ class TimelineWidget(QWidget):
         )
 
     def _update_drag(self, x: float) -> None:
+        if self.is_panning:
+            self.offset = (
+                self._drag_original_start
+                - (x - self._drag_press_x) / max(1, self.width()) * self.visible_duration
+            )
+            self._clamp_offset()
+            self.update()
+            return
         timestamp = self._x_to_time(x)
         if self._drag_kind == "playhead":
             self._seek_playhead(timestamp)
@@ -593,6 +652,9 @@ class TimelineWidget(QWidget):
         self._drag_active = False
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        if self.is_panning:
+            event.accept()
+            return
         anchor = self._x_to_time(event.position().x())
         factor = 1.25 if event.angleDelta().y() > 0 else 0.8
         self.set_zoom(self.zoom * factor, anchor)

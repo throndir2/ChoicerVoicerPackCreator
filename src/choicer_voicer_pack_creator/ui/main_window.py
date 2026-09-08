@@ -593,7 +593,8 @@ class ProjectEditor(QWidget):
             "drag its edges or IN/OUT handles to trim. These edits update the segment directly.\n"
             "Drag across empty waveform space to mark a new In/Out range, then use "
             "Add Segment or Update Segment Timing.\n"
-            "Scroll over the timeline to zoom."
+            "Scroll over the timeline to zoom. Right-drag to pan without moving the playhead "
+            "or editing segments."
         )
         self.timeline.seek_requested.connect(self.seek)
         self.timeline.segment_selected.connect(self.select_segment)
@@ -1783,6 +1784,7 @@ class ProjectEditor(QWidget):
             or self._stopped_seek_active
             or self._preview_end is not None
             or self._range_edit_record is not None
+            or self.timeline.is_panning
             or self._syncing
             or self.edit_history.busy
             or self._segment_context_menu.isVisible()
