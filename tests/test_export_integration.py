@@ -15,6 +15,7 @@ from choicer_voicer_pack_creator.exporter import PackExporter
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import PackProject, Segment, SourceCaption
 from choicer_voicer_pack_creator.pack_io import PackImporter
+from choicer_voicer_pack_creator.pack_manifest import MANIFEST_NAME, read_manifest
 from choicer_voicer_pack_creator.validation import PackValidator
 
 
@@ -88,6 +89,7 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> Non
         tail_padding=0.15,
         video_height=360,
         video_fps=12,
+        source_url="https://youtu.be/abcdefghijk?si=tracking",
         segments=[
             Segment(0.2, 0.75, "First line", ["Alice"]),
             Segment(1.0, 1.55, "Second line", ["Bob"]),
@@ -133,14 +135,14 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> Non
             assert f"{phase}: fully decoding Ogg video and audio" in messages
             assert f"{phase}: prompt {index}/2: checking and decoding audio" in messages
             assert f"{phase}: prompt {index}/2: checking and decoding still image" in messages
-    assert "Hashing staged file 10/10..." in messages
-    assert "Creating ZIP: adding file 10/10..." in messages
-    assert "Verifying published file 10/10..." in messages
+    assert "Hashing staged file 11/11..." in messages
+    assert "Creating ZIP: adding file 11/11..." in messages
+    assert "Verifying published file 11/11..." in messages
     assert "Testing staged ZIP integrity and file inventory..." in messages
     assert "Testing published ZIP integrity and file inventory..." in messages
-    assert messages.index("Hashing staged file 10/10...") < messages.index(
-        "Creating ZIP: adding file 1/10..."
-    ) < messages.index("Verifying published file 1/10...")
+    assert messages.index("Hashing staged file 11/11...") < messages.index(
+        "Creating ZIP: adding file 1/11..."
+    ) < messages.index("Verifying published file 1/11...")
     assert messages[-1] == "Cleaning up export staging files..."
     assert result.pack_path.is_dir()
     assert result.zip_path and result.zip_path.is_file()
@@ -148,6 +150,7 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> Non
         "_pack_info.ini", "icon.png", "dub_video.ogv", "_backing_track.mp3",
         "001_Alice.mp3", "001_Alice.png", "001_Alice.txt",
         "002_Bob.mp3", "002_Bob.png", "002_Bob.txt",
+        MANIFEST_NAME,
     }
     assert set(result.file_hashes) == expected_names
     assert result.file_hashes == {
@@ -165,7 +168,7 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> Non
             assert archive.read(entry) == (result.pack_path / Path(entry.filename).name).read_bytes()
     video = media.probe(result.pack_path / "dub_video.ogv")
     assert result.validation == {
-        "status": "passed", "title": "Integration Pack", "clip_count": 2, "file_count": 10,
+        "status": "passed", "title": "Integration Pack", "clip_count": 2, "file_count": 11,
         "video": {
             "duration": video.duration, "width": video.width, "height": video.height,
             "fps": video.fps, "video_codec": "theora", "audio_codec": "vorbis",
@@ -219,7 +222,11 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> Non
         patch.setattr(media, "convert_video", unexpected_conversion)
         repeated = PackExporter(media, cache_root=cache_root).export(project, tmp_path / "output")
     assert repeated.validation == result.validation
-    assert repeated.file_hashes == result.file_hashes
+    assert repeated.file_hashes[MANIFEST_NAME] != result.file_hashes[MANIFEST_NAME]
+    assert {name: digest for name, digest in repeated.file_hashes.items() if name != MANIFEST_NAME} == {
+        name: digest for name, digest in result.file_hashes.items() if name != MANIFEST_NAME
+    }
+    assert read_manifest(repeated.pack_path).pack_id == project.pack_id
 
     original_duration = media.probe_audio_duration(result.pack_path / "001_Alice.mp3")
     project.title = "Retimed Integration Pack"
@@ -232,6 +239,12 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> Non
     assert imported.title == "Integration Pack"
     assert len(imported.segments) == 2
     assert imported.segments[0].audio_mode == "file"
+    assert imported.segments[0].source_range_known
+    assert (imported.segments[0].start, imported.segments[0].end) == (0.2, 0.75)
+    assert imported.segments[0].recording_padding == (0.1, 0.15)
+    assert imported.segments[0].id == project.segments[0].id
+    assert imported.pack_id == project.pack_id
+    assert imported.source_url == "https://www.youtube.com/watch?v=abcdefghijk"
     with pytest.raises(ValueError, match="contains source or project assets"):
         PackExporter(media).export(imported, result.pack_path.parent)
 
@@ -265,6 +278,7 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> Non
     )
     assert file_hash(modified.pack_path / "001_Alice.mp3") == original_audio_hash
     assert file_hash(modified.pack_path / "001_Alice.png") == original_image_hash
+    assert read_config(modified.pack_path / "001_Alice.txt")["data"]["dub_timestamps"] == [0.1]
 
     recovered = PackImporter(media).import_zip(result.zip_path, tmp_path / "recovered").project
     dialogue_before = [segment.to_dict() for segment in recovered.segments]
@@ -283,7 +297,7 @@ def test_exports_valid_pack_and_reimports_it(tmp_path: Path, monkeypatch) -> Non
     combined = PackExporter(media).export(project, tmp_path / "combined-output")
     assert combined.validation["status"] == "passed"
     assert combined.validation["clip_count"] == 1
-    assert combined.validation["file_count"] == 7
+    assert combined.validation["file_count"] == 8
     combined_metadata = read_config(combined.pack_path / "001_Alice.txt")["data"]
     assert combined_metadata["caption"] == "First line Second line"
     assert combined_metadata["dub_characters"] == ["Alice", "Bob"]

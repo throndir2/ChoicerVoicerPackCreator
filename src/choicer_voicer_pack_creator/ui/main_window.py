@@ -1910,10 +1910,10 @@ class ProjectEditor(QWidget):
             QMessageBox.information(
                 self,
                 "Set source range first",
-                "A preserved recording cannot be split safely because existing packs do not store "
-                "its original source-video cut. Mark the exact spoken In/Out range, click Update "
-                "Segment Timing, and choose Yes when asked whether to regenerate prompt audio. "
-                "Then split it.",
+                "Splitting requires regenerating the preserved recording. If its original cut "
+                "was restored from an app manifest, choose source-video audio first. Otherwise, "
+                "mark the exact spoken In/Out range, click Update Segment Timing, and choose Yes "
+                "when asked whether to regenerate prompt audio. Then split it.",
             )
             return
         split_at = self.current_position()
@@ -2200,7 +2200,8 @@ class ProjectEditor(QWidget):
                     f"{segment.start:.3f}–{segment.end:.3f}s, but this segment currently uses "
                     "a preserved audio file.\n\n"
                     "Yes — regenerate the prompt MP3 from the source video on the next export.\n"
-                    "No — keep the existing recording unchanged; Out will match its decoded duration.\n"
+                    "No — keep the existing recording unchanged; retain its known cut duration "
+                    "or measure it if unknown.\n"
                     "Cancel — undo this range edit.",
                     QMessageBox.StandardButton.Yes
                     | QMessageBox.StandardButton.No
@@ -2222,6 +2223,9 @@ class ProjectEditor(QWidget):
             segment.audio_mode = "video"
             segment.audio_path = ""
             segment.source_range_known = True
+            segment.recording_padding = None
+        elif audio_result == "preserve" and segment.recording_padding is not None:
+            segment.end = segment.start + (original_end - original_start)
         elif audio_result == "preserve" and segment.audio_path:
             try:
                 segment.end = round(
@@ -2964,6 +2968,7 @@ class ProjectEditor(QWidget):
             return
         segment.audio_mode = "file"
         segment.audio_path = str(Path(path).resolve())
+        segment.recording_padding = None
         self._set_dirty(True, segment=segment, history_label="Choose prompt audio")
         self._sync_selected_editor()
         self._refresh_table(segment.id)
@@ -2984,6 +2989,7 @@ class ProjectEditor(QWidget):
             return
         segment.audio_mode = "video"
         segment.audio_path = ""
+        segment.recording_padding = None
         self._set_dirty(True, segment=segment, history_label="Use source-video audio")
         self._sync_selected_editor()
         self._refresh_table(segment.id)

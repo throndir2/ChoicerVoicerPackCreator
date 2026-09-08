@@ -28,6 +28,8 @@ def rich_project() -> PackProject:
         source_pack_path="original-pack", preserve_source_video=True,
         import_warnings=["Keep this warning"], source_url="https://example.invalid/media",
         caption_language="ja", auto_speaker_matching=False,
+        pack_id="11111111111111111111111111111111",
+        parent_pack_id="22222222222222222222222222222222",
         source_captions=[
             SourceCaption(
                 0.123456789, 2.345678912, "Source text", "YouTube",
@@ -44,6 +46,7 @@ def rich_project() -> PackProject:
             Segment(
                 4.123456789123, 7.987654321987, "Recording", [" B ", "A"],
                 "file", "keep-this-prompt.mp3", "still.png", False, "recording-id", "excluded",
+                recording_padding=(0.123456789, 0.987654321),
             ),
             Segment(0.123456789123, 2.234567891234, "Earlier", ["C"], id="earlier-id"),
         ],

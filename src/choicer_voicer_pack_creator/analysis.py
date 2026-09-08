@@ -32,6 +32,7 @@ try:
 except ImportError:  # Removed from Python 3.13; retain the pure-Python fallback.
     _audio_rms = None
 
+from choicer_voicer_pack_creator.caption_timing_types import CaptionTimingResult
 from choicer_voicer_pack_creator.captions import pad_source_ranges, refine_captions
 from choicer_voicer_pack_creator.diagnostics import (
     diagnostic_event,
@@ -109,6 +110,7 @@ class AnalysisResult:
     detected_language: str | None
     hardware: HardwareProfile
     refined_captions: list[SourceCaption] | None = None
+    caption_timing: CaptionTimingResult | None = None
 
 
 def default_manifest_path() -> Path:
@@ -1003,10 +1005,16 @@ def analyze_video(
     manifest_path: Path | None = None,
     source_captions: list[SourceCaption] | None = None,
     pause_threshold: float = 0.4,
+    align_captions: bool = False,
+    allow_alignment_download: bool = False,
 ) -> AnalysisResult:
     _check_cancel(cancelled)
     if not math.isfinite(duration) or duration <= 0:
         raise AnalysisError("Video analysis requires a finite, positive duration")
+    if not isinstance(align_captions, bool) or not isinstance(allow_alignment_download, bool):
+        raise ValueError("Caption alignment and download permission must be boolean")
+    if align_captions and not source_captions:
+        raise AnalysisError("Word alignment requires original imported captions")
     if source_captions is not None and (
         isinstance(pause_threshold, bool) or not math.isfinite(pause_threshold)
         or not 0.2 <= pause_threshold <= 1.0
@@ -1022,6 +1030,8 @@ def analyze_video(
                 language=language, progress=progress, cancelled=cancelled,
                 manifest_path=manifest_path, source_captions=source_captions,
                 pause_threshold=pause_threshold,
+                align_captions=align_captions,
+                allow_alignment_download=allow_alignment_download,
             )
             source.verify()
             return result
@@ -1044,6 +1054,8 @@ def _analyze_video(
     manifest_path: Path | None,
     source_captions: list[SourceCaption] | None,
     pause_threshold: float,
+    align_captions: bool = False,
+    allow_alignment_download: bool = False,
 ) -> AnalysisResult:
     hardware = detect_hardware()
     diagnostic_event(
@@ -1052,6 +1064,7 @@ def _analyze_video(
         cpu_threads=hardware.cpu_threads, memory_bytes=hardware.memory_bytes,
         available_memory_bytes=hardware.available_memory_bytes,
         refine_youtube=source_captions is not None, pause_threshold=pause_threshold,
+        align_captions=align_captions,
     )
     estimated_audio_bytes = max(1, math.ceil(duration * 16_000 * 2))
     temporary_root = Path(tempfile.gettempdir()).resolve()
@@ -1103,15 +1116,26 @@ def _analyze_video(
         wav_path = temporary / "analysis.wav"
         extract_analysis_audio(media, video, wav_path, progress, cancelled)
         refined: list[SourceCaption] | None = None
+        caption_timing: CaptionTimingResult | None = None
         if source_captions is not None:
             activity, threshold = scan_audio_activity(
                 wav_path, duration, sensitivity, progress, cancelled, raw=True
             )
-            progress("Refining YouTube fragments using measured audio pauses…", None)
-            refined = refine_captions(
-                source_captions, [(region.start, region.end) for region in activity], duration,
-                pause_threshold=pause_threshold, check_cancel=lambda: _check_cancel(cancelled),
-            )
+            if align_captions:
+                from choicer_voicer_pack_creator.caption_timing_runtime import improve_caption_audio
+
+                caption_timing = improve_caption_audio(
+                    wav_path, source_captions, duration, data_root,
+                    language=language, allow_download=allow_alignment_download,
+                    progress=progress, cancelled=cancelled,
+                )
+                refined = list(caption_timing.captions)
+            else:
+                progress("Refining YouTube fragments using measured audio pauses…", None)
+                refined = refine_captions(
+                    source_captions, [(region.start, region.end) for region in activity], duration,
+                    pause_threshold=pause_threshold, check_cancel=lambda: _check_cancel(cancelled),
+                )
             progress(f"Prepared {len(refined)} YouTube caption row(s).", 1.0)
             # If both outputs were requested, retain the ordinary scan for Whisper suggestions.
             if use_whisper:
@@ -1145,6 +1169,10 @@ def _analyze_video(
             "analysis_results", activity_regions=len(activity), transcript_regions=len(transcripts),
             suggestions=len(suggestions), detected_language=detected_language,
             refined_captions=len(refined) if refined is not None else None,
+            timing_review_rows=(
+                sum(bool(reason) for reason in caption_timing.review_reasons)
+                if caption_timing is not None else None
+            ),
         )
         return AnalysisResult(
             suggestions=suggestions,
@@ -1155,4 +1183,5 @@ def _analyze_video(
             detected_language=detected_language,
             hardware=hardware,
             refined_captions=refined,
+            caption_timing=caption_timing,
         )

@@ -49,6 +49,7 @@ SELECTORS = frozenset({
     "projectEditorScrollbar", "projectDetailsScrollbar", "selectedSegmentScrollbar",
     "segmentSpeakers", "autoSpeakerMatching", "keepSpeakerUnassigned",
     "matchSpeakers", "undoSpeakerMatching", "cancelSpeakerMatching",
+    "alignYouTubeTimings",
 }) | EXPORT_OPTION_SELECTORS
 EDITOR_SELECTORS = frozenset({
     "projectTitle", "segmentCaption", "segmentsTable",
@@ -57,6 +58,7 @@ EDITOR_SELECTORS = frozenset({
     "projectEditorScrollbar", "projectDetailsScrollbar", "selectedSegmentScrollbar",
     "segmentSpeakers", "autoSpeakerMatching", "keepSpeakerUnassigned",
     "matchSpeakers", "undoSpeakerMatching", "cancelSpeakerMatching",
+    "alignYouTubeTimings",
 }) | EXPORT_OPTION_SELECTORS
 KEYS = {
     "Enter": Qt.Key.Key_Return, "Escape": Qt.Key.Key_Escape,

@@ -6,6 +6,7 @@ import subprocess
 import sys
 from array import array
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from http.cookiejar import CookieJar
 from pathlib import Path
 from types import SimpleNamespace
@@ -161,16 +162,27 @@ def test_media_launch_errors_and_probe_metadata_are_logged(tmp_path: Path, monke
 
 def test_binary_audio_commands_do_not_log_samples(tmp_path: Path, monkeypatch) -> None:
     samples = array("h", [0, 32760, 0]).tobytes()
+
+    @contextmanager
+    def owned(_command, *, on_reaped, **_kwargs):
+        with io.BytesIO(samples) as stream:
+            try:
+                yield SimpleNamespace(stdout=stream, returncode=0, poll=lambda: 0)
+            finally:
+                on_reaped()
+
+    monkeypatch.setattr(media_module, "owned_subprocess", owned)
     monkeypatch.setattr(
         MediaTools, "_capture",
         lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, samples, b""),
     )
     media = MediaTools.__new__(MediaTools)
-    media.ffmpeg = "ffmpeg.exe"
+    media.ffmpeg = "fixture-ffmpeg"
     with ApplicationDiagnostics(tmp_path):
         assert media.decoded_audio_stats(tmp_path / "audio.mp3").has_activity
+        assert media.validated_audio_stats(tmp_path / "audio.mp3").has_activity
         assert media.has_audio_activity(tmp_path / "video.mp4", 1, 2)
-    assert len(records(tmp_path, "media_command_completed")) == 2
+    assert len(records(tmp_path, "media_command_completed")) == 3
     assert all("stdout" not in row for row in records(tmp_path))
     assert repr(samples) not in application_log_path(tmp_path).read_text(encoding="utf-8")
 

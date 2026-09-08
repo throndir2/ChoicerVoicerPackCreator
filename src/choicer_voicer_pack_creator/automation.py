@@ -420,6 +420,8 @@ class PackAutomation:
             for name in ("audio_path", "image_path"):
                 if fields.get(name):
                     fields[name] = str(local_path(fields[name]))
+            if "audio_path" in fields and fields["audio_path"] != segment.audio_path:
+                segment.recording_padding = None
             for name, value in fields.items():
                 setattr(segment, name, value)
             if "characters" in fields and "speaker_assignment" not in fields:
@@ -438,6 +440,7 @@ class PackAutomation:
                 if fields.get("audio_path"):
                     raise ValueError("Set audio_mode=file when supplying an external audio_path.")
                 segment.audio_path = ""
+                segment.recording_padding = None
             changed_ids.append(segment.id)
         project.sort_segments()
         updated.dirty = True
@@ -532,13 +535,17 @@ class PackAutomation:
         language: str,
         progress: Callable[[str, float | None], None],
         cancelled: Callable[[], bool],
+        align_captions: bool = False,
     ) -> dict[str, Any]:
-        if use_whisper and not allow_download:
+        if (use_whisper or align_captions) and not allow_download:
             raise ValueError(
-                "Whisper may download or repair pinned components. Obtain permission, then set "
+                "Whisper or caption alignment may download or repair pinned components. "
+                "Obtain permission, then set "
                 "allow_download=true. Activity-only scanning never downloads anything."
             )
         snapshot = self.access.snapshot()
+        if align_captions and not snapshot.project.source_captions:
+            raise ValueError("Word alignment requires original imported YouTube captions.")
         source = local_path(snapshot.project.video_path)
         info = self.media.probe(source)
         if not info.has_audio:
@@ -547,6 +554,8 @@ class PackAutomation:
             self.media, source, info.duration, self.data_root,
             sensitivity=sensitivity, use_whisper=use_whisper, model_key=model,
             language=language, progress=progress, cancelled=cancelled,
+            source_captions=list(snapshot.project.source_captions) if align_captions else None,
+            align_captions=align_captions, allow_alignment_download=allow_download,
         )
         return {
             **asdict(result),
