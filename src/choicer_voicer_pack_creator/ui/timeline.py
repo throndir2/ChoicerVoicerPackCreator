@@ -59,6 +59,8 @@ class TimelineWidget(QWidget):
         self.duration = 1.0
         self.playhead = 0.0
         self.peaks: list[float] = []
+        self._waveform_cache_key: tuple[int, float, float, float] | None = None
+        self._waveform_cache: list[float] = []
         self.segments: list[Segment] = []
         self.selected_id = ""
         self.selected_ids: set[str] = set()
@@ -93,6 +95,8 @@ class TimelineWidget(QWidget):
 
     def set_waveform(self, peaks: list[float]) -> None:
         self.peaks = list(peaks)
+        self._waveform_cache_key = None
+        self._waveform_cache = []
         self.update()
 
     def set_segments(
@@ -193,6 +197,7 @@ class TimelineWidget(QWidget):
         raw_step = visible / max(3, self.width() // 100)
         magnitude = 10 ** math.floor(math.log10(max(raw_step, 0.001)))
         step = next(item * magnitude for item in (1, 2, 5, 10) if item * magnitude >= raw_step)
+        precision = max(1, min(3, -math.floor(math.log10(step))))
         first = math.floor(self.offset / step) * step
         painter.setFont(QFont("Segoe UI", 8))
         timestamp = first
@@ -204,8 +209,29 @@ class TimelineWidget(QWidget):
                 painter.setPen(QColor("#8da0b7"))
                 minutes = int(timestamp // 60)
                 seconds = timestamp - minutes * 60
-                painter.drawText(QPointF(x + 3, 12), f"{minutes}:{seconds:04.1f}")
+                painter.drawText(
+                    QPointF(x + 3, 12), f"{minutes}:{seconds:0{precision + 3}.{precision}f}",
+                )
             timestamp += step
+
+    def _visible_waveform_peaks(self) -> list[float]:
+        if not self.peaks:
+            return []
+        pixels = max(1, self.width())
+        key = (pixels, self.duration, self.offset, self.visible_duration)
+        if key != self._waveform_cache_key:
+            count = len(self.peaks)
+            first = self.offset / self.duration * count
+            step = self.visible_duration / self.duration * count / pixels
+            peaks = []
+            for x in range(pixels):
+                start = max(0, min(count - 1, math.floor(first + x * step)))
+                end = min(count, max(start + 1, math.ceil(first + (x + 1) * step)))
+                # Include every bucket touching this pixel so narrow transients survive zooming.
+                peaks.append(max(self.peaks[start:end]))
+            self._waveform_cache = peaks
+            self._waveform_cache_key = key
+        return self._waveform_cache
 
     def _paint_waveform(self, painter: QPainter) -> None:
         top, bottom = 29.0, self._waveform_bottom()
@@ -217,17 +243,7 @@ class TimelineWidget(QWidget):
             painter.drawText(QRectF(0, top, self.width(), bottom - top), Qt.AlignmentFlag.AlignCenter, "Waveform loading…")
             return
         painter.setPen(QPen(QColor("#32c6d5"), 1))
-        count = len(self.peaks)
-        first = max(0, int(self.offset / self.duration * count))
-        last = min(count, int((self.offset + self.visible_duration) / self.duration * count) + 1)
-        if last <= first:
-            return
-        pixels = max(1, self.width())
-        stride = max(1, (last - first) // pixels)
-        for index in range(first, last, stride):
-            timestamp = index / count * self.duration
-            x = self._time_to_x(timestamp)
-            peak = max(self.peaks[index : min(last, index + stride)])
+        for x, peak in enumerate(self._visible_waveform_peaks()):
             height = peak * (bottom - top) * 0.47
             painter.drawLine(QPointF(x, center - height), QPointF(x, center + height))
 

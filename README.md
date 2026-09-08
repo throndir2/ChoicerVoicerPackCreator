@@ -27,7 +27,7 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
   Selected Segment editor in sync without interrupting playback. Gaps keep the current selection;
   overlapping lines follow the most recently started segment. Paused editing and single-segment
   previews keep their selection.
-- Extracts and displays a zoomable waveform.
+- Extracts and displays a high-detail, zoomable waveform for precise timing.
 - Marks precise In/Out points in seconds.
 - Cuts unwanted video from the beginning, end, or middle via **Project > Cut Out Video Range**.
   The remaining video closes the gap, with dialogue timings and backing audio kept in sync.
@@ -693,6 +693,8 @@ attempt access-restriction workarounds. An authorized local copy can still be op
 
 ### Direct waveform editing
 
+- Zoom in to reveal finer waveform detail rather than widely spaced overview lines. Peaks are
+  drawn at the visible pixel scale, and ruler labels show hundredths or milliseconds when needed.
 - Drag the white playback line or its top arrow to scrub without changing any ranges. The arrow
   remains draggable when the line overlaps an In/Out handle or a segment block.
 - Drag across empty waveform space to define a new In/Out range.

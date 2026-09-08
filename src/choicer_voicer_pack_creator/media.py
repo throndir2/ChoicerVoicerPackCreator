@@ -563,13 +563,15 @@ class MediaTools:
         self,
         path: Path,
         duration: float,
-        target_peaks: int = 2400,
+        target_peaks: int = 384_000,
         sample_rate: int = 2000,
         cancelled: Callable[[], bool] | None = None,
     ) -> list[float]:
         if duration <= 0:
             diagnostic_event("media_waveform_skipped", reason="nonpositive_duration", duration=duration)
             return []
+        if target_peaks <= 0 or sample_rate <= 0:
+            raise ValueError("Waveform peak count and sample rate must be positive")
         command = [
             self.ffmpeg,
             "-v",
@@ -611,10 +613,15 @@ class MediaTools:
             samples.byteswap()
         if not samples:
             return []
-        bucket = max(1, math.ceil(len(samples) / target_peaks))
+        # Retain up to 4,800 peaks per view at the timeline's maximum 80x zoom.
+        # Equal time buckets avoid stretching a short final bucket across the source.
+        count = min(len(samples), target_peaks)
         peaks = [
-            min(1.0, max(abs(value) for value in samples[index : index + bucket]))
-            for index in range(0, len(samples), bucket)
+            min(1.0, max(
+                abs(value)
+                for value in samples[index * len(samples) // count : (index + 1) * len(samples) // count]
+            ))
+            for index in range(count)
         ]
         diagnostic_event("media_waveform_ready", path=path, peak_count=len(peaks), duration=duration)
         return peaks
