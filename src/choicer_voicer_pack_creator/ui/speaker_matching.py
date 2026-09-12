@@ -519,7 +519,7 @@ class SpeakerMatchingControls(QWidget):
                 )
             return
         if preparing:
-            # Amortize model setup while yielding shared CPU capacity between batches.
+            # Bound each request while amortizing model setup across clips.
             clips = preparation[:PREPARATION_BATCH_SIZE]
         key = "speaker-preparation" if preparing else "speakers"
         request = _Request(
@@ -536,7 +536,6 @@ class SpeakerMatchingControls(QWidget):
             self._failed(f"Speaker matching could not start: {error}")
             return
         self._enqueue(manager, request)
-        # Reserve queue priority before the transcript completion releases CPU capacity.
         self.derived_work.dispatch_ready()
 
     def _enqueue(
@@ -570,7 +569,7 @@ class SpeakerMatchingControls(QWidget):
             "speaker-preparation" if preparing else "speakers",
             "Prepare voice fingerprints" if preparing else
             "Verify speaker source audio" if request.verifying else "Match cached voices",
-            resource_class="cpu" if preparing else "io",
+            resource_class="speaker" if preparing else "io",
             read_paths=tuple({Path(clip.path) for clip in clips}),
             resource_keys=("speaker-matching-inference",) if preparing else (),
             source_snapshot={

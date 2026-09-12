@@ -1452,7 +1452,7 @@ def test_new_local_video_starts_whisper_automatically(qtbot, tmp_path, monkeypat
     window.close()
 
 
-def test_import_prepares_unnamed_transcript_before_queued_backing(
+def test_import_prepares_unnamed_transcript_alongside_backing(
     qtbot, tmp_path, monkeypatch, installed_whisper,
 ):
     from choicer_voicer_pack_creator.operations import SourceSnapshot
@@ -1464,6 +1464,7 @@ def test_import_prepares_unnamed_transcript_before_queued_backing(
     output.write_bytes(b"backing")
     order = []
     prepared = []
+    voices_started, backing_started, release = Event(), Event(), Event()
 
     def analyze(*_args, **_kwargs):
         order.append("transcript")
@@ -1483,12 +1484,16 @@ def test_import_prepares_unnamed_transcript_before_queued_backing(
             assert current_thread() is not main_thread()
             order.append("voices")
             prepared.extend(clips)
+            voices_started.set()
+            assert release.wait(10)
             return SpeakerPreparationResult(
                 SourceSnapshot.capture(clip.path for clip in clips), len(clips), 0, 0,
             )
 
     def generate(*_args, **_kwargs):
         order.append("backing")
+        backing_started.set()
+        assert release.wait(10)
         return output
 
     monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
@@ -1506,9 +1511,14 @@ def test_import_prepares_unnamed_transcript_before_queued_backing(
     ), None, mark_dirty=False)
     try:
         editor._finish_new_import(editor.project)
+        qtbot.waitUntil(lambda: voices_started.is_set() and backing_started.is_set())
+        assert editor.speaker_matching.worker.job_handle.record.state == "running"
+        assert editor._backing_dialog.worker.job_handle.record.state == "running"
+        release.set()
         qtbot.waitUntil(lambda: editor.project.backing_track_path == str(output), timeout=10000)
         qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
-        assert order == ["transcript", "voices", "backing"]
+        assert order[0] == "transcript"
+        assert sorted(order[1:]) == ["backing", "voices"]
         assert len(prepared) == 2
         assert all(not clip.characters for clip in prepared)
         assert not editor.project.segments
@@ -1519,7 +1529,9 @@ def test_import_prepares_unnamed_transcript_before_queued_backing(
             for group in ("transcript", "voices", "backing")
         )
     finally:
+        release.set()
         editor.speaker_matching.close_processing()
+        qtbot.waitUntil(lambda: not window.job_manager.active_jobs())
         editor.dirty = False
         window.close()
 

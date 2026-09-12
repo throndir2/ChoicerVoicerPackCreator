@@ -140,7 +140,8 @@ class JobManager(QObject):
     so Python cyclic GC cannot retire Qt objects from a later worker thread.
 
     Limits bound simultaneous operations, not threads in external tools. The default
-    single CPU job reserves room for playback; I/O and network work can overlap it.
+    single CPU job reserves room for playback; speaker preparation has its own slot
+    so it can overlap CPU, I/O, and network work without waiting for those budgets.
     All public methods and signals run on the owning Qt thread. Worker events use an
     explicit queued bridge; widgets never own the execution lifetime.
     """
@@ -155,7 +156,9 @@ class JobManager(QObject):
         if QCoreApplication.instance() is None:
             raise RuntimeError("JobManager requires a running QtCore application/event loop")
         super().__init__(parent)
-        self.limits = dict(limits if limits is not None else {"cpu": 1, "io": 2, "network": 2})
+        self.limits = dict(
+            limits if limits is not None else {"cpu": 1, "speaker": 1, "io": 2, "network": 2}
+        )
         if not self.limits or any(
             not isinstance(value, int) or isinstance(value, bool) or value < 1
             for value in self.limits.values()
