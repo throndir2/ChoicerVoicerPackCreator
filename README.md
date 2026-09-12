@@ -435,13 +435,14 @@ Switch projects using their tabs. **Tools > Tasks** opens a separate, nonmodal w
 requested; it never opens automatically or takes space from the editor. Filter it to all projects
 or the current project, inspect stage progress and elapsed time, cancel supported work, reopen
 review/details, or open a successful output. Closing the Tasks window does not stop processing.
-CPU, I/O, and network budgets bound concurrent work; jobs sharing output files or inference
-components wait rather than overwrite each other. One CPU-heavy job runs at a time across
-projects to leave room for preview and editing. Among queued jobs, waveform and transcript work
-take priority, then voice preparation, then backing generation. Already-running jobs are not
-interrupted when higher-priority work arrives. Cached voice comparisons use the I/O queue and
-can finish even while backing generation occupies the CPU queue. You can edit or save another
-project while a pack exports, a source opens, or analysis runs.
+CPU, speaker-preparation, I/O, and network budgets bound concurrent work; jobs sharing output
+files or inference components wait rather than overwrite each other. The general CPU queue runs
+one job at a time across projects, with queued waveform and transcript work taking priority over
+backing generation. Voice preparation has its own worker slot and runs alongside those tasks,
+even when the CPU, I/O, and network queues are full. Already-running jobs are not interrupted
+when higher-priority work arrives. Cached voice comparisons use the I/O queue and can finish
+even while backing generation occupies the CPU queue. You can edit or save another project
+while a pack exports, a source opens, or analysis runs.
 
 **Retry** is enabled for failed/canceled analysis, refinement, YouTube imports, exports, and failed
 backing generation when the originating document/source and review are still current. Analysis
@@ -900,6 +901,8 @@ rather than an isolated name or reaction. Naming other characters helps reject c
 you can also manually name more clean lines for the same character to strengthen its reference.
 New video imports prepare name-independent fingerprints from eligible transcript draft ranges
 before those drafts are added as segments. New or retimed segments are prepared incrementally.
+Preparation does not wait for transcription, backing generation, or other CPU-queued work to
+finish, so cached voices can be ready sooner when you name a segment.
 Whisper and YouTube drafts keep their independent ranges; identical ranges share cached fingerprints.
 No names are guessed during preparation, and unfinished or short draft ranges are skipped.
 The first use requests permission for a checksum-verified WeSpeaker voice model (about 25 MiB).

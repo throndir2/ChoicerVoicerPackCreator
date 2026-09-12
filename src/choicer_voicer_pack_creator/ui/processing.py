@@ -318,8 +318,9 @@ class ProcessingDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self.setToolTip(
-            "Transcript and voice preparation take priority over queued backing generation. "
-            "One CPU-heavy task runs at a time; cached voice comparisons can overlap it. "
+            "Transcript work takes priority over queued backing generation. "
+            "Voice preparation and cached matching can run alongside either task "
+            "without waiting for CPU capacity. "
             "You can keep editing, playing video, and switching tabs."
         )
         model.changed.connect(self.refresh)

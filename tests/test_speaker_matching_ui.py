@@ -922,32 +922,102 @@ def test_preparation_continues_while_typing_without_publishing_names(matching, q
     assert matching.other.characters == []
 
 
-def test_cached_name_matching_does_not_wait_for_backing_cpu_job(matching, qtbot):
+def test_preparation_does_not_wait_for_other_resource_queues(matching, qtbot):
+    manager = matching.window.job_manager
+    matching.reference.characters = []
+    matching.editor._set_dirty(True)
+    release = threading.Event()
+    started = []
+    jobs = []
+
+    def occupy(_context, signal):
+        signal.set()
+        assert release.wait(10)
+
+    try:
+        for resource in ("cpu", "io", "network"):
+            for _ in range(manager.limits[resource]):
+                signal = threading.Event()
+                started.append(signal)
+                jobs.append(manager.submit(
+                    matching.editor.session.id, "fixture", f"Hold {resource}",
+                    lambda context, signal=signal: occupy(context, signal),
+                    resource_class=resource, read_paths=(matching.video,),
+                ))
+        qtbot.waitUntil(lambda: all(signal.is_set() for signal in started))
+        matching.controls.prepare()
+        wait_prepared(matching, qtbot)
+        assert all(job.record.state == "running" for job in jobs)
+        assert len(matching.state.preparations) == 1
+        assert matching.state.calls == []
+        assert all(not clip.characters for clip in prepared_clips(matching))
+    finally:
+        release.set()
+        qtbot.waitUntil(lambda: all(not job.record.active for job in jobs))
+
+
+def test_backing_cpu_job_does_not_wait_for_speaker_preparation(matching, qtbot):
+    matching.state.hold_preparation = True
     matching.controls.prepare()
-    wait_prepared(matching, qtbot)
+    qtbot.waitUntil(matching.state.preparation_started.is_set)
+    preparation = matching.controls.worker.job_handle
+    assert preparation.record.resource_class == "speaker"
+    started, release = threading.Event(), threading.Event()
+
+    def backing(_context):
+        started.set()
+        assert release.wait(10)
+
+    job = matching.window.job_manager.submit(
+        matching.editor.session.id, "backing", "Backing", backing,
+        read_paths=(matching.video,),
+    )
+    try:
+        qtbot.waitUntil(started.is_set)
+        assert preparation.record.state == job.record.state == "running"
+        assert not matching.controls._prepared_ranges
+    finally:
+        matching.state.preparation_release.set()
+        release.set()
+        qtbot.waitUntil(lambda: not job.record.active)
+        wait_prepared(matching, qtbot)
+
+
+@pytest.mark.parametrize("cache_state", ["unprepared", "prepared", "missing"])
+def test_name_matching_does_not_wait_for_backing_cpu_job(matching, qtbot, cache_state):
+    if cache_state != "unprepared":
+        matching.controls.prepare()
+        wait_prepared(matching, qtbot)
+    if cache_state == "missing":
+        matching.state.cache_misses = 1
     release, started = threading.Event(), threading.Event()
 
     def backing(_context):
         started.set()
-        release.wait(10)
+        assert release.wait(10)
 
     job = matching.window.job_manager.submit(
         matching.editor.session.id, "backing", "Backing", backing,
+        read_paths=(matching.video,),
         source_snapshot={"source_revision": matching.editor.session.source_revision},
     )
     try:
         qtbot.waitUntil(started.is_set)
-        start(matching, qtbot)
+        matching.editor.select_segment(matching.reference.id)
+        matching.editor.speakers_edit.setText("Alicia")
+        matching.editor._selected_speakers_typed()
+        matching.editor._selected_speakers_changed()
+        qtbot.waitUntil(matching.state.started.is_set)
         finish(matching, qtbot)
         assert job.record.state == "running"
-        assert matching.target.characters == ["Alice"]
-        assert len(matching.state.preparations) == 1
+        assert matching.target.characters == ["Alicia"]
+        assert len(matching.state.preparations) == (2 if cache_state == "missing" else 1)
     finally:
         release.set()
         qtbot.waitUntil(lambda: not job.record.active)
 
 
-def test_missing_cached_signature_returns_to_cpu_preparation(matching, qtbot):
+def test_missing_cached_signature_returns_to_speaker_preparation(matching, qtbot):
     matching.controls.prepare()
     wait_prepared(matching, qtbot)
     matching.state.cache_misses = 1
