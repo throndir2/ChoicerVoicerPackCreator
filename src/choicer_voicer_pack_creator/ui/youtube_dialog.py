@@ -34,6 +34,7 @@ from choicer_voicer_pack_creator.ui.analysis_dialog import (
 )
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.youtube import (
+    DEFAULT_CAPTION_LANGUAGE,
     ExistingYouTubeImport,
     YouTubeCancelled,
     YouTubeDownload,
@@ -190,12 +191,24 @@ class YouTubeDialog(QDialog):
         form.addRow("Keep downloaded media in", row)
         self.language_combo = QComboBox()
         self.language_combo.setEditable(True)
-        self.language_combo.addItem("Original language (auto)", "auto")
-        for code in ("en", "ja", "zh", "ko", "es", "fr", "de", "pt", "ru"):
-            self.language_combo.addItem(code, code)
+        for label, code in (
+            ("English (en)", "en"),
+            ("Original language (auto)", "auto"),
+            ("Japanese (ja)", "ja"),
+            ("Chinese (zh)", "zh"),
+            ("Korean (ko)", "ko"),
+            ("Spanish (es)", "es"),
+            ("French (fr)", "fr"),
+            ("German (de)", "de"),
+            ("Portuguese (pt)", "pt"),
+            ("Russian (ru)", "ru"),
+        ):
+            self.language_combo.addItem(label, code)
+        self.language_combo.setCurrentIndex(self.language_combo.findData(DEFAULT_CAPTION_LANGUAGE))
         self.language_combo.setToolTip(
-            "Choose or type a language code such as en or pt-BR. "
-            "Creator captions are preferred; automatic translations are not used."
+            "Defaults to English. Choose another language or type a code such as pt-BR. "
+            "Creator captions are preferred, then automatic captions in the chosen language. "
+            "Other languages and automatic translations are not substituted."
         )
         form.addRow("Caption language", self.language_combo)
         layout.addLayout(form)
@@ -265,7 +278,9 @@ class YouTubeDialog(QDialog):
             self.language_combo.currentIndex()
         ):
             language = self.language_combo.currentText().strip()
-        self._start_worker(url, folder, str(language or "auto"), create_folder=create_folder)
+        self._start_worker(
+            url, folder, str(language or DEFAULT_CAPTION_LANGUAGE), create_folder=create_folder,
+        )
 
     def _start_worker(
         self, url: str, folder: Path, language: str, *, create_folder: bool = False,
