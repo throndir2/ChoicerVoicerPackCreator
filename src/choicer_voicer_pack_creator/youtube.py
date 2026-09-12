@@ -56,6 +56,7 @@ TRANSFER_IDLE_TIMEOUT = 120.0
 POSTPROCESS_IDLE_TIMEOUT = 600.0
 PROBE_TIMEOUT = 60.0
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".webm", ".mov"}
+DEFAULT_CAPTION_LANGUAGE = "en"
 
 
 class YouTubeError(ValueError):
@@ -238,7 +239,9 @@ def normalize_youtube_url(value: str) -> str:
     return url
 
 
-def select_caption_track(info: dict[str, Any], language: str) -> CaptionTrack | None:
+def select_caption_track(
+    info: dict[str, Any], language: str = DEFAULT_CAPTION_LANGUAGE,
+) -> CaptionTrack | None:
     tracks: list[CaptionTrack] = []
     original: str | None = None
     for key, automatic in (("subtitles", False), ("automatic_captions", True)):
@@ -796,7 +799,7 @@ def download_youtube(
     media: MediaTools,
     url: str,
     destination: Path,
-    language: str,
+    language: str = DEFAULT_CAPTION_LANGUAGE,
     *,
     progress: ProgressCallback,
     cancelled: CancelCallback,
@@ -881,7 +884,7 @@ def download_youtube(
             diagnostic_event("youtube_caption_fallback", reason="no_usable_track")
             notes.append(
                 "No usable creator or automatic captions were available for the chosen "
-                "language. Local Whisper will draft captions instead."
+                f"language ({language}). Local Whisper will draft captions instead."
             )
         _check_cancel(cancelled)
         if existing is not None and not overwrite:

@@ -57,6 +57,36 @@ def track(url: str = CAPTION_URL) -> list[dict[str, str]]:
     return [{"ext": "json3", "url": url}]
 
 
+@pytest.mark.parametrize("metadata_language", [None, "zh-CN"])
+@pytest.mark.parametrize("english_code", ["en", "en-US"])
+@pytest.mark.parametrize("creator", [True, False])
+def test_caption_selection_defaults_to_english_not_original_or_first_track(
+    metadata_language, english_code, creator,
+) -> None:
+    info = {
+        "language": metadata_language,
+        "subtitles": {"zh-CN": track(CAPTION_URL + "&creator=zh")},
+        "automatic_captions": {"zh-orig": track(CAPTION_URL + "&automatic=zh")},
+    }
+    info["automatic_captions"][english_code] = track(CAPTION_URL + "&automatic=en")
+    if creator:
+        info["subtitles"][english_code] = track()
+    selected = youtube.select_caption_track(info)
+    assert selected.language == english_code
+    assert selected.automatic is not creator
+    assert selected.url == (CAPTION_URL if creator else CAPTION_URL + "&automatic=en")
+
+
+def test_default_english_does_not_substitute_another_language_or_auto_translation() -> None:
+    info = {
+        "language": "zh-CN",
+        "subtitles": {"zh-CN": track()},
+        "automatic_captions": {"en": track(CAPTION_URL + "&tlang=en")},
+    }
+    assert youtube.select_caption_track(info) is None
+    assert youtube.select_caption_track(info, "zh").language == "zh-CN"
+
+
 def test_caption_selection_prefers_creator_in_original_language() -> None:
     info = {
         "language": "ja",
@@ -103,6 +133,7 @@ def downloader(monkeypatch, inline_youtube_worker):
         cancel = False
         live = False
         no_captions = False
+        metadata = {}
         file_extension = "mp4"
         selected_formats = [VIDEO_FORMAT, AUDIO_FORMAT]
         events = [
@@ -139,6 +170,7 @@ def downloader(monkeypatch, inline_youtube_worker):
             return {
                 "id": VIDEO_ID, "title": "../Not a filename", "is_live": self.live,
                 "subtitles": {} if self.no_captions else {"en": track()},
+                **self.metadata,
             }
 
         def urlopen(self, url):
@@ -173,9 +205,34 @@ def run_download(
     destination: Path, cancelled=lambda: False, progress=lambda *_args: None, **kwargs,
 ):
     return youtube.download_youtube(
-        FakeMedia(), URL, destination, "auto",
+        FakeMedia(), URL, destination,
         progress=progress, cancelled=cancelled, **kwargs,
     )
+
+
+def test_download_defaults_to_english_with_chinese_first_in_metadata(tmp_path, downloader):
+    downloader.metadata = {
+        "language": None,
+        "subtitles": {
+            "zh-Hans": track(CAPTION_URL + "&creator=zh-Hans"),
+            "zh-Hant": track(CAPTION_URL + "&creator=zh-Hant"),
+            "en-US": track(),
+        },
+    }
+    result = run_download(tmp_path)
+    assert result.language == "en-US"
+    assert result.captions[0].text == "Hello"
+    assert result.captions[0].source == "YouTube creator (en-US)"
+    assert not result.warnings
+
+
+def test_download_warns_when_only_other_caption_languages_are_available(tmp_path, downloader):
+    downloader.metadata = {"language": "zh-CN", "subtitles": {"zh-CN": track()}}
+    result = run_download(tmp_path)
+    assert result.language == "en"
+    assert result.captions == []
+    assert result.video_path.is_file()
+    assert any("language (en)" in warning and "Local Whisper" in warning for warning in result.warnings)
 
 
 def test_repeat_download_requires_a_choice_and_preserves_existing_files(

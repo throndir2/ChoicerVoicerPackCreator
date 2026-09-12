@@ -38,6 +38,37 @@ def test_import_copy_keeps_media_requirements_without_processing_instructions(qt
     assert "Playlists, live streams, and restricted videos" in dialog.url_edit.toolTip()
 
 
+@pytest.mark.parametrize("selection, expected", [
+    (None, "en"), ("zh", "zh"), ("auto", "auto"), ("pt-BR", "pt-BR"), ("   ", "en"),
+])
+def test_caption_language_defaults_to_english_and_preserves_explicit_choices(
+    qtbot, tmp_path, monkeypatch, selection, expected,
+):
+    result = make_download(tmp_path)
+    languages = []
+
+    def download(_media, _url, _folder, language, **_kwargs):
+        languages.append(language)
+        return result
+
+    monkeypatch.setattr(youtube_dialog, "download_youtube", download)
+    dialog = youtube_dialog.YouTubeDialog(UnusedMedia(), str(tmp_path))
+    qtbot.addWidget(dialog)
+    assert dialog.language_combo.currentData() == "en"
+    assert dialog.language_combo.currentText() == "English (en)"
+    if selection is not None:
+        index = dialog.language_combo.findData(selection)
+        if index >= 0:
+            dialog.language_combo.setCurrentIndex(index)
+        else:
+            dialog.language_combo.setEditText(selection)
+    dialog.url_edit.setText(result.url)
+    dialog.start_download()
+    qtbot.waitUntil(lambda: dialog.worker is None)
+    assert languages == [expected]
+    assert dialog.download_result == result
+
+
 def test_workspace_youtube_hides_without_cancel_and_emits_async_completion(
     qtbot, tmp_path, monkeypatch,
 ):
@@ -436,6 +467,7 @@ def test_main_window_imports_youtube_title_and_saves_with_safe_filename(
     assert backing_runs == [(str(result.video_path), {"background": True})]
     assert window.project.video_path == str(result.video_path)
     assert window.project.source_captions == result.captions
+    assert window.project.caption_language == result.language
     assert window.project.source_url == result.url
     assert window.dirty
     window._set_busy(True, "Exporting")
@@ -461,6 +493,7 @@ def test_main_window_imports_youtube_title_and_saves_with_safe_filename(
     assert saved.title == result.title
     assert saved.video_path == str(result.video_path)
     assert saved.source_captions == result.captions
+    assert saved.caption_language == result.language
     assert not window.dirty
     window.close()
 

@@ -680,11 +680,14 @@ have no overall duration limit. Failed caption requests still fall back to local
 and canceled or failed imports never publish partial media.
 
 YouTube can provide timestamped creator captions or automatic speech-recognition captions.
+**Caption language** defaults to **English (en)**, including regional English tracks when needed.
 The importer prefers creator captions in the selected language and otherwise uses available
-automatic captions. **Original language (auto)** uses YouTube's language metadata where available;
-you can also select or type a language code. YouTube-generated translations are excluded, but
-creator-uploaded tracks can themselves be translations. Some videos have no accessible captions,
-and caption delivery can fail independently of the video download.
+automatic captions in that language; it does not silently substitute another language.
+Select another language or type a code such as `pt-BR` to use that language's captions when
+available. **Original language (auto)** is an opt-in choice that uses YouTube's language metadata
+where available. YouTube-generated translations are excluded, but creator-uploaded tracks can
+themselves be translations. If the chosen language has no usable captions, the import reports
+that and falls back to local Whisper. Caption delivery can fail independently of the video download.
 
 The **YouTube** panel stays empty until a local audio-only refinement pass finishes on a
 background task, then selects the processed draft for review and use. Unprocessed YouTube
