@@ -13,10 +13,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from scripts import _bandit
+from choicer_voicer_pack_creator import _bandit
 
 ROOT = Path(__file__).resolve().parents[1]
-VENDOR_ROOT = ROOT / "scripts" / "_bandit"
+VENDOR_ROOT = ROOT / "src" / "choicer_voicer_pack_creator" / "_bandit"
 
 
 def test_import_does_not_require_optional_dependencies():
@@ -26,7 +26,7 @@ def test_import_does_not_require_optional_dependencies():
             "-S",
             "-B",
             "-c",
-            "import sys; import scripts._bandit; "
+            "import sys; sys.path.insert(0, 'src'); import choicer_voicer_pack_creator._bandit; "
             "assert not {'torch', 'torchaudio', 'numpy', 'librosa', "
             "'pytorch_lightning', 'ray', 'astroid'} & sys.modules.keys()",
         ],
@@ -143,7 +143,7 @@ def fake_dependencies(monkeypatch):
     model = Mock()
     model.eval.return_value = model
     model.to.return_value = model
-    module = ModuleType("scripts._bandit.models.bandit.bandit")
+    module = ModuleType("choicer_voicer_pack_creator._bandit.models.bandit.bandit")
     module.Bandit = Mock(return_value=model)
     monkeypatch.setitem(sys.modules, "torch", torch)
     monkeypatch.setitem(sys.modules, module.__name__, module)

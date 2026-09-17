@@ -4,6 +4,7 @@ import hashlib
 import json
 import multiprocessing
 import os
+import sys
 import time
 from dataclasses import replace
 from itertools import pairwise
@@ -773,10 +774,137 @@ def test_post_cut_audit_never_silently_truncates_cut_at_pcm_end(monkeypatch):
     assert "outside the decoded PCM audio" in result.review_reasons[0]
 
 
-def test_offline_native_runtime_smoke():
-    result = worker.smoke_test(lambda *_: None)
+def test_offline_native_runtime_smoke(tmp_path):
+    report_path = tmp_path / "native-smoke.json"
+    assert worker.smoke_main(report_path) == 0, report_path.read_text()
+    result = json.loads(report_path.read_text())
     assert result["features"] == [1, 128, 3000]
     assert result["ctranslate2"] and result["tokenizers"]
+    assert result["torch_imported"] is False
+    assert result["qt_imported"] is False
+
+
+@pytest.mark.parametrize(
+    "native_failure,foreign_import", [(False, False), (True, False), (False, True)],
+)
+def test_caption_import_disables_only_optional_conversion_and_restores_import_policy(
+    monkeypatch, native_failure, foreign_import,
+):
+    import builtins
+    import importlib
+
+    original_import = builtins.__import__
+    original_policy = list(sys.meta_path)
+    native = SimpleNamespace(__version__="4.8.1")
+    for name in tuple(sys.modules):
+        if name == "torch" or name.startswith("torch."):
+            monkeypatch.delitem(sys.modules, name)
+
+    def import_native(name, *args, **kwargs):
+        if name == "ctranslate2":
+            assert sys.meta_path[0].find_spec("unrelated_inference_dependency") is None
+            with pytest.raises(ModuleNotFoundError) as unavailable:
+                importlib.import_module("torch")
+            assert unavailable.value.name == "torch"
+            assert "model conversion" in str(unavailable.value)
+            if native_failure:
+                raise OSError("Native DLL failure must propagate")
+            if foreign_import:
+                monkeypatch.setitem(sys.modules, "torch._C", object())
+            return native
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_native)
+    if native_failure:
+        with pytest.raises(OSError, match="Native DLL failure"):
+            worker._load_ctranslate2()
+    elif foreign_import:
+        with pytest.raises(runtime.CaptionTimingError, match="Torch"):
+            worker._load_ctranslate2()
+    else:
+        assert worker._load_ctranslate2() is native
+    assert sys.meta_path == original_policy
+    assert any(name == "torch" or name.startswith("torch.") for name in sys.modules) is foreign_import
+
+
+@pytest.mark.parametrize("module_name", ["torch", "torch._C"])
+def test_caption_inference_import_rejects_preloaded_torch(monkeypatch, module_name):
+    monkeypatch.setitem(sys.modules, module_name, object())
+    original_policy = list(sys.meta_path)
+    with pytest.raises(runtime.CaptionTimingError, match="Torch"):
+        worker._load_ctranslate2()
+    assert sys.meta_path == original_policy
+    assert module_name in sys.modules
+
+
+@pytest.mark.parametrize("module_name", ["torch", "torch._C"])
+def test_caption_smoke_rejects_foreign_backend_before_native_import(monkeypatch, module_name):
+    import builtins
+
+    original_import = builtins.__import__
+    monkeypatch.setitem(sys.modules, module_name, object())
+
+    def reject_native_import(name, *args, **kwargs):
+        if name == "ctranslate2":
+            pytest.fail("Must reject Torch before importing the native caption backend")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_native_import)
+    with pytest.raises(runtime.CaptionTimingError, match="Torch"):
+        worker.smoke_test(lambda *_: None)
+
+
+@pytest.mark.parametrize("foreign_import", [False, True])
+def test_caption_smoke_report_with_mocked_native_backend(monkeypatch, foreign_import):
+    native = SimpleNamespace(
+        __version__="4.8.1",
+        StorageView=SimpleNamespace(from_array=lambda _: SimpleNamespace(shape=(1, 128, 3000))),
+        get_supported_compute_types=lambda _: {"int8"},
+    )
+    monkeypatch.setitem(sys.modules, "ctranslate2", native)
+    monkeypatch.setitem(sys.modules, "tokenizers", SimpleNamespace(__version__="0.23.1"))
+    # Model an isolated worker's module graph; this case imports only fake native backends.
+    for name in tuple(sys.modules):
+        if name == "torch" or name.startswith("torch."):
+            monkeypatch.delitem(sys.modules, name)
+
+    def features(_samples):
+        if foreign_import:
+            monkeypatch.setitem(sys.modules, "torch._C", object())
+        return object()
+
+    monkeypatch.setattr(worker, "log_mel_features", features)
+    if foreign_import:
+        with pytest.raises(runtime.CaptionTimingError, match="Torch"):
+            worker.smoke_test(lambda *_: None)
+    else:
+        result = worker.smoke_test(lambda *_: None)
+        assert result["torch_imported"] is False
+        assert result["features"] == [1, 128, 3000]
+        assert result["ctranslate2"] == "4.8.1"
+        assert result["tokenizers"] == "0.23.1"
+
+
+@pytest.mark.parametrize("torch_imported", [False, True, None, 0, "missing"])
+def test_caption_smoke_main_mocked_report_requires_explicit_backend_isolation(
+    tmp_path, monkeypatch, torch_imported,
+):
+    from choicer_voicer_pack_creator import process_worker
+
+    result = {
+        "ctranslate2": "4.8.1", "tokenizers": "0.23.1", "features": [1, 128, 3000],
+        "qt_imported": False, "torch_imported": torch_imported,
+    }
+    if torch_imported == "missing":
+        del result["torch_imported"]
+    monkeypatch.setattr(process_worker, "run_process_worker", lambda *_args, **_kwargs: result)
+    report_path = tmp_path / "report.json"
+    code = worker.smoke_main(report_path)
+    report = json.loads(report_path.read_text())
+    if torch_imported is False:
+        assert code == 0 and report == result
+    else:
+        assert code == 1 and "Torch" in report["error"]
 
 
 def _blocking_native_work(emit, *_args):

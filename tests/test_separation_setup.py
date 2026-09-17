@@ -15,6 +15,31 @@ def ps_quote(value: str | Path) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def test_comparison_finds_installed_package_source_without_app_install_or_pythonpath():
+    root = SETUP.parents[2]
+    code = """
+import sys, types
+from pathlib import Path
+assert not any(Path(entry).name == 'src' for entry in sys.path if entry)
+# Numeric packages are the setup profile's responsibility. Stub only these two
+# imports so -S can prove that no editable install, .pth file, or app metadata is needed.
+sys.modules['numpy'] = types.ModuleType('numpy')
+sys.modules['numpy'].ndarray = object
+sys.modules['soundfile'] = types.ModuleType('soundfile')
+import scripts.compare_separation
+from choicer_voicer_pack_creator import _bandit
+assert Path(_bandit.__file__).resolve() == (
+    Path.cwd() / 'src' / 'choicer_voicer_pack_creator' / '_bandit' / '__init__.py'
+)
+assert not any(name.startswith(('torch', 'torchaudio', 'PySide6')) for name in sys.modules)
+"""
+    result = subprocess.run(
+        [sys.executable, "-E", "-s", "-S", "-c", code], cwd=root,
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize("explicit", [False, True])
 @pytest.mark.parametrize("probe_exit", [0, 17])
 def test_setup_uses_selected_interpreter_and_stops_on_failure(tmp_path, explicit, probe_exit):

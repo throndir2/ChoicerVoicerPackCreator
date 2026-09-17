@@ -799,6 +799,62 @@ def test_component_setup_does_not_commit_the_enclosing_analysis(whisper_manager)
     assert committed == []
 
 
+@pytest.mark.parametrize(
+    ("final_url", "approved"),
+    [
+        ("https://zenodo.org/records/13327983/files/bandit-combined.ckpt?download=1", True),
+        ("https://zenodo.org/api/records/13327983/files/bandit-combined.ckpt/content", True),
+        ("https://zenodo.org.evil.example/model", False),
+        ("https://untrusted.zenodo.org/model", False),
+        ("http://zenodo.org/model", False),
+    ],
+)
+def test_download_allows_only_exact_https_zenodo_host(tmp_path, monkeypatch, final_url, approved):
+    payload = b"verified combined model"
+    reads = []
+
+    class Response:
+        headers = {"Content-Length": str(len(payload))}
+
+        def __enter__(self):
+            self.remaining = payload
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def geturl(self):
+            return final_url
+
+        def read(self, size):
+            reads.append(size)
+            result, self.remaining = self.remaining[:size], self.remaining[size:]
+            return result
+
+    monkeypatch.setattr(
+        analysis_module.urllib.request, "urlopen", lambda *_args, **_kwargs: Response(),
+    )
+    destination = tmp_path / "model.ckpt"
+
+    def download():
+        return analysis_module.download_verified(
+            "https://zenodo.org/records/13327983/files/bandit-combined.ckpt?download=1",
+            destination, hashlib.sha256(payload).hexdigest(), len(payload),
+            "BandIt combined model", lambda *_: None, lambda: False,
+        )
+
+    if approved:
+        assert download() == destination
+        assert destination.read_bytes() == payload
+        assert reads
+    else:
+        with pytest.raises(AnalysisError, match="unapproved host"):
+            download()
+        assert not reads
+        assert not destination.exists()
+    assert not destination.with_name("model.ckpt.partial").exists()
+
+
 def test_download_rejects_unapproved_redirect_and_oversized_payload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

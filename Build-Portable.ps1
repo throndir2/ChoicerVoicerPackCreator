@@ -9,11 +9,15 @@ packaged application and a fresh ZIP extraction select their bundled FFmpeg
 and FFprobe executables.
 
 .PARAMETER ResetBuildEnvironment
-Deletes and recreates the isolated .build-venv environment before building.
+Deletes and recreates a build environment previously created by this script.
+
+.PARAMETER BuildEnvironment
+Optional task-owned virtual environment directory. Defaults to local application data.
 #>
 [CmdletBinding()]
 param(
-    [switch] $ResetBuildEnvironment
+    [switch] $ResetBuildEnvironment,
+    [string] $BuildEnvironment
 )
 
 Set-StrictMode -Version Latest
@@ -29,9 +33,16 @@ $localApplicationData = [Environment]::GetFolderPath(
 if ([string]::IsNullOrWhiteSpace($localApplicationData)) {
     throw "Could not locate the current user's local application-data directory."
 }
-$buildEnvironment = Join-Path `
-    $localApplicationData `
-    "ChoicerVoicerPackCreator\BuildEnvironments\python-3.12-x64"
+if ([string]::IsNullOrWhiteSpace($BuildEnvironment)) {
+    $BuildEnvironment = Join-Path `
+        $localApplicationData `
+        "ChoicerVoicerPackCreator\BuildEnvironments\python-3.12-x64"
+}
+if (-not [IO.Path]::IsPathRooted($BuildEnvironment)) {
+    $BuildEnvironment = Join-Path $repositoryRoot $BuildEnvironment
+}
+$buildEnvironment = [IO.Path]::GetFullPath($BuildEnvironment).TrimEnd("\")
+$environmentMarker = Join-Path $buildEnvironment ".cvpc-build-environment.json"
 $buildPython = Join-Path $buildEnvironment "Scripts\python.exe"
 $pythonProbe = "import struct, sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) and struct.calcsize('P') == 8 else 1)"
 
@@ -142,16 +153,61 @@ on the build computer; people using the finished package do not need it.
 "@
 }
 
+function Assert-SafeBuildEnvironment {
+    $root = [IO.Path]::GetPathRoot($buildEnvironment).TrimEnd("\")
+    $repository = [IO.Path]::GetFullPath($repositoryRoot).TrimEnd("\")
+    $homeDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if ($buildEnvironment.TrimEnd("\") -eq $root -or $buildEnvironment -eq $homeDirectory -or
+        $repository -eq $buildEnvironment -or
+        $repository.StartsWith($buildEnvironment + "\", [StringComparison]::OrdinalIgnoreCase) -or
+        $buildEnvironment -match '(^|\\)\.git(\\|$)') {
+        throw "Unsafe build environment path: $buildEnvironment"
+    }
+    $ancestor = $buildEnvironment
+    while (-not [string]::IsNullOrWhiteSpace($ancestor)) {
+        if (Test-Path -LiteralPath $ancestor) {
+            $item = Get-Item -LiteralPath $ancestor -Force
+            if (-not $item.PSIsContainer -or
+                ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw "Build environment paths must be ordinary directories, not links: $ancestor"
+            }
+        }
+        $ancestor = Split-Path -Parent $ancestor
+    }
+    if ($ResetBuildEnvironment -and (Test-Path -LiteralPath $buildEnvironment)) {
+        if (-not (Test-Path -LiteralPath $environmentMarker -PathType Leaf) -or
+            -not (Test-Path -LiteralPath (Join-Path $buildEnvironment "pyvenv.cfg") -PathType Leaf)) {
+            throw "Refusing to reset an unmarked environment. Choose a new -BuildEnvironment directory."
+        }
+        $marker = Get-Content -LiteralPath $environmentMarker -Raw | ConvertFrom-Json
+        if ($marker.version -ne 1 -or $marker.path -ne $buildEnvironment -or
+            $marker.repository -ne $repository) {
+            throw "The build environment ownership marker is invalid."
+        }
+        $links = Get-ChildItem -LiteralPath $buildEnvironment -Recurse -Force |
+            Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } |
+            Select-Object -First 1
+        if ($null -ne $links) {
+            throw "Refusing to reset a build environment containing links or junctions."
+        }
+    }
+}
+
 if (-not [Environment]::Is64BitOperatingSystem) {
     throw "The portable package can only be built on 64-bit Windows."
 }
 
+Assert-SafeBuildEnvironment
 if ($ResetBuildEnvironment -and (Test-Path -LiteralPath $buildEnvironment)) {
     Write-Host "==> Removing the isolated build environment" -ForegroundColor Cyan
     Remove-Item -LiteralPath $buildEnvironment -Recurse -Force
 }
 
 if (-not (Test-Path -LiteralPath $buildPython -PathType Leaf)) {
+    if ((Test-Path -LiteralPath $buildEnvironment) -and
+        (Get-ChildItem -LiteralPath $buildEnvironment -Force | Select-Object -First 1)) {
+        throw "Refusing to create a build environment in a nonempty directory: $buildEnvironment"
+    }
     $bootstrap = Get-BootstrapPython -Probe $pythonProbe
     $bootstrapPath = [string] $bootstrap.FilePath
     $createArguments = @($bootstrap.PrefixArguments)
@@ -160,20 +216,39 @@ if (-not (Test-Path -LiteralPath $buildPython -PathType Leaf)) {
         -FilePath $bootstrapPath `
         -ArgumentList $createArguments `
         -Description "Creating the isolated Python 3.12 build environment"
+    @{ version = 1; path = $buildEnvironment; repository = $repositoryRoot } | ConvertTo-Json |
+        Set-Content -LiteralPath $environmentMarker -Encoding UTF8
 }
 
 & $buildPython -c $pythonProbe 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) {
-    throw "The existing isolated build environment is not 64-bit Python 3.12. Re-run with -ResetBuildEnvironment."
+    throw "The build environment is not 64-bit Python 3.12. Choose a new -BuildEnvironment, or reset an environment previously created by this script."
 }
 
 Push-Location $repositoryRoot
 $extractedSmokeRoot = $null
+$previousPipConfig = $env:PIP_CONFIG_FILE
 try {
+    # Disable all pip config files as well as environment/index overrides (--isolated).
+    $env:PIP_CONFIG_FILE = "nul"
     Invoke-CheckedCommand `
         -FilePath $buildPython `
-        -ArgumentList @("-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--editable", ".[build]") `
+        -ArgumentList @(
+            "-m", "pip", "--isolated", "install", "--disable-pip-version-check", "--no-input",
+            "--no-index", "--no-deps", "--require-hashes", "-r", "tools\singing-cpu-wheels.txt"
+        ) `
+        -Description "Installing SHA-256-pinned official PyTorch and TorchAudio CPU wheels"
+    Invoke-CheckedCommand `
+        -FilePath $buildPython `
+        -ArgumentList @(
+            "-m", "pip", "--isolated", "install", "--disable-pip-version-check", "--no-input",
+            "--index-url", "https://pypi.org/simple", "--editable", ".[build,singing]"
+        ) `
         -Description "Installing the pinned application and packaging dependencies"
+    Invoke-CheckedCommand `
+        -FilePath $buildPython `
+        -ArgumentList @("-m", "pip", "--isolated", "check") `
+        -Description "Checking installed dependency consistency"
     Invoke-CheckedCommand `
         -FilePath $buildPython `
         -ArgumentList @(
@@ -216,7 +291,7 @@ try {
         -Description "Smoke-testing the application, bundled FFmpeg, and in-place updater"
 
     $extractedSmokeRoot = Join-Path `
-        ([IO.Path]::GetTempPath()) `
+        (Join-Path $repositoryRoot "build") `
         ("cvpc-portable-smoke-" + [Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $extractedSmokeRoot | Out-Null
     Invoke-CheckedCommand `
@@ -263,6 +338,7 @@ try {
     Write-Host "Older portable-* generation folders may be deleted when no copy of the app is running."
 }
 finally {
+    $env:PIP_CONFIG_FILE = $previousPipConfig
     if ($null -ne $extractedSmokeRoot -and (Test-Path -LiteralPath $extractedSmokeRoot)) {
         Remove-Item -LiteralPath $extractedSmokeRoot -Recurse -Force
     }

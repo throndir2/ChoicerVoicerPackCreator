@@ -8,7 +8,8 @@ See LICENSE and provenance.json in this directory.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+import json
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
@@ -23,6 +24,20 @@ WEIGHTS_RECORD_URL = "https://zenodo.org/records/13327983"
 WEIGHTS_LICENSE = "CC-BY-NC-4.0"
 WEIGHTS_LICENSE_URL = "https://creativecommons.org/licenses/by-nc/4.0/"
 SAMPLE_RATE = 48_000
+CHUNK_FRAMES = 384_000
+HOP_FRAMES = 48_000
+MODEL_PARAMETERS = {
+    "in_channels": 1, "stems": ["speech", "music", "sfx"], "fs": SAMPLE_RATE,
+    "band_type": "musical", "n_bands": 64, "require_no_overlap": False,
+    "require_no_gap": True, "normalize_channel_independently": False,
+    "treat_channel_as_feature": True, "n_sqm_modules": 8, "emb_dim": 128,
+    "rnn_dim": 256, "bidirectional": True, "rnn_type": "GRU", "mlp_dim": 512,
+    "hidden_activation": "Tanh", "hidden_activation_kwargs": None,
+    "complex_mask": True, "use_freq_weights": True, "n_fft": 2048,
+    "win_length": 2048, "hop_length": 512, "window_fn": "hann_window",
+    "wkwargs": None, "power": None, "center": True, "normalized": True,
+    "pad_mode": "reflect", "onesided": True,
+}
 
 
 @dataclass(frozen=True)
@@ -52,8 +67,42 @@ SPLIT_CHECKPOINT = CheckpointSpec(
 )
 
 
+def manifest_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "resources" / "backing-separation-bandit.json"
+
+
+def load_manifest(path: Path | None = None) -> dict:
+    value = json.loads((path or manifest_path()).read_text(encoding="utf-8"))
+    spec = COMBINED_CHECKPOINT
+    expected = {
+        "version": 1, "mode": "keep_singing", "sample_rate": SAMPLE_RATE,
+        "chunk_frames": CHUNK_FRAMES, "hop_frames": HOP_FRAMES,
+        "input_shape": [1, 1, CHUNK_FRAMES], "stems": list(spec.stems),
+        "backing_stems": ["music", "sfx"], "channel_strategy": "sequential_mono",
+        "dtype": "float32", "window": "numpy.hanning(chunk_frames + 2)[1:-1]",
+        "source_repository": SOURCE_REPOSITORY, "source_revision": SOURCE_REVISION,
+        "source_license": "Apache-2.0", "weights_license": WEIGHTS_LICENSE,
+        "notice_files": [
+            "BandIt-Apache-2.0.txt", "BandIt-CC-BY-NC-4.0.txt", "BandIt-Attribution.txt",
+        ],
+        "source_provenance_file": "BandIt-provenance.json",
+        "model": {
+            "filename": spec.filename, "url": spec.url, "bytes": spec.size_bytes,
+            "sha256": spec.sha256, "md5": spec.md5,
+        },
+        "parameters": MODEL_PARAMETERS,
+    }
+    if not isinstance(value, dict) or any(
+        json.dumps(value.get(key), sort_keys=True) != json.dumps(item, sort_keys=True)
+        for key, item in expected.items()
+    ):
+        raise ValueError("Unsupported BandIt combined model configuration")
+    return value
+
+
 def verify_checkpoint(
-    path: str | PathLike[str], *, split: bool = False
+    path: str | PathLike[str], *, split: bool = False,
+    check_cancelled: Callable[[], None] = lambda: None,
 ) -> CheckpointSpec:
     """Check the length, published MD5 and pinned SHA-256 before loading Torch.
 
@@ -62,6 +111,7 @@ def verify_checkpoint(
     Obtain weights from the recorded HTTPS URL. Split loading is disabled until
     a verified SHA-256 is also pinned for that checkpoint.
     """
+    check_cancelled()
     path = Path(path)
     spec = SPLIT_CHECKPOINT if split else COMBINED_CHECKPOINT
     if spec.sha256 is None:
@@ -77,8 +127,10 @@ def verify_checkpoint(
     sha256 = hashlib.sha256()
     with path.open("rb") as checkpoint_file:
         while chunk := checkpoint_file.read(1024 * 1024):
+            check_cancelled()
             digest.update(chunk)
             sha256.update(chunk)
+    check_cancelled()
     actual_sha256 = sha256.hexdigest()
     if actual_sha256 != spec.sha256:
         raise ValueError(
@@ -93,7 +145,8 @@ def verify_checkpoint(
 
 
 def load_model(
-    path: str | PathLike[str], device: str | torch.device, *, split: bool = False
+    path: str | PathLike[str], device: str | torch.device, *, split: bool = False,
+    check_cancelled: Callable[[], None] = lambda: None,
 ) -> torch.nn.Module:
     """Load only the verified model state, strictly, with no pickle fallback.
 
@@ -109,7 +162,7 @@ def load_model(
     Resampling, channel handling and chunk overlap are the caller's responsibility.
     """
     path = Path(path)
-    spec = verify_checkpoint(path, split=split)
+    spec = verify_checkpoint(path, split=split, check_cancelled=check_cancelled)
 
     import torch
 
@@ -129,37 +182,7 @@ def load_model(
     if not state_dict:
         raise ValueError("BandIt checkpoint contains no model.* state_dict entries.")
 
-    model = Bandit(
-        in_channels=1,
-        stems=list(spec.stems),
-        fs=SAMPLE_RATE,
-        band_type="musical",
-        n_bands=64,
-        require_no_overlap=False,
-        require_no_gap=True,
-        normalize_channel_independently=False,
-        treat_channel_as_feature=True,
-        n_sqm_modules=8,
-        emb_dim=128,
-        rnn_dim=256,
-        bidirectional=True,
-        rnn_type="GRU",
-        mlp_dim=512,
-        hidden_activation="Tanh",
-        hidden_activation_kwargs=None,
-        complex_mask=True,
-        use_freq_weights=True,
-        n_fft=2048,
-        win_length=2048,
-        hop_length=512,
-        window_fn="hann_window",
-        wkwargs=None,
-        power=None,
-        center=True,
-        normalized=True,
-        pad_mode="reflect",
-        onesided=True,
-    )
+    model = Bandit(**{**MODEL_PARAMETERS, "stems": list(spec.stems)})
     model.load_state_dict(state_dict, strict=True)
     del state_dict
     return model.eval().to(device)

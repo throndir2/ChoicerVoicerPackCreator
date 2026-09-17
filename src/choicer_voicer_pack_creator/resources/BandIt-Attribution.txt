@@ -1,0 +1,41 @@
+Facing the Music: Tackling Singing Voice Separation in Cinematic Audio Source Separation
+
+Model creators: Karn N. Watcharasupat, Chih-Wei Wu, and Iroro Orife.
+Publisher record: https://zenodo.org/records/13327983
+DOI: https://doi.org/10.5281/zenodo.13327983
+Paper: https://arxiv.org/html/2408.03588v2
+
+Model weights: bandit-combined.ckpt (unmodified)
+Download: https://zenodo.org/records/13327983/files/bandit-combined.ckpt?download=1
+Size: 446680129 bytes
+SHA-256: ebcd8a3c8c783aa8f3379c0cab925b76987f4f8959dfb595a84426817e1ffb60
+Publisher MD5: d04760e77bb947668d8f5582d36b45a0
+
+Weights license: Creative Commons Attribution-NonCommercial 4.0 International
+(CC BY-NC 4.0). See BandIt-CC-BY-NC-4.0.txt and
+https://creativecommons.org/licenses/by-nc/4.0/
+The weights are not covered by the application's MIT license. Selecting an
+optional mode does not remove the model's non-commercial license restriction.
+The creators do not endorse this application.
+
+The combined model estimates speech, music (including singing), and sound
+effects. The application retains music plus sound effects for the optional
+"Keep singing; remove dialogue" backing mode. Inference is probabilistic:
+speech remnants or unintended changes to singing, music, and effects are possible.
+
+Inference source: https://github.com/kwatcharasupat/bandit-v2
+Source revision: d5563d9031e95fdaa3e5a73d5020b9a0df61adb6
+Source license: Apache License 2.0, retained in BandIt-Apache-2.0.txt and in
+the installed _bandit package's LICENSE.
+Original source hashes and adaptations are recorded in _bandit/provenance.json.
+
+The inference-only source replaces the training framework base with
+torch.nn.Module. The application supplies local CPU execution, sequential
+mono-model inference for each stereo channel, full-duration streaming
+overlap-add, and one global clipping-safety gain. The learned architecture
+and checkpoint weights are not replaced, converted, or quantized.
+
+Model download and repair require explicit permission. Verified cached
+weights are reused offline. Audio and inference remain local; this feature
+does not upload media. Weights and private example media are not distributed
+inside the application ZIP.

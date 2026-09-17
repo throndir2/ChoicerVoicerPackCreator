@@ -24,6 +24,7 @@ from choicer_voicer_pack_creator.models import (
     Segment,
 )
 from choicer_voicer_pack_creator.project_io import ProjectStore
+from choicer_voicer_pack_creator.separation_types import KEEP_SINGING, REMOVE_ALL_VOCALS
 from choicer_voicer_pack_creator.ui.export_options_dialog import ExportOptions
 from choicer_voicer_pack_creator.ui.history import CONFIRM_DELETE_SETTING, ReplayView
 from choicer_voicer_pack_creator.ui.main_window import MainWindow
@@ -59,6 +60,27 @@ def window(qtbot, tmp_path, monkeypatch):
 def restore(window, qtbot, *, redo=False):
     (window.action_redo if redo else window.action_undo).trigger()
     qtbot.waitUntil(lambda: not window.edit_history.busy, timeout=10000)
+
+
+def test_backing_mode_history_restores_preference_and_invalidates_pending_requests(window, qtbot):
+    original_path = window.project.backing_track_path
+    window.project.backing_generation_mode = KEEP_SINGING
+    window.session.backing_revision += 1
+    window._set_dirty(True, history_label="Change backing generation mode", fields_only=True)
+    revision = window.session.backing_revision
+    restore(window, qtbot)
+    assert window.project.backing_generation_mode == REMOVE_ALL_VOCALS
+    assert window.session.backing_revision > revision
+    revision = window.session.backing_revision
+    restore(window, qtbot, redo=True)
+    assert window.project.backing_generation_mode == KEEP_SINGING
+    assert window.session.backing_revision > revision
+    assert window.project.backing_track_path == original_path
+    window.duplicate_segment()
+    revision = window.session.backing_revision
+    restore(window, qtbot)
+    assert window.project.backing_generation_mode == KEEP_SINGING
+    assert window.session.backing_revision > revision
 
 
 def test_delete_restores_original_id_media_and_selection(window, qtbot):
