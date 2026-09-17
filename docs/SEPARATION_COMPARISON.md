@@ -1,9 +1,14 @@
 # Singing-preserving separation experiment
 
-This is an optional, local-only developer experiment, **not a new application backend**.
-It compares the current HTDemucs instrumental backing with singing-aware BandIt and
-SAM Audio's speech-removal residual. The editor, automatic generation, portable build,
-and application dependencies are unchanged.
+This optional, local-only developer workflow compares HTDemucs instrumental backing
+with singing-aware BandIt and SAM Audio's speech-removal residual. The comparison
+runner and GPU setup below are not part of the portable application.
+
+The editor's **Generate Backing Track** dialog separately offers the auditioned BandIt
+combined model as **Keep singing; remove dialogue**, with a bundled CPU runtime for
+portable users. Automatic generation still uses the original all-vocals HTDemucs mode.
+SAM Audio remains an experiment, not an application backend. See the README for
+production setup; do not install this GPU comparison environment into the editor.
 
 The initial target is native Windows, Python 3.11, and an NVIDIA RTX 5080 (16 GB).
 CUDA 12.8 builds support this GPU; old cu121/cu124 installs are not substitutes.
@@ -20,9 +25,10 @@ audio tests do not establish model quality or guarantee native-Windows compatibi
 | SAM Audio small, prompt `speech` | Predicted residual | Experimental, generative, mono output. It is not exact subtraction or a guarantee that singing survives. |
 
 BandIt architecture code is Apache-2.0; its notices and original-source hashes are in
-`scripts\_bandit`. The [singing-aware weights](https://zenodo.org/records/13327983)
-are **CC BY-NC 4.0**: use this profile for non-commercial research/evaluation, not as
-an unrestricted production feature.
+`src\choicer_voicer_pack_creator\_bandit`. The
+[singing-aware weights](https://zenodo.org/records/13327983) are **CC BY-NC 4.0**.
+Both comparison and application use remain subject to those non-commercial license
+terms; the weights are not an unrestricted or MIT-licensed application component.
 
 SAM code and weights use the [SAM License](https://github.com/facebookresearch/sam-audio/blob/bb4c6999d2677c7402360e426afc01ddfad6dce0/LICENSE).
 Its standard dependency installation includes ImageBind, licensed **CC BY-NC-SA 4.0**.
@@ -180,6 +186,7 @@ removed track is evidence of the failure we want to avoid. Also listen for dialo
 missing effects, altered timbre, and chunk-boundary artifacts.
 
 There are no clean reference stems. Neither loudness nor reconstruction error can establish
-singing preservation, and SDR claims would be unjustified. Do not enable a production
-"preserve singing" option until actual listening results, hardware behavior, and licensing
-support it.
+singing preservation, and SDR claims would be unjustified. Listening approval of the combined
+BandIt result supports that model choice, not an untested checkpoint or numerical replacement.
+Production CPU/runtime parity, full-duration behavior, and portable execution are separate
+checks from this GPU comparison. The non-commercial model terms continue to apply.

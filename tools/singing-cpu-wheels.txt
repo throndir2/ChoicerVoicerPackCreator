@@ -1,0 +1,12 @@
+# Windows x64 CPython 3.11 / 3.12 only. Install these official CPU wheels FIRST:
+# Set PIP_CONFIG_FILE=nul on Windows to disable pip configuration files.
+# python -m pip --isolated install --no-deps --require-hashes -r tools\singing-cpu-wheels.txt
+# Then install .[singing] from https://pypi.org/simple (not a floating torch index).
+torch @ https://download.pytorch.org/whl/cpu/torch-2.8.0%2Bcpu-cp311-cp311-win_amd64.whl ; python_version == "3.11" and sys_platform == "win32" and platform_machine == "AMD64" and implementation_name == "cpython" \
+    --hash=sha256:7631ef49fbd38d382909525b83696dc12a55d68492ade4ace3883c62b9fc140f
+torch @ https://download.pytorch.org/whl/cpu/torch-2.8.0%2Bcpu-cp312-cp312-win_amd64.whl ; python_version == "3.12" and sys_platform == "win32" and platform_machine == "AMD64" and implementation_name == "cpython" \
+    --hash=sha256:2be20b2c05a0cce10430cc25f32b689259640d273232b2de357c35729132256d
+torchaudio @ https://download.pytorch.org/whl/cpu/torchaudio-2.8.0%2Bcpu-cp311-cp311-win_amd64.whl ; python_version == "3.11" and sys_platform == "win32" and platform_machine == "AMD64" and implementation_name == "cpython" \
+    --hash=sha256:db37df7eee906f8fe0a639fdc673f3541cb2e173169b16d4133447eb922d1938
+torchaudio @ https://download.pytorch.org/whl/cpu/torchaudio-2.8.0%2Bcpu-cp312-cp312-win_amd64.whl ; python_version == "3.12" and sys_platform == "win32" and platform_machine == "AMD64" and implementation_name == "cpython" \
+    --hash=sha256:9b302192b570657c1cc787a4d487ae4bbb7f2aab1c01b1fcc46757e7f86f391e

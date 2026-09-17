@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -25,7 +26,7 @@ class AboutDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("About Choicer Voicer Pack Creator")
-        self.resize(600, 300)
+        self.resize(600, 430)
 
         layout = QVBoxLayout(self)
         description = QLabel(
@@ -37,9 +38,23 @@ class AboutDialog(QDialog):
             "<i>The Choicer Voicer</i>.</p>"
             "<p>Licensed under the MIT License. Third-party licenses and source information "
             "are listed in <code>THIRD_PARTY_NOTICES.md</code>.</p>"
+            "<p><b>Keep singing; remove dialogue</b> uses the "
+            '<a href="https://zenodo.org/records/13327983">Facing the Music BandIt combined model</a> '
+            "by <b>Karn N. Watcharasupat, Chih-Wei Wu, and Iroro Orife</b>. "
+            'The <a href="https://github.com/kwatcharasupat/bandit-v2">'
+            "BandIt source</a> is <b>Apache-2.0</b>; the optional model weights are "
+            '<a href="https://creativecommons.org/licenses/by-nc/4.0/">'
+            "<b>CC BY-NC 4.0 (non-commercial use)</b></a>, not MIT or unrestricted. "
+            "The creators do not endorse this application.</p>"
         )
         description.setWordWrap(True)
-        layout.addWidget(description)
+        description.setAlignment(Qt.AlignmentFlag.AlignTop)
+        description.setOpenExternalLinks(True)
+        description.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(description)
+        layout.addWidget(scroll)
 
         controls = QHBoxLayout()
         self.support_button = QPushButton(self)

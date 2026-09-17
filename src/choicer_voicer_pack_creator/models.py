@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from choicer_voicer_pack_creator.operations import check_cancelled
+from choicer_voicer_pack_creator.separation_types import (
+    REMOVE_ALL_VOCALS,
+    BackingMode,
+    validate_backing_mode,
+)
 
 AudioMode = Literal["video", "file"]
 SpeakerAssignment = Literal["manual", "automatic", "excluded"]
@@ -274,6 +279,10 @@ class PackProject:
     auto_speaker_matching: bool = True
     pack_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     parent_pack_id: str | None = None
+    backing_generation_mode: BackingMode = REMOVE_ALL_VOCALS
+
+    def __post_init__(self) -> None:
+        validate_backing_mode(self.backing_generation_mode)
 
     @property
     def speakers(self) -> list[str]:
@@ -430,6 +439,7 @@ class PackProject:
             "video_path": self.video_path,
             "video_duration": round(self.video_duration, 6),
             "backing_track_path": self.backing_track_path,
+            "backing_generation_mode": validate_backing_mode(self.backing_generation_mode),
             "icon_path": self.icon_path,
             "head_padding": self.head_padding,
             "tail_padding": self.tail_padding,
@@ -493,6 +503,9 @@ class PackProject:
             video_path=str(value.get("video_path", "")),
             video_duration=float(value.get("video_duration", 0.0)),
             backing_track_path=str(value.get("backing_track_path", "")),
+            backing_generation_mode=validate_backing_mode(
+                value.get("backing_generation_mode", REMOVE_ALL_VOCALS),
+            ),
             icon_path=str(value.get("icon_path", "")),
             head_padding=float(value.get("head_padding", 0.15)),
             tail_padding=float(value.get("tail_padding", 0.25)),
