@@ -5,7 +5,7 @@ import importlib.util
 import json
 import os
 import subprocess
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +17,117 @@ if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"Could not load {SCRIPT_PATH}")
 SMOKE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SMOKE)
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    ["success", "timeout", "failed", "helper-error", "parent-error", "cleanup-error",
+     "partial-result", "partial-report", "incomplete-json", "remove-error"],
+)
+def test_updater_smoke_owns_tree_after_parent_exit_and_preserves_failure_fixture(
+    tmp_path, monkeypatch, capsys, outcome,
+):
+    application = tmp_path / "candidate"
+    (application / "_internal").mkdir(parents=True)
+    (application / "bin").mkdir()
+    for relative in ("bin/ffmpeg.exe", "bin/ffprobe.exe", "_internal/runtime.dll"):
+        (application / relative).write_bytes(b"fixture runtime")
+    executable = application / SMOKE.EXECUTABLE
+    executable.write_bytes(b"fixture executable")
+    events = []
+    clock = [0.0]
+    finish_write = []
+    successful = outcome in {"success", "partial-result", "partial-report", "remove-error"}
+    monkeypatch.setattr(SMOKE, "ROOT", tmp_path)
+    monkeypatch.setattr(SMOKE.time, "monotonic", lambda: clock[0])
+    def sleep(_seconds):
+        if finish_write:
+            finish_write.pop()()
+            clock[0] += 1
+        else:
+            clock[0] = 601
+
+    monkeypatch.setattr(SMOKE.time, "sleep", sleep)
+    monkeypatch.setattr(
+        SMOKE, "verify_installation", lambda *_args: events.append("verified"),
+    )
+    real_remove = SMOKE.shutil.rmtree
+
+    def remove(path, *args, **kwargs):
+        assert events[-1] == "reaped"
+        events.append("removed")
+        if outcome == "remove-error":
+            raise OSError("injected fixture removal failure")
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(SMOKE.shutil, "rmtree", remove)
+
+    @contextmanager
+    def owned(command, *, env):
+        directory, target = Path(command[3]), Path(command[4])
+        assert directory.name == ".cvpc-update-smoke"
+        assert env["QT_QPA_PLATFORM"] == "offscreen"
+        events.append("owned")
+
+        def wait(*, timeout):
+            assert timeout == 45
+            events.append("parent-exited")
+            if successful or outcome in {"failed", "incomplete-json"}:
+                (directory / "result.json").write_text(json.dumps({
+                    "success": successful, "message": "injected updater failure",
+                }))
+            if successful:
+                (directory.parent / "report.json").write_text(json.dumps({
+                    "ffmpeg": str(target / "bin" / "ffmpeg.exe"),
+                }))
+                (target / "_internal" / "obsolete-smoke.txt").unlink()
+            if outcome in {"partial-result", "partial-report", "incomplete-json"}:
+                path = (
+                    directory.parent / "report.json" if outcome == "partial-report"
+                    else directory / "result.json"
+                )
+                complete = path.read_text()
+                path.write_text("{")
+                if outcome != "incomplete-json":
+                    finish_write.append(lambda: path.write_text(complete))
+            elif outcome == "helper-error":
+                (directory / "helper-error.txt").write_text("injected helper failure")
+            return 1 if outcome == "parent-error" else 0
+
+        try:
+            yield SimpleNamespace(wait=wait, args=command)
+        finally:
+            events.append("reaped")
+            if outcome == "cleanup-error":
+                raise OSError("injected cleanup failure")
+
+    monkeypatch.setattr(SMOKE, "owned_subprocess", owned)
+    if successful and outcome != "remove-error":
+        SMOKE.smoke_update(executable)
+        assert events == ["owned", "parent-exited", "verified", "reaped", "removed"]
+        assert not list((tmp_path / "build").iterdir())
+        assert "PACKAGED IN-PLACE UPDATE + RESTART SMOKE PASSED" in capsys.readouterr().out
+    elif outcome == "remove-error":
+        with pytest.raises(OSError, match="fixture removal"):
+            SMOKE.smoke_update(executable)
+        assert events == ["owned", "parent-exited", "verified", "reaped", "removed"]
+        assert "PACKAGED IN-PLACE UPDATE + RESTART SMOKE PASSED" not in capsys.readouterr().out
+    else:
+        with pytest.raises((RuntimeError, subprocess.CalledProcessError)) as failed:
+            SMOKE.smoke_update(executable)
+        assert events == ["owned", "parent-exited", "reaped"]
+        roots = list((tmp_path / "build").iterdir())
+        assert len(roots) == 1
+        assert any(str(roots[0]) in note for note in failed.value.__notes__)
+        assert "PACKAGED IN-PLACE UPDATE + RESTART SMOKE PASSED" not in capsys.readouterr().out
+        if outcome in {"timeout", "cleanup-error", "incomplete-json"}:
+            assert "600s" in str(failed.value)
+            if outcome == "cleanup-error":
+                assert any("injected cleanup failure" in note for note in failed.value.__notes__)
+            elif outcome == "incomplete-json":
+                assert "incomplete JSON" in str(failed.value) and "result.json" in str(failed.value)
+        elif outcome in {"failed", "helper-error"}:
+            assert "injected" in str(failed.value)
 
 
 @pytest.mark.parametrize("path_key,root_key", [("PATH", "SystemRoot"), ("Path", "SYSTEMROOT")])

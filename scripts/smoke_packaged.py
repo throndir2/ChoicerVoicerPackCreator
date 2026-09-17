@@ -12,6 +12,7 @@ import tempfile
 import time
 import tomllib
 import uuid
+from contextlib import contextmanager
 from email.parser import Parser
 from importlib import metadata
 from pathlib import Path
@@ -21,6 +22,7 @@ from mcp.client.stdio import stdio_client
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
+from choicer_voicer_pack_creator.process_worker import owned_subprocess
 from choicer_voicer_pack_creator.runtime_paths import application_directory
 from choicer_voicer_pack_creator.separation import write_json_atomic
 from choicer_voicer_pack_creator.updates import (
@@ -404,11 +406,43 @@ def smoke_speaker_matching(executable: Path) -> None:
         shutil.rmtree(job)
 
 
+UPDATE_SMOKE_TIMEOUT = 600
+
+
+def _update_smoke_json(path: Path, pending: dict[str, str]) -> dict | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        pending[path.name] = str(error)
+        return None
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Invalid updater smoke JSON object: {path}")
+    pending.pop(path.name, None)
+    return value
+
+
+@contextmanager
+def _owned_update_smoke(command, environment):
+    failure = None
+    try:
+        with owned_subprocess(command, env=environment) as process:
+            try:
+                yield process
+            except BaseException as error:
+                failure = error
+                raise
+    except BaseException as error:
+        if failure is not None and error is not failure:
+            failure.add_note(f"Owned updater cleanup also failed: {error}")
+            raise failure from error
+        raise
+
+
 def smoke_update(executable: Path) -> None:
     scratch_root = ROOT / "build"
     scratch_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="cvpc-update-smoke-", dir=scratch_root) as temporary:
-        root = Path(temporary)
+    root = Path(tempfile.mkdtemp(prefix="cvpc-update-smoke-", dir=scratch_root))
+    try:
         target = root / "Installed app"
         directory = root / ".cvpc-update-smoke"
         staged = directory / "application"
@@ -434,7 +468,7 @@ def smoke_update(executable: Path) -> None:
         environment["QT_QPA_PLATFORM"] = "offscreen"
         # This parent holds the old EXE open without FILE_SHARE_DELETE, like the editor.
         # The staged packaged helper must wait for it to exit before replacing files.
-        parent_code = """
+        parent_code = f"""
 import ctypes, sys
 from ctypes import wintypes
 from pathlib import Path
@@ -444,43 +478,53 @@ kernel = ctypes.WinDLL("kernel32", use_last_error=True)
 kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
                               wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
 kernel.CreateFileW.restype = wintypes.HANDLE
-handle = kernel.CreateFileW(str(target / "Choicer Voicer Pack Creator.exe"),
+handle = kernel.CreateFileW(str(target / {EXECUTABLE!r}),
                            0x80000000, 1, None, 3, 0, None)
 if handle == wintypes.HANDLE(-1).value:
     raise ctypes.WinError(ctypes.get_last_error())
 launch_update(PreparedUpdate(directory, target, version), Path("--smoke-test"))
 """
-        subprocess.run(
+        with _owned_update_smoke(
             [sys.executable, "-c", parent_code, str(directory), str(target), APP_VERSION],
-            check=True, env=environment, timeout=45,
-        )
-        deadline = time.monotonic() + 90
-        while not report.exists() and time.monotonic() < deadline:
-            time.sleep(0.25)
-        result_path = directory / "result.json"
-        if not result_path.is_file():
-            raise RuntimeError(f"The packaged update helper did not finish: {directory}")
-        result = json.loads(result_path.read_text(encoding="utf-8"))
-        if not result.get("success"):
-            raise RuntimeError(f"Packaged update failed: {result.get('message')}")
-        if not report.is_file():
-            raise RuntimeError("The updated application did not restart and write its smoke report")
-        restarted = json.loads(report.read_text(encoding="utf-8"))
-        if Path(restarted["ffmpeg"]).resolve() != (target / "bin" / "ffmpeg.exe").resolve():
-            raise RuntimeError("The updater restarted the wrong application folder")
-        verify_installation(target, APP_VERSION)
-        if obsolete.exists() or extra.read_text(encoding="utf-8") != "user-owned project":
-            raise RuntimeError("The updater did not preserve user files/remove obsolete managed files")
-        # Wait until both packaged processes release their mapped EXE/DLLs before cleanup.
-        for path in (staged / EXECUTABLE, target / EXECUTABLE):
-            for attempt in range(100):
-                try:
-                    path.unlink()
-                    break
-                except PermissionError:
-                    if attempt == 99:
-                        raise
-                    time.sleep(0.1)
+            environment,
+        ) as process:
+            returncode = process.wait(timeout=45)
+            if returncode:
+                raise subprocess.CalledProcessError(returncode, process.args)
+            # The CPU-inclusive package is about 1.3 GB: several full integrity
+            # passes exceeded the old 90-second fixture deadline on local storage.
+            deadline = time.monotonic() + UPDATE_SMOKE_TIMEOUT
+            result_path = directory / "result.json"
+            pending_json: dict[str, str] = {}
+            while time.monotonic() < deadline:
+                error_path = directory / "helper-error.txt"
+                if error_path.is_file():
+                    raise RuntimeError(f"Packaged update helper failed: {error_path.read_text()}")
+                if result_path.is_file():
+                    result = _update_smoke_json(result_path, pending_json)
+                    if result is not None and result.get("success") is not True:
+                        raise RuntimeError(f"Packaged update failed: {result.get('message')}")
+                    if result is not None and report.is_file():
+                        restarted = _update_smoke_json(report, pending_json)
+                        if restarted is not None:
+                            break
+                time.sleep(0.25)
+            else:
+                raise RuntimeError(
+                    f"Packaged update/restart exceeded {UPDATE_SMOKE_TIMEOUT}s: {directory}"
+                    + (f"; incomplete JSON: {pending_json}" if pending_json else "")
+                )
+            if Path(restarted["ffmpeg"]).resolve() != (target / "bin" / "ffmpeg.exe").resolve():
+                raise RuntimeError("The updater restarted the wrong application folder")
+            verify_installation(target, APP_VERSION)
+            if obsolete.exists() or extra.read_text(encoding="utf-8") != "user-owned project":
+                raise RuntimeError("The updater did not preserve user files/remove obsolete managed files")
+    except BaseException as error:
+        error.add_note(f"Updater smoke fixture retained for diagnosis: {root}")
+        raise
+    else:
+        # All owned helpers/restarted processes are reaped before fixture removal.
+        shutil.rmtree(root)
         print("PACKAGED IN-PLACE UPDATE + RESTART SMOKE PASSED")
 
 

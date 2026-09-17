@@ -247,7 +247,9 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
         if name in BUILD_SCRIPT.SINGING_PACKAGES:
             assert kwargs == {"exclude_datas": ["**/*.lib", "**/*.h", "**/*.hpp", "**/*.cuh"]}
         return (
-            [(f"{name}-data", name)],
+            [(f"{name}-data", name)] + (
+                [("cudnn64_9.dll", name)] if name == "ctranslate2" else []
+            ),
             [(f"{name}-binary", name)] + (
                 [("cudnn64_9.dll", name)] if name == "ctranslate2" else []
             ) + (
@@ -284,8 +286,22 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
             pure=object(),
             binaries=[
                 *kwargs["binaries"], ("libiomp5md.dll", "automatic-root-copy.dll", "BINARY"),
+                (
+                    str(Path("ctranslate2") / "cudnn64_9.dll"),
+                    str(root / "installed" / "ctranslate2" / "cudnn64_9.dll"), "BINARY",
+                ),
+                (
+                    str(Path("ctranslate2") / "ctranslate2.dll"),
+                    str(root / "installed" / "ctranslate2" / "ctranslate2.dll"), "BINARY",
+                ),
             ],
-            datas=kwargs["datas"],
+            datas=[
+                *kwargs["datas"],
+                (
+                    str(Path("ctranslate2") / "cudnn64_9.dll"),
+                    str(root / "installed" / "ctranslate2" / "cudnn64_9.dll"), "DATA",
+                ),
+            ],
             hiddenimports=kwargs["hiddenimports"],
             runtime_hooks=kwargs["runtime_hooks"],
             pathex=kwargs["pathex"],
@@ -357,9 +373,18 @@ def test_spec_builds_two_entrypoints_from_one_shared_analysis(
     assert "--caption-timing-smoke" in speaker_hook
     assert "timing_smoke(Path(sys.argv[2]))" in speaker_hook
     assert ("cudnn64_9.dll", "ctranslate2") not in analyses[0].binaries
+    assert ("cudnn64_9.dll", "ctranslate2") not in analyses[0].datas
+    assert not any(
+        Path(item[0]).name == "cudnn64_9.dll"
+        for item in [*analyses[0].binaries, *analyses[0].datas]
+    )
+    assert (
+        str(Path("ctranslate2") / "ctranslate2.dll"),
+        str(root / "installed" / "ctranslate2" / "ctranslate2.dll"), "BINARY",
+    ) in analyses[0].binaries
     assert any(
         Path(source).name == "kaldi-native-fbank-core.dll" and destination == "."
-        for source, destination in analyses[0].binaries
+        for source, destination, *_kind in analyses[0].binaries
     )
     assert analyses[0].pathex == [str(root / "src")]
     assert "torch" not in analyses[0].excludes

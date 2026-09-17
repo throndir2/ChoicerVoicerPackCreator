@@ -288,8 +288,8 @@ non-commercial restrictions; the inference source is Apache-2.0. See About and t
 The finished outputs are:
 
 ```text
-dist/v1.3.8/portable-<build-id>/Choicer Voicer Pack Creator/
-dist/v1.3.8/Choicer-Voicer-Pack-Creator-1.3.8-Windows-x64.zip
+dist/v1.3.9/portable-<build-id>/Choicer Voicer Pack Creator/
+dist/v1.3.9/Choicer-Voicer-Pack-Creator-1.3.9-Windows-x64.zip
 ```
 
 The script prints the exact generated application-folder path. Each rebuild uses a new path to avoid
@@ -372,8 +372,9 @@ If `py` is unavailable, invoke your installed Python executable directly.
 ### Optional singing-preserving CPU backend
 
 The core source application still requires Python **3.11 or newer**. The additional
-**Keep singing; remove dialogue** backend is supported for **Windows x64 CPython 3.11/3.12**
-only; portable builds use 3.12. A base source install remains usable without this extra.
+**Keep singing; remove dialogue** CPU wheel setup targets **Windows x64 CPython 3.11/3.12**
+only; portable builds use 3.12. Native source qualification on 3.11 is deferred for 1.3.9.
+A base source install remains usable without this extra.
 To enable it in your own virtual environment, install the exact official CPU wheels **first**,
 then install the extra from public PyPI:
 
@@ -1155,14 +1156,17 @@ with another compatible pair.
 .\Build-Portable.ps1
 ```
 
-The Windows application folder is written below `dist/v1.3.8/portable-<build-id>/`, with a
-shareable `Choicer-Voicer-Pack-Creator-1.3.8-Windows-x64.zip` beside it. The first build downloads
+The Windows application folder is written below `dist/v1.3.9/portable-<build-id>/`, with a
+shareable `Choicer-Voicer-Pack-Creator-1.3.9-Windows-x64.zip` beside it. The first build downloads
 about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. The stable sharing ZIP is not
 replaced until both the application folder and a clean ZIP extraction pass packaged smoke tests.
 Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or
 `libmp3lame`.
 
 ## GitHub releases
+
+See [the 1.3.9 release notes](docs/RELEASE_NOTES_1.3.9.md) for the singing-preserving backing
+workflow, licensing, and deferred broader CPU qualification.
 
 This repository intentionally has **no automatic push or pull-request CI**. Pushing commits does not
 start an Actions runner. Tests and validation are run locally during development.

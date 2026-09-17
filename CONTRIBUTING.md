@@ -37,6 +37,9 @@ without actual frozen-dependency evidence. Never use `KMP_DUPLICATE_LIB_OK` to s
 Validate both isolated backend workers in the candidate and a clean ZIP extraction.
 Worker smoke must reject importing the other heavy backend; module absence checks do not
 replace actual native validation of each backend's original DLLs.
+Caption workers temporarily disable CTranslate2's optional Torch model-conversion imports
+while initializing its unmodified inference runtime. Keep this policy worker-local, restore
+the import machinery on every exit, and reject an already loaded foreign backend.
 
 ## Design rules
 
@@ -121,12 +124,14 @@ both the candidate application folder and a clean ZIP extraction before promotin
 Both packaged entrypoints must also pass the offline BandIt actual-architecture tiny CPU smoke
 with exact CPU dependency versions, no Qt in the worker, stereo streaming, model provenance,
 and all recursive dependency notices/metadata present. Keep the existing HTDemucs assertions
-unchanged. These synthetic inputs do not establish model quality or real eight-second-window
-feasibility: before shipping backend changes, separately prove real-checkpoint CPU feasibility,
-memory/time, and numerical parity from the candidate and clean extraction, with verified weights
-and any private fixtures kept outside the portable folder. Do not overlap those heavy checks
-with packaging/model loads on a memory-constrained machine. Record measured ZIP/extracted sizes;
-do not present engineering size estimates as measurements.
+unchanged. These synthetic inputs verify the bundled native architecture and worker isolation,
+not model quality or real eight-second-window feasibility. Broader real-checkpoint CPU parity,
+long-clip memory/time measurements, thread-profile comparisons, and additional source-Python
+qualification are separate work: explicitly report which were completed or deferred, rather than
+treating synthetic smoke or GPU listening as equivalent evidence. Keep verified weights and any
+private fixtures outside the portable folder. Do not overlap optional heavy experiments with
+packaging/model loads on a memory-constrained machine. Record measured ZIP/extracted sizes;
+do not present engineering size estimates as measurements. Existing release checks below still apply.
 
 ## Pull requests
 

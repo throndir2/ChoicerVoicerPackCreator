@@ -25,7 +25,38 @@ from choicer_voicer_pack_creator.caption_timing_types import (
     CaptionTimingResult,
     TimingWord,
 )
+from choicer_voicer_pack_creator.diagnostics import diagnostic_event
 from choicer_voicer_pack_creator.models import SourceCaption
+
+
+def _load_ctranslate2() -> Any:
+    import importlib.abc
+    import sys
+
+    if any(name == "torch" or name.startswith("torch.") for name in sys.modules):
+        raise CaptionTimingError("Caption timing worker unexpectedly imported Torch")
+
+    class InferenceImports(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname == "torch" or fullname.startswith("torch."):
+                diagnostic_event("caption_conversion_import_disabled", module=fullname)
+                raise ModuleNotFoundError(
+                    "Torch model conversion is unavailable in the isolated caption inference worker",
+                    name=fullname,
+                )
+            return None
+
+    # CTranslate2 eagerly imports optional conversion helpers. Keep their supported
+    # no-Torch path without changing its native loader or either backend's DLLs.
+    blocker = InferenceImports()
+    sys.meta_path.insert(0, blocker)
+    try:
+        import ctranslate2
+    finally:
+        sys.meta_path.remove(blocker)
+    if any(name == "torch" or name.startswith("torch.") for name in sys.modules):
+        raise CaptionTimingError("Caption timing worker unexpectedly imported Torch")
+    return ctranslate2
 
 
 @dataclass(frozen=True)
@@ -374,11 +405,11 @@ def _audit_proposed_cuts(
     originals: tuple[SourceCaption, ...], proposed: CaptionTimingResult,
     model: Any, tokenizer: _Tokenizer, filters: Any,
 ) -> CaptionTimingResult:
-    import ctranslate2
     import numpy as np
 
     from choicer_voicer_pack_creator.caption_timing import audit_caption_text
 
+    ctranslate2 = _load_ctranslate2()
     rows = list(proposed.captions)
     confidences = list(proposed.confidences)
     reasons = list(proposed.review_reasons)
@@ -451,9 +482,10 @@ def _run_caption_job(
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ["OMP_NUM_THREADS"] = str(max(1, min(4, threads)))
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    import ctranslate2
     import numpy as np
     import soundfile as sf
+
+    ctranslate2 = _load_ctranslate2()
 
     def progress(message: str, fraction: float | None = None) -> None:
         emit("progress", {"message": message, "fraction": fraction})
@@ -573,10 +605,10 @@ def smoke_test(emit: Callable[[str, dict], None]) -> dict[str, Any]:
     if any(name == "torch" or name.startswith("torch.") for name in sys.modules):
         raise CaptionTimingError("Caption timing worker unexpectedly imported Torch")
 
-    import ctranslate2
     import numpy as np
     import tokenizers
 
+    ctranslate2 = _load_ctranslate2()
     features = log_mel_features(np.zeros(SAMPLE_RATE, dtype=np.float32))
     storage = ctranslate2.StorageView.from_array(features)
     if tuple(storage.shape) != (1, 128, 3000) or "int8" not in (

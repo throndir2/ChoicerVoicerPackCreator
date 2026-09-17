@@ -319,10 +319,14 @@ def _write_spec() -> Path:
                 package_data, package_binaries, package_imports = collect_all(package)
                 if package == "ctranslate2":
                     # CPU inference needs ctranslate2.dll and libiomp5md.dll, not the
-                    # wheel's unused NVIDIA cuDNN loader (the build disables cuDNN).
+                    # optional NVIDIA cuDNN loader. collect_all can also return it as data.
+                    package_data = [
+                        item for item in package_data
+                        if Path(item[0]).name.casefold() != "cudnn64_9.dll"
+                    ]
                     package_binaries = [
                         item for item in package_binaries
-                        if not Path(item[0]).name.lower().startswith("cudnn")
+                        if Path(item[0]).name.casefold() != "cudnn64_9.dll"
                     ]
                 data += package_data
                 binaries += package_binaries
@@ -362,9 +366,21 @@ def _write_spec() -> Path:
                 excludes=["av", "faster_whisper", "tensorflow", "transformers", "fairseq"],
                 noarchive=False,
             )
+            # Analysis hooks and data reclassification can reintroduce this optional
+            # loader. Limit the exclusion to the pinned CTranslate2 wheel's GPU DLL.
+            def optional_caption_gpu(item):
+                source = Path(item[1])
+                return (
+                    source.parent.name.casefold() == "ctranslate2"
+                    and source.name.casefold() == "cudnn64_9.dll"
+                )
+
+            analysis.binaries = [
+                item for item in analysis.binaries if not optional_caption_gpu(item)
+            ]
             analysis.datas = [
                 item for item in analysis.datas
-                if not (
+                if not optional_caption_gpu(item) and not (
                     "torch" in Path(item[0]).parts
                     and Path(item[0]).suffix.casefold() in {{".lib", ".h", ".hpp", ".cuh"}}
                 )

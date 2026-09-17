@@ -24,6 +24,7 @@ def rich_project() -> PackProject:
         title="Original", authors=["Author", " Second "], readme="Notes\n",
         video_path="missing-video.mp4", video_duration=123.123456789123,
         backing_track_path="preserved-backing.wav", icon_path="icon.png",
+        backing_generation_mode="keep_singing",
         head_padding=0.123456789, tail_padding=0.987654321, video_height=1080, video_fps=59,
         source_pack_path="original-pack", preserve_source_video=True,
         import_warnings=["Keep this warning"], source_url="https://example.invalid/media",
