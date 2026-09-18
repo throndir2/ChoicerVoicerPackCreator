@@ -36,6 +36,13 @@ def package(root: Path, version: str, extra: dict[str, bytes] | None = None) -> 
     return root
 
 
+def file_contents(root: Path) -> dict[Path, bytes]:
+    return {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*") if path.is_file()
+    }
+
+
 def release_json(version: str, *, prerelease: bool = False) -> dict:
     name = f"Choicer-Voicer-Pack-Creator-{version}-Windows-x64.zip"
     return {
@@ -163,7 +170,7 @@ def test_manifest_records_only_shipped_files_and_detects_modifications(tmp_path)
     files = updates.verify_installation(root, "0.5.1")
     assert "my-project.cvpack.json" not in files
     (root / "bin" / "ffmpeg.exe").write_bytes(b"custom ffmpeg")
-    with pytest.raises(updates.UpdateError, match="locally modified"):
+    with pytest.raises(updates.UpdateError, match="does not match its package"):
         updates.verify_installation(root, "0.5.1")
 
 
@@ -183,7 +190,7 @@ def test_verification_reports_file_counts_and_progress_within_large_files(
 
     for index, name in enumerate(files, 1):
         assert any(
-            message.startswith(f"Checking application files ({index}/{len(files)})")
+            message.startswith(f"Verifying application files ({index}/{len(files)})")
             and f"\n{name} (" in message
             for message, _fraction in progress
         )
@@ -264,9 +271,9 @@ def test_verified_download_is_staged_without_changing_installation(tmp_path, mon
     assert fractions[0] == 0
     assert all(0 <= fraction < 1 for fraction in fractions[:-1])
     assert progress[-1] == ("Update ready to install.", 1.0)
+    assert not any(message.startswith("Checking application files") for message, _ in progress)
     for phase, start, end in (
-        ("Checking application files", 0.0, 0.1),
-        ("Downloading update", 0.1, 0.7),
+        ("Downloading update", 0.0, 0.7),
         ("Extracting update files", 0.7, 0.85),
         ("Verifying update files", 0.85, 0.99),
     ):
@@ -278,6 +285,32 @@ def test_verified_download_is_staged_without_changing_installation(tmp_path, mon
         assert max(phase_progress) == pytest.approx(end)
     assert (prepared.directory / "plan.json").is_file()
     assert not (prepared.directory / "release.zip").exists()
+
+
+@pytest.mark.parametrize("file_state", ["unchanged", "modified", "missing"])
+def test_prepare_reads_inventory_without_hashing_installed_files(
+    tmp_path, monkeypatch, file_state,
+) -> None:
+    target = package(tmp_path / "app", "0.5.1", {"_internal/obsolete.dll": b"old"})
+    for name in ("bin/ffmpeg.exe", "_internal/obsolete.dll"):
+        if file_state == "modified":
+            (target / name).write_bytes(b"custom application file")
+        elif file_state == "missing":
+            (target / name).unlink()
+    original = file_contents(target)
+    incoming = package(tmp_path / "new", "0.6.0")
+    release = setup_download(monkeypatch, archive_bytes(incoming))
+    original_sha256 = updates.sha256
+
+    def hash_without_reading_old_files(path, *args, **kwargs):
+        assert not path.is_relative_to(target) or path == target / updates.MANIFEST
+        return original_sha256(path, *args, **kwargs)
+
+    monkeypatch.setattr(updates, "sha256", hash_without_reading_old_files)
+    prepared = updates.prepare_update(release, target, lambda *_: None, lambda: False, "0.5.1")
+
+    assert updates.verify_installation(prepared.staged, "0.6.0")
+    assert file_contents(target) == original
 
 
 def test_extraction_reports_progress_within_large_files(
@@ -306,7 +339,7 @@ def test_extraction_reports_progress_within_large_files(
 
 
 @pytest.mark.parametrize("phase", [
-    "Checking application files", "Extracting update files", "Verifying update files",
+    "Extracting update files", "Verifying update files",
 ])
 def test_cancel_within_large_file_leaves_installation_unchanged(
     tmp_path, monkeypatch, advancing_progress_clock, phase,
@@ -331,6 +364,23 @@ def test_cancel_within_large_file_leaves_installation_unchanged(
     assert not list(tmp_path.glob(".cvpc-update-*"))
 
 
+def test_cancel_before_reading_inventory_leaves_installation_unchanged(tmp_path, monkeypatch) -> None:
+    target = package(tmp_path / "app", "0.5.1")
+    incoming = package(tmp_path / "new", "0.6.0")
+    release = setup_download(monkeypatch, archive_bytes(incoming))
+
+    def unexpected_hash(*_args, **_kwargs):
+        pytest.fail("A canceled update must not start hashing files.")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(updates, "sha256", unexpected_hash)
+        with pytest.raises(updates.UpdateCancelled):
+            updates.prepare_update(release, target, lambda *_: None, lambda: True, "0.5.1")
+
+    assert updates.verify_installation(target, "0.5.1")
+    assert not list(tmp_path.glob(".cvpc-update-*"))
+
+
 def test_bad_checksum_never_changes_installed_app(tmp_path, monkeypatch) -> None:
     target = package(tmp_path / "app", "0.5.1")
     incoming = package(tmp_path / "new", "0.6.0")
@@ -351,6 +401,35 @@ def test_corrupt_download_is_rejected_even_if_the_zip_is_valid(tmp_path, monkeyp
         updates.prepare_update(release, target, lambda *_: None, lambda: False, "0.5.1")
     assert updates.verify_installation(target, "0.5.1")
     assert not list(tmp_path.glob(".cvpc-update-*"))
+
+
+@pytest.mark.parametrize("phase", ["prepare", "apply"])
+@pytest.mark.parametrize("file_state", ["modified", "missing"])
+def test_invalid_new_application_files_are_still_rejected(
+    tmp_path, monkeypatch, phase, file_state,
+) -> None:
+    prepared = prepared_package(tmp_path)
+    path = prepared.staged / "bin" / "ffmpeg.exe"
+    if file_state == "modified":
+        path.write_bytes(b"corrupted replacement")
+    else:
+        path.unlink()
+    original = file_contents(prepared.target)
+    release = setup_download(monkeypatch, archive_bytes(prepared.staged))
+
+    with pytest.raises(updates.UpdateError, match="does not match its package"):
+        if phase == "prepare":
+            updates.prepare_update(
+                release, prepared.target, lambda *_: None, lambda: False, "0.5.1",
+            )
+        else:
+            updates.apply_update(
+                prepared, "0.5.1", updates.sha256(prepared.target / updates.MANIFEST),
+            )
+
+    assert file_contents(prepared.target) == original
+    assert not (prepared.directory / "backup").exists()
+    assert list(tmp_path.glob(".cvpc-update-*")) == [prepared.directory]
 
 
 @pytest.mark.parametrize("extra", [
@@ -425,6 +504,39 @@ def test_apply_only_replaces_managed_files_and_removes_stale_managed_files(tmp_p
     assert (prepared.directory / "backup" / updates.EXECUTABLE).read_bytes() == b"app-0.5.1"
 
 
+@pytest.mark.parametrize("file_state", ["unchanged", "modified", "missing"])
+def test_apply_replaces_managed_files_without_hashing_old_contents(
+    tmp_path, monkeypatch, file_state,
+) -> None:
+    prepared = prepared_package(tmp_path)
+    target = prepared.target
+    for name in ("bin/ffmpeg.exe", "_internal/obsolete.dll"):
+        if file_state == "modified":
+            (target / name).write_bytes(b"custom application file")
+        elif file_state == "missing":
+            (target / name).unlink()
+    original = file_contents(target)
+    new = updates.read_portable_manifest(prepared.staged, "0.6.0")
+    manifest_hash = updates.sha256(target / updates.MANIFEST)
+    original_sha256 = updates.sha256
+    hashed = []
+
+    def record_hash(path, *args, **kwargs):
+        hashed.append(path)
+        return original_sha256(path, *args, **kwargs)
+
+    monkeypatch.setattr(updates, "sha256", record_hash)
+    updates.apply_update(prepared, "0.5.1", manifest_hash)
+
+    assert [
+        path for path in hashed if path.is_relative_to(target) and path.name != updates.MANIFEST
+    ] == [target / name for name in new]
+    assert (target / "bin" / "ffmpeg.exe").read_bytes() == b"ffmpeg"
+    assert not (target / "_internal" / "obsolete.dll").exists()
+    assert file_contents(prepared.directory / "backup") == original
+    assert updates.verify_installation(target, "0.6.0")
+
+
 def test_apply_refuses_collisions_with_unrelated_files(tmp_path) -> None:
     prepared = prepared_package(tmp_path)
     unrelated = prepared.target / "new-file.txt"
@@ -435,6 +547,25 @@ def test_apply_refuses_collisions_with_unrelated_files(tmp_path) -> None:
         )
     assert unrelated.read_text() == "mine"
     assert updates.verify_installation(prepared.target, "0.5.1")
+
+
+def test_apply_preserves_unrelated_file_created_during_installation(tmp_path, monkeypatch) -> None:
+    prepared = prepared_package(tmp_path)
+    original = file_contents(prepared.target)
+    original_copy = updates.shutil.copyfileobj
+    unrelated = prepared.target / "new-file.txt"
+
+    def copy_and_create_unrelated(source, destination, length):
+        original_copy(source, destination, length)
+        unrelated.write_bytes(b"mine")
+
+    monkeypatch.setattr(updates.shutil, "copyfileobj", copy_and_create_unrelated)
+    with pytest.raises(updates.UpdateError, match="unrelated file"):
+        updates.apply_update(
+            prepared, "0.5.1", updates.sha256(prepared.target / updates.MANIFEST),
+        )
+
+    assert file_contents(prepared.target) == {**original, Path("new-file.txt"): b"mine"}
 
 
 def test_update_relocates_managed_mcp_files_and_preserves_user_configuration(tmp_path):
@@ -465,7 +596,7 @@ def test_update_relocates_managed_mcp_files_and_preserves_user_configuration(tmp
         assert (target / name).read_bytes() == content
 
 
-def test_apply_refuses_modified_app_files_or_changed_manifest(tmp_path) -> None:
+def test_apply_refuses_changed_manifest(tmp_path) -> None:
     prepared = prepared_package(tmp_path)
     manifest_hash = updates.sha256(prepared.target / updates.MANIFEST)
     (prepared.target / updates.MANIFEST).write_text("{}")
@@ -473,8 +604,15 @@ def test_apply_refuses_modified_app_files_or_changed_manifest(tmp_path) -> None:
         updates.apply_update(prepared, "0.5.1", manifest_hash)
 
 
-def test_apply_rolls_back_all_files_after_copy_failure(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("file_state", ["unchanged", "modified", "missing"])
+def test_apply_rolls_back_all_files_after_copy_failure(tmp_path, monkeypatch, file_state) -> None:
     prepared = prepared_package(tmp_path)
+    for name in (updates.EXECUTABLE, "_internal/obsolete.dll"):
+        if file_state == "modified":
+            (prepared.target / name).write_bytes(b"custom application file")
+        elif file_state == "missing":
+            (prepared.target / name).unlink()
+    original = file_contents(prepared.target)
     original_copy = updates.shutil.copyfileobj
     calls = 0
 
@@ -491,8 +629,28 @@ def test_apply_rolls_back_all_files_after_copy_failure(tmp_path, monkeypatch) ->
         updates.apply_update(
             prepared, "0.5.1", updates.sha256(prepared.target / updates.MANIFEST)
         )
-    assert updates.verify_installation(prepared.target, "0.5.1")
+    assert file_contents(prepared.target) == original
     assert not (prepared.target / "new-file.txt").exists()
+
+
+def test_invalid_installed_copy_rolls_back_to_exact_modified_files(tmp_path, monkeypatch) -> None:
+    prepared = prepared_package(tmp_path)
+    (prepared.target / "bin" / "ffmpeg.exe").write_bytes(b"custom ffmpeg")
+    original = file_contents(prepared.target)
+    original_copy = updates.shutil.copyfileobj
+
+    def corrupt_copy(source, destination, length):
+        original_copy(source, destination, length)
+        if Path(destination.name).name == "ffmpeg.exe":
+            destination.write(b"corruption")
+
+    monkeypatch.setattr(updates.shutil, "copyfileobj", corrupt_copy)
+    with pytest.raises(updates.UpdateError, match="previous application was restored"):
+        updates.apply_update(
+            prepared, "0.5.1", updates.sha256(prepared.target / updates.MANIFEST),
+        )
+
+    assert file_contents(prepared.target) == original
 
 
 def test_locked_files_leave_original_application_intact(tmp_path, monkeypatch) -> None:
@@ -543,8 +701,12 @@ def test_case_only_file_rename_is_not_deleted_twice(tmp_path) -> None:
     assert updates.verify_installation(target, "0.6.0")
 
 
-def test_reparse_points_are_never_traversed(tmp_path, monkeypatch) -> None:
-    root = package(tmp_path / "app", "0.5.1")
+@pytest.mark.parametrize("phase", ["verify", "prepare", "apply"])
+def test_reparse_points_are_never_traversed(tmp_path, monkeypatch, phase) -> None:
+    prepared = prepared_package(tmp_path)
+    root = prepared.target
+    original = file_contents(root)
+    release = setup_download(monkeypatch, archive_bytes(prepared.staged))
     original_lstat = Path.lstat
 
     class ReparseInfo:
@@ -558,7 +720,13 @@ def test_reparse_points_are_never_traversed(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(Path, "lstat", fake_lstat)
     with pytest.raises(updates.UpdateError, match="junctions"):
-        updates.verify_installation(root, "0.5.1")
+        if phase == "verify":
+            updates.verify_installation(root, "0.5.1")
+        elif phase == "prepare":
+            updates.prepare_update(release, root, lambda *_: None, lambda: False, "0.5.1")
+        else:
+            updates.apply_update(prepared, "0.5.1", updates.sha256(root / updates.MANIFEST))
+    assert file_contents(root) == original
 
 
 def test_result_cannot_refer_to_another_directory(tmp_path) -> None:

@@ -608,7 +608,7 @@ def test_finished_signal_retires_its_sender_not_a_replacement_worker(
 
 @pytest.mark.parametrize(("message", "fraction"), [
     ("Downloading", 0.5),
-    ("Checking application files (1/4)...\n_internal/runtime.dll (50%)", 0.05),
+    ("Extracting update files (1/4)...\n_internal/runtime.dll (50%)", 0.75),
     ("Verifying update files (3/4)...\n_internal/runtime.dll (25%)", 0.9),
 ])
 def test_preparation_progress_and_cancel_button_discard_late_success_without_restart_prompt(
