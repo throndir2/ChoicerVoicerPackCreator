@@ -308,6 +308,7 @@ def _write_spec() -> Path:
                 "choicer_voicer_pack_creator.speaker_worker",
                 "choicer_voicer_pack_creator.caption_timing_worker",
                 "choicer_voicer_pack_creator.bandit_runtime",
+                "choicer_voicer_pack_creator.bandit_cuda_runtime",
                 *collect_submodules(
                     "mcp",
                     filter=lambda name: name != "mcp.cli" and not name.startswith("mcp.cli."),
@@ -604,6 +605,7 @@ def build_candidate() -> int:
         "caption-timing.json", "FasterWhisper-MIT.txt",
         "BandIt-Apache-2.0.txt", "BandIt-CC-BY-NC-4.0.txt", "BandIt-Attribution.txt",
         "backing-separation-bandit.json",
+        "bandit-cuda-runtime.json",
     ):
         shutil.copy2(resource_dir / filename, app_dir / "licenses")
     copy_separation_licenses(app_dir)

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import gc
 import threading
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtCore import QCoreApplication, QEvent, QSettings, Qt, QTimer
 from PySide6.QtWidgets import QDialog, QFileDialog, QLabel, QMessageBox
 
 from choicer_voicer_pack_creator.jobs import JobManager
@@ -12,9 +13,444 @@ from choicer_voicer_pack_creator.models import PackProject, Segment, SourceCapti
 from choicer_voicer_pack_creator.separation import (
     SeparationCancelled,
     SeparationDownloadRequired,
+    SeparationRuntimeDownloadRequired,
 )
 from choicer_voicer_pack_creator.separation_types import KEEP_SINGING, REMOVE_ALL_VOCALS
 from choicer_voicer_pack_creator.ui import backing_dialog, main_window
+from choicer_voicer_pack_creator.ui.setup_consent import SetupConsent
+
+
+@pytest.fixture
+def runtime_jobs(qtbot):
+    managers = []
+
+    def create():
+        manager = JobManager(limits={"cpu": 1})
+        managers.append(manager)
+        return manager
+
+    yield create
+    for manager in managers:
+        manager.shutdown(wait=True)
+        manager.deleteLater()
+        QCoreApplication.sendPostedEvents(manager, QEvent.Type.DeferredDelete)
+    # Exception-bearing signal fixtures can retain cycles; release Qt owners on
+    # their owning thread, not during a later worker's automatic collection.
+    gc.collect()
+
+
+@pytest.mark.parametrize("mode", [KEEP_SINGING, REMOVE_ALL_VOCALS])
+def test_worker_only_forwards_runtime_choices_to_bandit(qtbot, tmp_path, mode):
+    output = tmp_path / "backing.wav"
+    output.write_bytes(b"backing")
+    calls, completed = [], []
+
+    def generate(_media, _video, *, allow_download, progress, cancelled, **runtime_options):
+        assert allow_download
+        calls.append(runtime_options)
+        return output
+
+    worker = backing_dialog.BackingWorker(
+        SimpleNamespace(generate=generate, mode=mode), SimpleNamespace(), tmp_path / "video.mp4",
+        allow_download=True, allow_runtime_download=True, offer_runtime_download=False,
+    )
+    worker.completed.connect(completed.append)
+    try:
+        worker.run()
+        assert completed == [output]
+        assert calls == (
+            [{"allow_runtime_download": True, "offer_runtime_download": False}]
+            if mode == KEEP_SINGING else [{}]
+        )
+    finally:
+        worker.deleteLater()
+
+
+def test_worker_routes_runtime_consent_without_completion_or_model_consent(qtbot, tmp_path):
+    required = SeparationRuntimeDownloadRequired("Separate runtime consent", 3 * 1024**3)
+    runtime, model, completed, failed = [], [], [], []
+
+    def generate(
+        _media, _video, *, allow_download, allow_runtime_download, offer_runtime_download,
+        progress, cancelled,
+    ):
+        assert allow_download
+        assert not allow_runtime_download
+        assert offer_runtime_download
+        raise required
+
+    worker = backing_dialog.BackingWorker(
+        SimpleNamespace(generate=generate, mode=KEEP_SINGING),
+        SimpleNamespace(), tmp_path / "video.mp4", allow_download=True,
+    )
+    worker.runtime_download_required.connect(runtime.append)
+    worker.download_required.connect(lambda: model.append(True))
+    worker.completed.connect(completed.append)
+    worker.failed.connect(failed.append)
+    try:
+        worker.run()
+        assert runtime == [required]
+        assert not model and not completed and not failed
+    finally:
+        worker.deleteLater()
+
+
+@pytest.mark.parametrize("emit_outside_except", [False, True])
+def test_managed_runtime_consent_is_blocked_without_overwriting_setup_signal(
+    qtbot, tmp_path, monkeypatch, emit_outside_except, runtime_jobs,
+):
+    required = SeparationRuntimeDownloadRequired("Runtime consent required", 3 * 1024**3)
+    runtime, completed, failed, finished = [], [], [], []
+
+    def generate(
+        _media, _video, *, allow_download, allow_runtime_download, offer_runtime_download,
+        progress, cancelled,
+    ):
+        assert allow_download
+        assert not allow_runtime_download
+        assert offer_runtime_download
+        raise required
+
+    jobs = runtime_jobs()
+    worker = backing_dialog.BackingWorker(
+        SimpleNamespace(generate=generate, mode=KEEP_SINGING),
+        SimpleNamespace(), tmp_path / "video.mp4", allow_download=True,
+    )
+    worker.configure_job(
+        jobs, "project-a", "backing", "Generate backing track",
+        resource_keys=("separation-inference",),
+    )
+    if emit_outside_except:
+        monkeypatch.setattr(worker, "run", lambda: worker.runtime_download_required.emit(required))
+    worker.runtime_download_required.connect(runtime.append)
+    worker.completed.connect(completed.append)
+    worker.failed.connect(failed.append)
+    worker.finished.connect(lambda: finished.append(True))
+    try:
+        worker.start()
+        qtbot.waitUntil(lambda: bool(finished))
+        record = worker.job_handle.record
+        assert record.state == "blocked"
+        assert record.result is None
+        assert "Runtime consent required" in record.error
+        assert runtime == [required]
+        assert not failed and not completed
+        assert worker._job_error == str(required)
+        assert not jobs.active_jobs()
+    finally:
+        jobs.shutdown(wait=True)
+        worker.deleteLater()
+
+
+@pytest.mark.parametrize("accept_runtime", [True, False])
+@pytest.mark.parametrize("coordinated", [True, False])
+def test_bandit_model_and_runtime_have_separate_consent(
+    qtbot, tmp_path, monkeypatch, accept_runtime, coordinated, runtime_jobs,
+):
+    calls = []
+    output = tmp_path / "backing.wav"
+    output.write_bytes(b"backing")
+    started, release = threading.Event(), threading.Event()
+
+    class Manager:
+        model_download_bytes = 446680129
+        manifest = {"model": {"sha256": "bandit-checksum"}}
+
+        def __init__(self, _root, *, mode):
+            assert mode == KEEP_SINGING
+            self.mode = mode
+
+        def generate(
+            self, _media, _video, *, allow_download, allow_runtime_download,
+            offer_runtime_download, progress, cancelled,
+        ):
+            calls.append((allow_download, allow_runtime_download, offer_runtime_download))
+            if not allow_download:
+                raise SeparationDownloadRequired("Model consent required")
+            if offer_runtime_download and not allow_runtime_download:
+                raise SeparationRuntimeDownloadRequired("Runtime consent required", 3 * 1024**3)
+            started.set()
+            assert release.wait(5)
+            return output
+
+    monkeypatch.setattr(backing_dialog, "SeparationManager", Manager)
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args: pytest.fail("Modal consent"))
+    jobs = runtime_jobs()
+    host = QDialog()
+    qtbot.addWidget(host)
+    coordinator = SetupConsent(host) if coordinated else None
+    host.workspace = SimpleNamespace(setup_consent=coordinator)
+    dialog = backing_dialog.BackingDialog(
+        SimpleNamespace(), tmp_path / "video.mp4", tmp_path, host,
+        job_manager=jobs, project_id="project-a", mode=KEEP_SINGING,
+    )
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(dialog.backing_path))
+
+    def active_box():
+        return next(box for box in host.findChildren(QMessageBox) if box.isVisible())
+
+    try:
+        dialog.start()
+        qtbot.waitUntil(lambda: dialog._pending_consent)
+        model_box = active_box()
+        assert "CC BY-NC 4.0" in model_box.text()
+        assert "426 MiB" in model_box.text()
+        model_callback = dialog._consent_callback
+        model_box.button(QMessageBox.StandardButton.Yes).click()
+        qtbot.waitUntil(lambda: dialog._outcome == "runtime-download" and dialog._pending_consent)
+        assert calls == [(False, False, True), (True, False, True)]
+        assert dialog.worker is None
+        assert not accepted and dialog.backing_path is None
+        assert [job.state for job in jobs.tasks("project-a")] == ["failed", "blocked"]
+        assert "Runtime consent required" in jobs.tasks("project-a")[-1].error
+        runtime_box = active_box()
+        assert not runtime_box.isModal()
+        assert runtime_box.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        assert runtime_box.defaultButton() is runtime_box.button(QMessageBox.StandardButton.Cancel)
+        assert "3072 MiB" in runtime_box.text()
+        assert "separate" in runtime_box.text()
+        assert "CPU" in runtime_box.text()
+        assert "license" in runtime_box.text()
+        assert not dialog.isVisible()
+        dialog.show()
+        dialog.close()
+        assert not dialog.isVisible()
+        assert not dialog._closing
+        if coordinated:
+            keys = set(coordinator._requests[0].components)
+            assert keys != {"separation:bandit-checksum"}
+            assert not keys & coordinator._approved
+        runtime_callback = dialog._consent_callback
+        model_callback(True)
+        dialog.start()
+        assert len(calls) == 2
+        assert dialog._pending_consent
+        runtime_box.button(
+            QMessageBox.StandardButton.Yes if accept_runtime else QMessageBox.StandardButton.Cancel,
+        ).click()
+        qtbot.waitUntil(started.is_set)
+        runtime_callback(True)
+        assert calls == [
+            (False, False, True), (True, False, True), (True, accept_runtime, accept_runtime),
+        ]
+        assert not accepted
+        assert len(jobs.active_jobs()) == 1
+    finally:
+        release.set()
+        qtbot.waitUntil(lambda: dialog.worker is None)
+        dialog.cancel_generation()
+        jobs.shutdown(wait=True)
+    assert accepted == [output]
+    assert [job.state for job in jobs.tasks("project-a")] == ["failed", "blocked", "succeeded"]
+
+
+@pytest.mark.parametrize("accept_runtime", [True, False])
+def test_bandit_retry_retains_model_permission_and_runtime_decision(
+    qtbot, tmp_path, monkeypatch, accept_runtime,
+):
+    calls, prompts = [], []
+    output = tmp_path / "backing.wav"
+    output.write_bytes(b"backing")
+
+    class Manager:
+        model_download_bytes = 446680129
+
+        def __init__(self, _root, *, mode):
+            assert mode == KEEP_SINGING
+            self.mode = mode
+
+        def generate(
+            self, _media, _video, *, allow_download, allow_runtime_download,
+            offer_runtime_download, progress, cancelled,
+        ):
+            calls.append((allow_download, allow_runtime_download, offer_runtime_download))
+            if not allow_download:
+                raise SeparationDownloadRequired("Model consent required")
+            if offer_runtime_download and not allow_runtime_download:
+                raise SeparationRuntimeDownloadRequired("Runtime consent required", 3 * 1024**3)
+            if len(calls) == 3:
+                raise RuntimeError("Temporary generation failure")
+            return output
+
+    def consent(_parent, title, _text, *_args):
+        prompts.append(title)
+        return (
+            QMessageBox.StandardButton.Yes if len(prompts) == 1 or accept_runtime
+            else QMessageBox.StandardButton.Cancel
+        )
+
+    monkeypatch.setattr(backing_dialog, "SeparationManager", Manager)
+    monkeypatch.setattr(QMessageBox, "question", consent)
+    dialog = backing_dialog.BackingDialog(
+        SimpleNamespace(), tmp_path / "video.mp4", tmp_path, mode=KEEP_SINGING,
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog.start()
+    qtbot.waitUntil(lambda: len(calls) == 3 and dialog.worker is None)
+    assert dialog.retry_button.isVisible()
+    assert dialog.backing_path is None
+    assert dialog.progress_bar.format() == "Failed"
+    dialog.retry_button.click()
+    qtbot.waitUntil(lambda: dialog.result() == QDialog.DialogCode.Accepted)
+    assert calls[-2:] == [(True, accept_runtime, accept_runtime)] * 2
+    assert len(prompts) == 2
+    assert dialog.backing_path == output
+
+
+@pytest.mark.parametrize("coordinated", [True, False])
+@pytest.mark.parametrize("end_request", ["cancel", "stale"])
+def test_runtime_consent_cannot_revive_cancelled_or_stale_requests(
+    qtbot, tmp_path, monkeypatch, coordinated, end_request, runtime_jobs,
+):
+    calls = []
+    current = True
+
+    class Manager:
+        def __init__(self, _root, *, mode):
+            assert mode == KEEP_SINGING
+            self.mode = mode
+
+        def generate(
+            self, _media, _video, *, allow_download, allow_runtime_download,
+            offer_runtime_download, progress, cancelled,
+        ):
+            calls.append((allow_download, allow_runtime_download, offer_runtime_download))
+            raise SeparationRuntimeDownloadRequired("Runtime consent required", 3 * 1024**3)
+
+    monkeypatch.setattr(backing_dialog, "SeparationManager", Manager)
+    jobs = runtime_jobs()
+    host = QDialog()
+    qtbot.addWidget(host)
+    coordinator = SetupConsent(host) if coordinated else None
+    host.workspace = SimpleNamespace(setup_consent=coordinator)
+    dialog = backing_dialog.BackingDialog(
+        SimpleNamespace(), tmp_path / "video.mp4", tmp_path, host,
+        job_manager=jobs, project_id="project-a", mode=KEEP_SINGING,
+        request_current=lambda: current,
+    )
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(True))
+    try:
+        dialog.start()
+        qtbot.waitUntil(lambda: dialog._pending_consent)
+        callback = dialog._consent_callback
+        prompt = next(box for box in host.findChildren(QMessageBox) if box.isVisible())
+        if end_request == "cancel":
+            dialog.cancel_generation()
+            assert not prompt.isVisible()
+        else:
+            current = False
+        if coordinator is not None and coordinator.box is not None:
+            coordinator.box.button(QMessageBox.StandardButton.Yes).click()
+        callback(True)
+        callback(False)
+        dialog.start()
+        qtbot.wait(20)
+        assert calls == [(False, False, True)]
+        assert dialog.worker is None
+        assert not dialog._pending_consent
+        assert not accepted and dialog.backing_path is None
+        if end_request == "stale":
+            assert "no longer matches" in dialog.progress_label.text()
+        else:
+            assert dialog._closing
+    finally:
+        dialog.cancel_generation()
+        jobs.shutdown(wait=True)
+
+
+def test_standalone_runtime_consent_cannot_revive_closed_dialog(qtbot, tmp_path, monkeypatch):
+    calls, prompts = [], []
+
+    class Manager:
+        def __init__(self, _root, *, mode):
+            self.mode = mode
+
+        def generate(
+            self, _media, _video, *, allow_download, allow_runtime_download,
+            offer_runtime_download, progress, cancelled,
+        ):
+            calls.append((allow_download, allow_runtime_download, offer_runtime_download))
+            raise SeparationRuntimeDownloadRequired("Runtime consent required", 3 * 1024**3)
+
+    def consent(parent, title, _text, *_args):
+        assert parent.worker is None
+        prompts.append(title)
+        parent.close()
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(backing_dialog, "SeparationManager", Manager)
+    monkeypatch.setattr(QMessageBox, "question", consent)
+    dialog = backing_dialog.BackingDialog(
+        SimpleNamespace(), tmp_path / "video.mp4", tmp_path, mode=KEEP_SINGING,
+    )
+    qtbot.addWidget(dialog)
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(True))
+    dialog.show()
+    dialog.start()
+    qtbot.waitUntil(lambda: bool(prompts) and dialog.worker is None)
+    dialog.start()
+    assert calls == [(False, False, True)]
+    assert len(prompts) == 1
+    assert dialog._closing and not dialog.isVisible()
+    assert not dialog._pending_consent
+    assert not accepted and dialog.backing_path is None
+
+
+@pytest.mark.parametrize("late_outcome", ["runtime-consent", "success"])
+@pytest.mark.parametrize("cancel_from_task", [False, True])
+def test_canceling_bandit_worker_never_prompts_or_completes_late(
+    qtbot, tmp_path, monkeypatch, late_outcome, cancel_from_task, runtime_jobs,
+):
+    started, release = threading.Event(), threading.Event()
+    output = tmp_path / "backing.wav"
+    output.write_bytes(b"backing")
+
+    class Manager:
+        def __init__(self, _root, *, mode):
+            self.mode = mode
+
+        def generate(
+            self, _media, _video, *, allow_download, allow_runtime_download,
+            offer_runtime_download, progress, cancelled,
+        ):
+            started.set()
+            assert release.wait(5)
+            assert cancelled()
+            if late_outcome == "runtime-consent":
+                raise SeparationRuntimeDownloadRequired("Runtime consent required", 3 * 1024**3)
+            return output
+
+    monkeypatch.setattr(backing_dialog, "SeparationManager", Manager)
+    monkeypatch.setattr(backing_dialog, "show_message", lambda *_args: pytest.fail("Late prompt"))
+    jobs = runtime_jobs() if cancel_from_task else None
+    dialog = backing_dialog.BackingDialog(
+        SimpleNamespace(), tmp_path / "video.mp4", tmp_path, mode=KEEP_SINGING,
+        job_manager=jobs, project_id="cancel-test",
+    )
+    qtbot.addWidget(dialog)
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(True))
+    try:
+        dialog.start()
+        qtbot.waitUntil(started.is_set)
+        if cancel_from_task:
+            handle = dialog.worker.job_handle
+            handle.cancel()
+        else:
+            dialog.cancel_generation()
+    finally:
+        release.set()
+        qtbot.waitUntil(lambda: dialog.worker is None)
+        if jobs is not None:
+            jobs.shutdown(wait=True)
+    assert not dialog._pending_consent
+    assert not accepted and dialog.backing_path is None
+    if cancel_from_task:
+        assert handle.record.state == "cancelled"
 
 
 def test_workspace_backing_download_consent_survives_hidden_review(qtbot, tmp_path, monkeypatch):
@@ -27,7 +463,7 @@ def test_workspace_backing_download_consent_survives_hidden_review(qtbot, tmp_pa
         model_download_bytes = 1024**2
 
         def __init__(self, _root, *, mode):
-            pass
+            self.mode = mode
 
         def generate(self, *_args, allow_download, cancelled, **_kwargs):
             calls.append(allow_download)
@@ -52,7 +488,6 @@ def test_workspace_backing_download_consent_survives_hidden_review(qtbot, tmp_pa
         job_manager=jobs, project_id="project-a", source_snapshot={"revision": 9},
         auto_start=True,
     )
-    qtbot.addWidget(dialog)
     dialog.show()
     accepted = []
     dialog.accepted.connect(lambda: accepted.append(dialog.backing_path))
@@ -92,7 +527,7 @@ def test_workspace_backing_explicit_cancel_stops_job(qtbot, tmp_path, monkeypatc
 
     class Manager:
         def __init__(self, _root, *, mode):
-            pass
+            self.mode = mode
 
         def generate(self, *_args, cancelled, **_kwargs):
             started.set()
@@ -128,7 +563,7 @@ def test_download_consent_retries_only_after_worker_finishes(qtbot, tmp_path, mo
         model_download_bytes = 316446953
 
         def __init__(self, _root, *, mode):
-            pass
+            self.mode = mode
 
         def generate(self, _media, _video, *, allow_download, progress, cancelled):
             calls.append(allow_download)
@@ -167,7 +602,7 @@ def test_declining_download_leaves_no_result(qtbot, tmp_path, monkeypatch):
         model_download_bytes = 100
 
         def __init__(self, _root, *, mode):
-            pass
+            self.mode = mode
 
         def generate(self, *_args, allow_download, **_kwargs):
             calls.append(allow_download)
@@ -191,7 +626,7 @@ def test_declining_download_leaves_no_result(qtbot, tmp_path, monkeypatch):
 def test_failed_generation_can_be_retried_without_losing_dialog(qtbot, tmp_path, monkeypatch, failure):
     class Manager:
         def __init__(self, _root, *, mode):
-            pass
+            self.mode = mode
 
         def generate(self, *_args, **_kwargs):
             if failure == "exception":
@@ -219,7 +654,7 @@ def test_close_waits_for_canceled_worker(qtbot, tmp_path, monkeypatch):
 
     class Manager:
         def __init__(self, _root, *, mode):
-            pass
+            self.mode = mode
 
         def generate(self, *_args, cancelled, **_kwargs):
             started.set()
@@ -473,6 +908,7 @@ def test_manual_picker_waits_for_generate_and_freezes_request(
     class Manager:
         def __init__(self, _root, *, mode):
             modes.append(mode)
+            self.mode = mode
 
         def generate(self, *_args, **_kwargs):
             calls.append(True)
@@ -560,6 +996,7 @@ def test_explicit_mode_preference_survives_failure_and_cancel_with_old_backing(
     class Manager:
         def __init__(self, _root, *, mode):
             modes.append(mode)
+            self.mode = mode
 
         def generate(self, *_args, cancelled, **_kwargs):
             started.set()
@@ -616,6 +1053,7 @@ def test_background_generation_uses_old_backend_without_changing_manual_preferen
     class Manager:
         def __init__(self, _root, *, mode):
             modes.append(mode)
+            self.mode = mode
 
         def generate(self, *_args, **_kwargs):
             raise RuntimeError("Not enough memory")
@@ -766,7 +1204,7 @@ def test_mode_change_does_not_open_picker_for_replaced_source(qtbot, tmp_path, m
 
     class Manager:
         def __init__(self, _root, *, mode):
-            pass
+            self.mode = mode
 
         def generate(self, *_args, **_kwargs):
             started.set()
@@ -827,6 +1265,7 @@ def test_failed_request_retry_keeps_mode_and_cannot_replace_superseded_preferenc
     class Manager:
         def __init__(self, _root, *, mode):
             modes.append(mode)
+            self.mode = mode
             if setup_failure:
                 raise RuntimeError("Install the optional CPU runtime")
 
@@ -883,7 +1322,7 @@ def test_start_captures_latest_backing_selection_and_reconfirms_replacement(
 
     class Manager:
         def __init__(self, _root, *, mode):
-            pass
+            self.mode = mode
 
         def generate(self, *_args, **_kwargs):
             calls.append(True)
@@ -925,7 +1364,7 @@ def test_successful_stale_generation_keeps_durable_output_without_attaching(
 
     class Manager:
         def __init__(self, _root, *, mode):
-            pass
+            self.mode = mode
 
         def generate(self, *_args, **_kwargs):
             started.set()
@@ -989,6 +1428,7 @@ def test_consent_and_retry_cannot_revive_obsolete_generation(
 
         def __init__(self, _root, *, mode):
             modes.append(mode)
+            self.mode = mode
 
         def generate(self, *_args, allow_download, **_kwargs):
             calls.append(allow_download)

@@ -394,6 +394,7 @@ def _bandit_fixture(root: Path) -> Path:
     for filename in (
         "backing-separation-bandit.json", "BandIt-Apache-2.0.txt",
         "BandIt-CC-BY-NC-4.0.txt", "BandIt-Attribution.txt",
+        "bandit-cuda-runtime.json",
     ):
         contents = (source / "resources" / filename).read_bytes()
         (resources / filename).write_bytes(contents)
@@ -438,7 +439,7 @@ def _bandit_fixture(root: Path) -> Path:
     "named-provenance",
     "dependency-license", "metadata-version", "transitive-missing", "checkpoint", "gpu-binary",
     "substituted-openmp", "missing-openmp", "openmp-provenance",
-    "channels", "stems", "nonfinite", "other-backend",
+    "channels", "stems", "nonfinite", "other-backend", "cuda-manifest", "cuda-manifest-notice",
 ])
 def test_bandit_smoke_uses_offline_native_worker_and_requires_exact_runtime_and_notices(
     tmp_path, monkeypatch, entrypoint, failure,
@@ -454,6 +455,10 @@ def test_bandit_smoke_uses_offline_native_worker_and_requires_exact_runtime_and_
         path.write_text(json.dumps(manifest))
     elif failure == "license":
         (notices / "BandIt-CC-BY-NC-4.0.txt").unlink()
+    elif failure == "cuda-manifest":
+        (resources / "bandit-cuda-runtime.json").write_text("{}")
+    elif failure == "cuda-manifest-notice":
+        (notices / "bandit-cuda-runtime.json").write_text("{}")
     elif failure == "source-provenance":
         (notices / "bandit" / "provenance.json").write_text("{}")
     elif failure == "named-provenance":
@@ -617,3 +622,112 @@ def test_existing_htdemucs_smoke_keeps_exact_version_assertions_and_sanitizes_ch
     else:
         SMOKE.smoke_separation(executable)
     assert not list((tmp_path / "build" / "separation-smoke").iterdir())
+
+
+@pytest.mark.parametrize("failure", [
+    "", "extended-paths", "nonfrozen", "cpu", "dll", "package", "backend", "qt", "architectures",
+    "status", "exit", "timeout", "tensor", "tensor-device", "threads",
+])
+def test_standalone_cuda_import_smoke_needs_no_gpu_or_model_and_requires_frozen_isolation(
+    tmp_path, monkeypatch, failure,
+):
+    executable = tmp_path / "app" / SMOKE.EXECUTABLE
+    executable.parent.mkdir()
+    executable.write_bytes(b"frozen application")
+    runtime = tmp_path / "verified-cuda-cache"
+    runtime.mkdir()
+
+    def invoke(command, *, cwd, env, check, timeout):
+        assert command[:2] == [str(executable), "--separate-audio"]
+        assert cwd == executable.parent
+        assert check is False and timeout == SMOKE.CUDA_IMPORT_SMOKE_TIMEOUT == 600
+        assert not {"PYTHONPATH", "VIRTUAL_ENV", "KMP_DUPLICATE_LIB_OK", "CUDA_PATH"} & env.keys()
+        assert env["HF_HUB_OFFLINE"] == env["TRANSFORMERS_OFFLINE"] == "1"
+        assert env["OMP_NUM_THREADS"] == env["MKL_NUM_THREADS"] == "1"
+        request = Path(command[2])
+        job = request.parent
+        assert json.loads(request.read_text()) == {
+            "version": 1, "job_id": job.name, "mode": "keep_singing", "smoke_test": True,
+            "cuda_runtime": str(SMOKE._windows_path(runtime).resolve()), "cuda_runtime_smoke": True,
+        }
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(command, timeout)
+        report = {
+            "torch": "2.8.0+cu128", "torchaudio": "2.8.0+cu128", "cuda": "12.8",
+            "frozen": True, "gpu_available": False, "original_package_dlls": True,
+            "ctranslate2_imported": False, "qt_imported": False,
+            "tensor_device": "cpu", "tensor_dtype": "torch.float32",
+            "tensor_result": [[140.0, 364.0], [364.0, 1100.0]], "threads": 1, "interop_threads": 1,
+            "compiled_architectures": ["sm_61", "sm_75"],
+            "package_paths": {
+                name: str((runtime / "site-packages" / name / "__init__.py").resolve())
+                for name in ("torch", "torchaudio")
+            },
+            "dll_paths": {
+                name: str((runtime / "site-packages" / "torch" / "lib" / name).resolve())
+                for name in ("torch_cpu.dll", "torch_cuda.dll", "c10.dll", "libiomp5md.dll")
+            },
+        }
+        if failure == "nonfrozen":
+            report["frozen"] = False
+        elif failure == "cpu":
+            report.update(torch="2.8.0+cpu", cuda=None)
+        elif failure == "dll":
+            report["dll_paths"]["libiomp5md.dll"] = str(executable.parent / "libiomp5md.dll")
+        elif failure == "package":
+            report["package_paths"]["torch"] = str(executable.parent / "torch" / "__init__.py")
+        elif failure == "backend":
+            report["ctranslate2_imported"] = True
+        elif failure == "qt":
+            report["qt_imported"] = True
+        elif failure == "architectures":
+            report["compiled_architectures"] = []
+        elif failure == "tensor":
+            report["tensor_result"] = [[0.0, 0.0], [0.0, 0.0]]
+        elif failure == "tensor-device":
+            report["tensor_device"] = "cuda"
+        elif failure == "threads":
+            report["threads"] = 8
+        elif failure == "extended-paths":
+            for field in ("package_paths", "dll_paths"):
+                report[field] = {
+                    name: str(SMOKE._windows_path(Path(path))) for name, path in report[field].items()
+                }
+        (job / "status.json").write_text(json.dumps({
+            "state": "failed" if failure == "status" else "succeeded",
+        }))
+        (job / "smoke.json").write_text(json.dumps(report))
+        return SimpleNamespace(returncode=1 if failure == "exit" else 0)
+
+    monkeypatch.setattr(SMOKE, "ROOT", tmp_path)
+    monkeypatch.setattr(SMOKE.subprocess, "run", invoke)
+    if failure and failure != "extended-paths":
+        with pytest.raises(RuntimeError):
+            SMOKE.smoke_cuda_runtime(executable, runtime)
+    else:
+        report = SMOKE.smoke_cuda_runtime(executable, runtime)
+        assert report["gpu_available"] is False
+    assert not list((tmp_path / "build" / "cuda-import-smoke").iterdir())
+
+
+def test_cuda_smoke_cli_is_standalone_and_does_not_run_model_or_other_smokes(
+    tmp_path, monkeypatch,
+):
+    executable = tmp_path / SMOKE.EXECUTABLE
+    executable.write_bytes(b"frozen application")
+    runtime = tmp_path / "runtime"
+    calls = []
+    monkeypatch.setattr(
+        SMOKE.sys, "argv", ["smoke_packaged.py", str(executable), "--cuda-runtime-smoke", str(runtime)],
+    )
+    monkeypatch.setattr(
+        SMOKE, "smoke_cuda_runtime", lambda exe, root: calls.append((exe, root)),
+    )
+    monkeypatch.setattr(SMOKE, "smoke_bandit", lambda *_: pytest.fail("must not load a model"))
+    assert SMOKE.main() == 0
+    assert calls == [(executable.resolve(), runtime)]
+    monkeypatch.setattr(
+        SMOKE.sys, "argv", ["smoke_packaged.py", str(executable), "--cuda-runtime-smoke"],
+    )
+    with pytest.raises(ValueError, match="existing verified runtime cache"):
+        SMOKE.main()

@@ -827,7 +827,7 @@ def test_backing_estimate_reaches_details_and_hidden_tasks(workspace, qtbot, tmp
 
     class Manager:
         def __init__(self, _root, *, mode):
-            pass
+            self.mode = mode
 
         def generate(self, *_args, progress, **_kwargs):
             timing = separation_progress.SeparationProgress(4, "Separating locally", progress)

@@ -1,4 +1,4 @@
-"""Bounded CPU inference for the unchanged, combined Facing the Music BandIt."""
+"""Bounded inference for the unchanged, combined Facing the Music BandIt."""
 from __future__ import annotations
 
 import math
@@ -31,14 +31,21 @@ Predict = Callable[[Any], Mapping[str, Any]]
 # Reserve 3 GiB for runtime, load, activations, stereo buffers and margin.
 # The eight-second model is never reduced to meet this reservation.
 WORK_ESTIMATE = WorkEstimate(memory_bytes=3 * 1024**3, cpu_threads=2)
+# Conservative system-RAM allowance for the additional CUDA DLLs and host-side
+# model/stream buffers; VRAM is independently admitted and exercised by the worker.
+GPU_WORK_ESTIMATE = WorkEstimate(memory_bytes=5 * 1024**3, cpu_threads=2)
 
 
-def configure_cpu(threads: int) -> Any:
+def configure_threads(threads: int) -> None:
     if type(threads) is not int or not 1 <= threads <= 2:
         raise SeparationError("BandIt requires an admitted CPU thread count of one or two")
     for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                  "NUMEXPR_NUM_THREADS", "NUMBA_NUM_THREADS"):
         os.environ[name] = str(threads)
+
+
+def configure_cpu(threads: int) -> Any:
+    configure_threads(threads)
     try:
         import torch
         import torchaudio
@@ -67,7 +74,9 @@ def load_cpu_model(path: Path, threads: int) -> Any:
     return load_model(path, "cpu")
 
 
-def make_predictor(model: Any) -> Predict:
+def make_predictor(
+    model: Any, *, device: str = "cpu", cancelled: Callable[[], bool] = lambda: False,
+) -> Predict:
     def predict(block: Any) -> dict[str, Any]:
         import numpy as np
         import torch
@@ -81,7 +90,10 @@ def make_predictor(model: Any) -> Predict:
         result = {stem: np.empty_like(block) for stem in stems}
         with torch.inference_mode():
             for channel in range(2):
+                check_cancel(cancelled)
                 tensor = torch.from_numpy(block[:, channel].copy())[None, None]
+                if device != "cpu":
+                    tensor = tensor.to(device)
                 batch = model({"mixture": {"audio": tensor}})
                 estimates = batch.get("estimates") if isinstance(batch, Mapping) else None
                 if not isinstance(estimates, Mapping) or set(estimates) != set(stems):
@@ -92,12 +104,17 @@ def make_predictor(model: Any) -> Predict:
                     if (
                         not isinstance(audio, torch.Tensor)
                         or tuple(audio.shape) != (1, 1, len(block))
-                        or audio.dtype != torch.float32 or audio.device.type != "cpu"
+                        or audio.dtype != torch.float32
+                        or audio.device.type != device.split(":")[0]
                         or not torch.isfinite(audio).all()
                     ):
                         raise SeparationError(f"BandIt returned invalid or non-finite {stem} audio")
-                    result[stem][:, channel] = audio[0, 0].numpy()
+                    waveform = audio[0, 0]
+                    if device != "cpu":
+                        waveform = waveform.cpu()
+                    result[stem][:, channel] = waveform.numpy()
                 del batch, estimates, audio, tensor
+                check_cancel(cancelled)
         return result
 
     return predict

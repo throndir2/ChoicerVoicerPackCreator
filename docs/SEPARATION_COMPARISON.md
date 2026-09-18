@@ -6,15 +6,38 @@ runner and GPU setup below are not part of the portable application.
 
 The editor's **Generate Backing Track** dialog separately offers the auditioned BandIt
 combined model as **Keep singing; remove dialogue**, with a bundled CPU runtime for
-portable users. Automatic generation still uses the original all-vocals HTDemucs mode.
-SAM Audio remains an experiment, not an application backend. See the README for
-production setup; do not install this GPU comparison environment into the editor.
+portable users and optional automatic NVIDIA acceleration. The editor's CUDA candidate path
+requires Windows x64 CPython 3.11/3.12 and a CUDA 12.8-capable NVIDIA driver. With separate
+runtime-download consent, it caches the exact official `torch==2.8.0+cu128` and
+`torchaudio==2.8.0+cu128` Windows wheels, verified by SHA-256 and matched to the interpreter,
+alongside retained runtime metadata/license notices. It does not replace the always-installed
+2.8.0+cpu wheels. The prompt reports the pinned wheel download total (several GiB), separately
+from the 426 MiB CC BY-NC 4.0 model; declining automatically continues on CPU.
+
+That application path runs from the existing source interpreter or frozen executable; portable
+users never install Python, pip, a CUDA toolkit, or this comparison environment. It checks actual
+GPU/driver/VRAM compatibility with a verified-model, full eight-second float32 warmup on both
+stereo channels in an isolated worker. The application's preliminary checks require actual
+CUDA-driver API support for 12.8, matching compiled SM/PTX support, and 3.5 GiB free VRAM
+(including 512 MiB headroom). That threshold is not measured model fit or a replacement for
+warmup. Unavailable/incompatible acceleration, including insufficient host resources for the
+GPU attempt, uses CPU if its own resource checks pass; a recoverable GPU failure
+reaps the worker before one fresh CPU retry and resets the measured ETA. The application keeps
+the original float32 48 kHz/eight-second-window/one-second-hop independent-channel math without
+TF32 or autocast substitutions. Native hardware/driver/VRAM and CPU/GPU parity evidence remains
+separate from synthetic tests or research listening approval; these instructions make no new
+hardware-validation claim.
+
+Automatic generation on import still uses the original all-vocals HTDemucs CPU mode.
+SAM Audio remains an experiment, not an application backend. See
+[automatic BandIt acceleration](../README.md#automatic-bandit-acceleration) for production
+behavior; **do not install this GPU comparison environment into the editor**.
 
 The initial target is native Windows, Python 3.11, and an NVIDIA RTX 5080 (16 GB).
 CUDA 12.8 builds support this GPU; old cu121/cu124 installs are not substitutes.
 The GPU environment installation, actual inference, and VRAM fit must be established on
-that machine. The preparation machine has no CUDA GPU. Source inspection and synthetic
-audio tests do not establish model quality or guarantee native-Windows compatibility.
+that machine. Source inspection and synthetic audio tests do not establish model quality
+or guarantee native-Windows compatibility.
 
 ## Models and licenses
 

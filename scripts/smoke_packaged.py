@@ -22,6 +22,7 @@ from mcp.client.stdio import stdio_client
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
+from choicer_voicer_pack_creator.bandit_cuda_runtime import _windows_path, cuda_runtime_manifest
 from choicer_voicer_pack_creator.process_worker import owned_subprocess
 from choicer_voicer_pack_creator.runtime_paths import application_directory
 from choicer_voicer_pack_creator.separation import write_json_atomic
@@ -69,6 +70,7 @@ BANDIT_SMOKE_REPORT = {
     "ctranslate2_imported": False,
 }
 BANDIT_SMOKE_TIMEOUT = 180
+CUDA_IMPORT_SMOKE_TIMEOUT = 600
 OPENMP_LIBRARIES = {
     "torch": ("2.8.0+cpu", Path("torch") / "lib" / "libiomp5md.dll"),
     "ctranslate2": ("4.8.1", Path("ctranslate2") / "libiomp5md.dll"),
@@ -319,6 +321,9 @@ def smoke_bandit(executable: Path) -> None:
             raise RuntimeError(f"Unexpected packaged BandIt CPU runtime: {report}")
         application = application_directory(executable)
         resources = application / "_internal" / "choicer_voicer_pack_creator" / "resources"
+        runtime_manifest = json.loads((resources / "bandit-cuda-runtime.json").read_text())
+        if runtime_manifest != cuda_runtime_manifest():
+            raise RuntimeError("Packaged optional CUDA runtime pins are incorrect")
         manifest = json.loads((resources / "backing-separation-bandit.json").read_text())
         if (
             manifest.get("mode") != "keep_singing" or manifest.get("sample_rate") != 48000
@@ -333,6 +338,7 @@ def smoke_bandit(executable: Path) -> None:
         for filename in (
             "backing-separation-bandit.json", "BandIt-Apache-2.0.txt",
             "BandIt-CC-BY-NC-4.0.txt", "BandIt-Attribution.txt",
+            "bandit-cuda-runtime.json",
         ):
             resource, notice = resources / filename, application / "licenses" / filename
             if not resource.is_file() or not notice.is_file() or resource.read_bytes() != notice.read_bytes():
@@ -360,6 +366,82 @@ def smoke_bandit(executable: Path) -> None:
         _check_openmp_libraries(application)
         _check_singing_licenses(application)
         print("PACKAGED QT-FREE BANDIT CPU ARCHITECTURE + STEREO STREAMING SMOKE PASSED")
+    finally:
+        shutil.rmtree(job)
+
+
+def smoke_cuda_runtime(executable: Path, runtime_root: Path) -> dict[str, object]:
+    """Standalone opt-in frozen import check: existing cache only, no models or GPU needed."""
+    runtime_root = _windows_path(runtime_root).resolve()
+    if not runtime_root.is_dir():
+        raise FileNotFoundError(runtime_root)
+    job = ROOT / "build" / "cuda-import-smoke" / uuid.uuid4().hex
+    job.mkdir(parents=True)
+    try:
+        request = job / "request.json"
+        write_json_atomic(request, {
+            "version": 1, "job_id": job.name, "mode": "keep_singing", "smoke_test": True,
+            "cuda_runtime": str(runtime_root), "cuda_runtime_smoke": True,
+        })
+        environment = mcp_environment(dict(os.environ), executable)
+        environment.update({
+            "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+            "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",
+            "TORCH_HOME": str(job / "torch-home"),
+        })
+        try:
+            completed = subprocess.run(
+                [str(executable), "--separate-audio", str(request)],
+                cwd=executable.parent, env=environment, check=False,
+                timeout=CUDA_IMPORT_SMOKE_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("Packaged CUDA import smoke exceeded its time limit") from error
+        status_path = job / "status.json"
+        status = json.loads(status_path.read_text()) if status_path.is_file() else {}
+        if completed.returncode != 0 or status.get("state") != "succeeded":
+            raise RuntimeError(f"Packaged CUDA import smoke failed: {status}")
+        report = json.loads((job / "smoke.json").read_text())
+        if (
+            report.get("torch") != "2.8.0+cu128"
+            or report.get("torchaudio") != "2.8.0+cu128" or report.get("cuda") != "12.8"
+            or report.get("original_package_dlls") is not True
+            or report.get("frozen") is not True
+            or report.get("ctranslate2_imported") is not False
+            or report.get("qt_imported") is not False
+            or report.get("tensor_device") != "cpu" or report.get("tensor_dtype") != "torch.float32"
+            or report.get("tensor_result") != [[140.0, 364.0], [364.0, 1100.0]]
+            or report.get("threads") != 1 or report.get("interop_threads") != 1
+            or type(report.get("gpu_available")) is not bool
+            or not isinstance(report.get("compiled_architectures"), list)
+            or not report["compiled_architectures"]
+            or not all(isinstance(arch, str) and re.fullmatch(r"(sm|compute)_\d+", arch)
+                       for arch in report["compiled_architectures"])
+        ):
+            raise RuntimeError(f"Unexpected packaged CUDA import runtime: {report}")
+        expected_packages = {
+            name: str((runtime_root / "site-packages" / name / "__init__.py").resolve())
+            for name in ("torch", "torchaudio")
+        }
+        expected_dlls = {
+            name: str((runtime_root / "site-packages" / "torch" / "lib" / name).resolve())
+            for name in ("torch_cpu.dll", "torch_cuda.dll", "c10.dll", "libiomp5md.dll")
+        }
+        for field, expected in (("package_paths", expected_packages), ("dll_paths", expected_dlls)):
+            actual = report.get(field)
+            if (
+                not isinstance(actual, dict) or actual.keys() != expected.keys()
+                or any(
+                    not isinstance(path, str)
+                    or _windows_path(Path(path)).resolve()
+                    != _windows_path(Path(expected[name])).resolve()
+                    for name, path in actual.items()
+                )
+            ):
+                raise RuntimeError("Packaged CUDA import used files outside the verified cache")
+        print(json.dumps(report, indent=2))
+        print("PACKAGED CUDA NATIVE IMPORT + ORIGINAL DLL ISOLATION SMOKE PASSED (NO MODEL)")
+        return report
     finally:
         shutil.rmtree(job)
 
@@ -532,6 +614,12 @@ def main() -> int:
     executable = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else default_executable()
     if not executable.is_file():
         raise FileNotFoundError(executable)
+    if "--cuda-runtime-smoke" in sys.argv:
+        index = sys.argv.index("--cuda-runtime-smoke")
+        if index + 1 == len(sys.argv):
+            raise ValueError("--cuda-runtime-smoke requires an existing verified runtime cache path")
+        smoke_cuda_runtime(executable, Path(sys.argv[index + 1]))
+        return 0
     mcp_executable = executable.parent / "MCP" / MCP_NAME
     if not mcp_executable.is_file():
         raise FileNotFoundError(mcp_executable)

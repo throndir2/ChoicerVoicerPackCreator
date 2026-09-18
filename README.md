@@ -254,6 +254,9 @@ downloads and verifies the pinned LGPL FFmpeg runtime, builds the application, a
 finished editor and console MCP executables, including an official-SDK stdio handshake.
 It does not require a system FFmpeg installation. Both entrypoints include the singing backend;
 recipients do not install Python, pip, CUDA, or a separate runtime executable.
+BandIt can separately offer a checksum-verified CUDA acceleration download at runtime on an
+eligible NVIDIA system. That optional application-data cache is not part of the ZIP and never
+replaces the bundled CPU runtime; see [automatic BandIt acceleration](#automatic-bandit-acceleration).
 
 For concurrent development, give each task its own build environment instead of modifying the
 shared default:
@@ -405,6 +408,10 @@ NumPy remains 2.4.6, SoundFile 0.13.1, and ONNX Runtime 1.26.0; the new backend 
 0.10.2.post1, SciPy 1.15.3, Numba 0.67.0, and llvmlite 0.49.0.
 The application never invokes pip or installs a Python runtime for you. The model's separate
 non-commercial license and consent still apply after installing these dependencies.
+On eligible NVIDIA systems, this same source installation can offer the optional pinned CUDA
+runtime described below. Keep the CPU wheels installed: the application loads CUDA files from an
+isolated cache in its worker, not by changing your virtual environment. The GPU research setup in
+`tools\separation-comparison` is separate and must not be installed into this environment.
 
 ## MCP integration
 
@@ -1065,6 +1072,8 @@ speech. Its optional, checksum-verified model is approximately 426 MiB and licen
 before first use, and verified cached weights work offline. See **Help → About** and
 `THIRD_PARTY_NOTICES.md` for attribution and terms. Portable builds include the CPU runtime;
 no GPU or external Python installation is needed.
+Eligible NVIDIA systems can optionally accelerate BandIt after a **separate runtime-download
+confirmation**; model permission alone never authorizes that larger download.
 
 If automatic backing is queued, running, or waiting for download permission, open the same action
 and select **Cancel and choose mode...**. The old request must stop and release its resources
@@ -1081,10 +1090,9 @@ when moving a project, or relink them using **Choose**.
 BandIt uses bounded, full-length 48 kHz stereo processing and one whole-track clipping-safety gain.
 It can take longer and need more memory than HTDemucs; resource failures are reported without
 silently changing the selected model. Separation remains approximate in both modes.
-The editor currently runs BandIt only on the CPU, using one or two admitted threads.
 Its eight-second windows advance one second at a time, with separate inference for the left
-and right channels. BandIt itself supports GPU inference, but the editor's pinned CPU-only
-runtime does not use an installed GPU; CUDA support is limited to the separate research setup.
+and right channels. The CPU path uses one or two admitted threads; automatic NVIDIA acceleration
+uses the same verified model and float32 separation math, not a different quality setting.
 
 Developers can use the separate [singing-preservation comparison](docs/SEPARATION_COMPARISON.md)
 for local reference evaluation; its GPU research setup is not required by the editor.
@@ -1094,6 +1102,48 @@ the import and lets you edit normally. If no backing is selected at export, choo
 explicitly **Export without music**; the latter creates the required duration-matched silent MP3.
 Exports also report a warning when an existing or generated backing is silent or below -60 dBFS.
 The source video's original mixed dialogue is never used as automatic backing.
+
+### Automatic BandIt acceleration
+
+**Keep singing; remove dialogue** automatically considers an NVIDIA GPU; there is no device
+picker or persistent setting. **Remove all vocals** remains the existing CPU-only HTDemucs path.
+CUDA candidates require **Windows x64, CPython 3.11 or 3.12**, and an NVIDIA driver supporting
+**CUDA 12.8**. Portable builds already include the matching Python runtime: recipients do not
+install Python, pip, a CUDA toolkit, or the developer comparison environment.
+AMD and Intel GPUs are CPU-only for this feature; DirectML, ROCm, and other GPU backends are not used.
+
+When an eligible GPU is detected but its optional runtime is missing, a one-time setup prompt
+reports the approximate download size from the pinned wheel sizes (several GiB). This is
+**separate from the approximately 426 MiB BandIt model download**. Accepting installs official,
+SHA-256-verified Windows wheels for **`torch==2.8.0+cu128` and `torchaudio==2.8.0+cu128`**, matched
+to the app's CPython 3.11/3.12 ABI, into an isolated per-user application-data cache. Verified
+runtime files, metadata, and license notices are retained for offline reuse. The always-installed
+**`torch==2.8.0+cpu` and `torchaudio==2.8.0+cpu`** remain unchanged. Allow additional disk space
+for extraction as well as the download. Model license restrictions still apply.
+
+**Cancel in the optional runtime prompt continues this generation on CPU**; it does not discard
+your editing work. Model-download consent is still required if the model itself is unavailable.
+Retry within the same dialog retains both the model permission and your runtime choice without
+repeated prompts. Use the generation dialog's or task's cancellation control to stop the job itself.
+
+A GPU name or successful detection is not a compatibility guarantee. Before processing your
+track, an isolated worker must load the verified model and complete a **full eight-second,
+float32 warmup on both stereo channels**, checking the actual architecture, driver, and available
+VRAM. The GPU architecture must be supported by the pinned wheel, and the preliminary check
+requires at least **3.5 GiB free VRAM** (3 GiB plus 512 MiB headroom). This is a conservative
+screening threshold, not a measured peak or guarantee that the real model will fit. Unsupported or
+unavailable hardware/driver/runtime, insufficient VRAM or host RAM for the GPU attempt, or a
+recoverable GPU failure uses the unchanged CPU backend if its own resource checks pass.
+After a recoverable GPU-worker failure, that worker exits and a fresh CPU
+worker retries once; it does not continue with partial GPU output. Cancellation is not a fallback
+request. The generation details and **Tools > Tasks** report execution/fallback progress. The
+measured separation ETA resets for the CPU attempt instead of reusing GPU timings.
+
+Both paths preserve float32 inference without TF32 or reduced-precision/autocast substitutions:
+48 kHz, eight-second windows, one-second hop, independent left/right inference, and the same
+whole-track clipping-safety gain. GPU/CPU results are not promised to be bit-identical.
+Hardware-specific compatibility, speed, and full-window VRAM fit still require native-machine
+evidence; implementation and synthetic tests alone are **not** a hardware-validation claim.
 
 ### Add missing music to a pack
 

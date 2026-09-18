@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "runtime_version": "torch-2.8.0-cu128-v1",
+  "torch_version": "2.8.0+cu128",
+  "torchaudio_version": "2.8.0+cu128",
+  "cuda_version": "12.8",
+  "platform": "win_amd64",
+  "package_roots": ["torch", "torchgen", "functorch", "torchaudio", "torio"],
+  "requirements": {
+    "os": "Windows x64",
+    "python_abis": ["cp311", "cp312"],
+    "driver_minimum_windows": "570.65",
+    "gpu": "NVIDIA GPU supported by the CUDA 12.8 PyTorch build; worker probes actual compatibility and free VRAM",
+    "cuda_toolkit_required": false,
+    "separate_python_required_for_portable": false
+  },
+  "sources": [
+    "https://download.pytorch.org/whl/cu128/torch/",
+    "https://download.pytorch.org/whl/cu128/torchaudio/",
+    "https://pytorch.org/get-started/previous-versions/",
+    "https://docs.nvidia.com/cuda/archive/12.8.0/cuda-toolkit-release-notes/index.html"
+  ],
+  "wheels": {
+    "cp311": [
+      {
+        "distribution": "torch",
+        "filename": "torch-2.8.0+cu128-cp311-cp311-win_amd64.whl",
+        "url": "https://download.pytorch.org/whl/cu128/torch-2.8.0%2Bcu128-cp311-cp311-win_amd64.whl",
+        "sha256": "34c55443aafd31046a7963b63d30bc3b628ee4a704f826796c865fdfd05bb596",
+        "bytes": 3461420395
+      },
+      {
+        "distribution": "torchaudio",
+        "filename": "torchaudio-2.8.0+cu128-cp311-cp311-win_amd64.whl",
+        "url": "https://download.pytorch.org/whl/cu128/torchaudio-2.8.0%2Bcu128-cp311-cp311-win_amd64.whl",
+        "sha256": "7a1eb6154e05b8056b34c7a41495e09d57f79eb0180eb4e7f3bb2a61845ca8ea",
+        "bytes": 4678509
+      }
+    ],
+    "cp312": [
+      {
+        "distribution": "torch",
+        "filename": "torch-2.8.0+cu128-cp312-cp312-win_amd64.whl",
+        "url": "https://download.pytorch.org/whl/cu128/torch-2.8.0%2Bcu128-cp312-cp312-win_amd64.whl",
+        "sha256": "0ad925202387f4e7314302a1b4f8860fa824357f9b1466d7992bf276370ebcff",
+        "bytes": 3461384651
+      },
+      {
+        "distribution": "torchaudio",
+        "filename": "torchaudio-2.8.0+cu128-cp312-cp312-win_amd64.whl",
+        "url": "https://download.pytorch.org/whl/cu128/torchaudio-2.8.0%2Bcu128-cp312-cp312-win_amd64.whl",
+        "sha256": "cce3a60cd9a97f7360c8f95504ac349311fb7d6b9b826135936764f4de5f782d",
+        "bytes": 4673203
+      }
+    ]
+  }
+}

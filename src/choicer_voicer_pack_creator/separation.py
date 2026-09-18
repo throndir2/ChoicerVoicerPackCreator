@@ -58,6 +58,21 @@ class SeparationDownloadRequired(SeparationError):
     pass
 
 
+class SeparationRuntimeDownloadRequired(SeparationDownloadRequired):
+    def __init__(self, message: str, download_bytes: int) -> None:
+        super().__init__(message)
+        self.download_bytes = download_bytes
+
+
+def worker_command(request_path: Path, *, isolated: bool = False) -> list[str]:
+    command = [sys.executable]
+    if not getattr(sys, "frozen", False):
+        if isolated:
+            command.extend(["-E", "-s"])
+        command.extend(["-m", "choicer_voicer_pack_creator"])
+    return [*command, "--separate-audio", str(request_path)]
+
+
 def default_manifest_path() -> Path:
     return Path(__file__).resolve().parent / "resources" / "backing-separation.json"
 
@@ -393,6 +408,7 @@ class SeparationManager:
 
     def generate(
         self, media: MediaTools, video: Path, *, allow_download: bool = False,
+        allow_runtime_download: bool = False, offer_runtime_download: bool = True,
         progress: ProgressCallback, cancelled: CancelCallback,
     ) -> Path:
         try:
@@ -401,6 +417,8 @@ class SeparationManager:
                 source = SourceSnapshot.capture((video,))
                 return self._generate(
                     media, video, allow_download=allow_download,
+                    allow_runtime_download=allow_runtime_download,
+                    offer_runtime_download=offer_runtime_download,
                     progress=progress, cancelled=cancelled, source_snapshot=source,
                 )
         except OperationCancelled as error:
@@ -408,8 +426,65 @@ class SeparationManager:
         except OSError as error:
             raise SeparationError(f"Backing-track generation failed: {error}") from error
 
+    def _select_bandit_runtime(
+        self, job: Path, allow_download: bool, offer_download: bool,
+        progress: ProgressCallback, cancelled: CancelCallback,
+    ) -> tuple[Path | None, str]:
+        from choicer_voicer_pack_creator.bandit_cuda_runtime import (
+            CUDARuntimeError,
+            install_runtime,
+            installed_runtime,
+            runtime_download_bytes,
+            runtime_supported,
+        )
+
+        if not runtime_supported():
+            return None, "CUDA acceleration requires Windows x64 CPython 3.11 or 3.12."
+        check_cancel(cancelled)
+        probe_job = job / "cuda-probe"
+        probe_job.mkdir()
+        request = probe_job / "request.json"
+        write_json_atomic(request, {
+            "version": 1, "job_id": probe_job.name, "mode": KEEP_SINGING, "probe_cuda": True,
+        })
+        progress("Checking NVIDIA driver support in an isolated worker...", None)
+        _run_cancellable(worker_command(request, isolated=True), "NVIDIA driver discovery", cancelled)
+        probe = json.loads((probe_job / "probe.json").read_text(encoding="utf-8"))
+        if (
+            not isinstance(probe, dict) or type(probe.get("candidate")) is not bool
+            or not isinstance(probe.get("reason"), str)
+        ):
+            raise SeparationError("The NVIDIA discovery worker returned invalid results")
+        diagnostic_event("bandit_gpu_discovery", **probe)
+        if not probe["candidate"]:
+            return None, probe["reason"]
+        progress("Verifying the optional local CUDA runtime...", None)
+        runtime = installed_runtime(self.data_root, cancelled)
+        if runtime is not None:
+            return runtime, ""
+        if allow_download:
+            try:
+                return install_runtime(
+                    self.data_root, job, progress, cancelled, allow_download=True,
+                ), ""
+            except CUDARuntimeError as error:
+                check_cancel(cancelled)
+                reason = f"Optional CUDA runtime could not be prepared: {error}"
+                diagnostic_event("bandit_cuda_runtime_unavailable", reason=reason)
+                progress(f"GPU fallback: {reason} Continuing on CPU.", None)
+                return None, reason
+        if offer_download:
+            size = runtime_download_bytes()
+            raise SeparationRuntimeDownloadRequired(
+                "NVIDIA CUDA acceleration needs a separate optional runtime download. "
+                "Declining continues with the existing CPU runtime.",
+                size,
+            )
+        return None, "Optional CUDA runtime download declined; using the existing CPU runtime."
+
     def _generate(
         self, media: MediaTools, video: Path, *, allow_download: bool,
+        allow_runtime_download: bool, offer_runtime_download: bool,
         progress: ProgressCallback, cancelled: CancelCallback, source_snapshot: SourceSnapshot,
     ) -> Path:
         check_cancel(cancelled)
@@ -420,17 +495,38 @@ class SeparationManager:
             job.mkdir(parents=True)
             model = self._ensure_model(job, allow_download, progress, cancelled)
             threads = None
+            cuda_runtime = None
+            fallback_reason = ""
             if self.mode == KEEP_SINGING:
-                from choicer_voicer_pack_creator.bandit_runtime import WORK_ESTIMATE
+                from choicer_voicer_pack_creator.bandit_runtime import (
+                    GPU_WORK_ESTIMATE,
+                    WORK_ESTIMATE,
+                )
                 from choicer_voicer_pack_creator.export_resources import (
                     ResourceError,
                     export_resources,
                 )
 
+                cuda_runtime, fallback_reason = self._select_bandit_runtime(
+                    job, allow_runtime_download, offer_runtime_download, progress, cancelled,
+                )
                 try:
-                    admission = runtime.enter_context(export_resources.acquire(
-                        WORK_ESTIMATE, work_label="singing-preserving backing",
-                    ))
+                    if cuda_runtime is not None:
+                        try:
+                            reservation = export_resources.acquire(
+                                GPU_WORK_ESTIMATE, work_label="singing-preserving backing",
+                            )
+                        except ResourceError as error:
+                            check_cancel(cancelled)
+                            fallback_reason = f"CUDA host resources unavailable: {error}"
+                            cuda_runtime = None
+                            progress(f"GPU fallback: {fallback_reason} Trying the CPU budget.", None)
+                            diagnostic_event("bandit_cpu_resource_fallback", reason=fallback_reason)
+                    if cuda_runtime is None:
+                        reservation = export_resources.acquire(
+                            WORK_ESTIMATE, work_label="singing-preserving backing",
+                        )
+                    admission = runtime.enter_context(reservation)
                 except ResourceError as error:
                     raise SeparationError(str(error)) from error
                 threads = admission.ffmpeg_threads
@@ -439,11 +535,11 @@ class SeparationManager:
             output = job / "backing.wav"
             status_path = job / "status.json"
             request_path = job / "request.json"
-            write_json_atomic(request_path, {
+            request = {
                 "version": 1, "job_id": job_id, "model": str(model),
                 "frames": frames, "mode": self.mode,
                 **({"threads": threads} if threads is not None else {}),
-            })
+            }
             last_status: dict[str, Any] | None = None
 
             def poll_status(_elapsed: float) -> None:
@@ -461,29 +557,79 @@ class SeparationManager:
                     ):
                         raise SeparationError("The separation worker reported invalid progress")
                     progress(str(status.get("message", "Separating locally…")), fraction)
+                    if self.mode == KEEP_SINGING:
+                        diagnostic_event(
+                            "bandit_execution_progress",
+                            **{key: status[key] for key in (
+                                "device", "device_name", "fallback_reason", "attempt", "state",
+                                "runtime", "capability", "peak_vram_allocated",
+                            ) if key in status},
+                        )
                     last_status = status
 
-            command = [sys.executable]
-            if not getattr(sys, "frozen", False):
-                command.extend(["-m", "choicer_voicer_pack_creator"])
-            command.extend(["--separate-audio", str(request_path)])
-            progress("Starting local CPU separation (no audio is uploaded)…", None)
-            try:
-                with path_leases(read_paths=(model,)):
-                    _run_cancellable(
-                        command, "Local backing-track separation", cancelled, tick=poll_status,
-                    )
-            except AnalysisCancelled:
-                raise
-            except AnalysisError as error:
+            for attempt in (1, 2):
+                check_cancel(cancelled)
+                last_status = None
+                status_path.unlink(missing_ok=True)
+                output.unlink(missing_ok=True)
+                if self.mode == KEEP_SINGING:
+                    request.update(attempt=attempt, fallback_reason=fallback_reason)
+                    if cuda_runtime is not None:
+                        request["cuda_runtime"] = str(cuda_runtime)
+                    else:
+                        request.pop("cuda_runtime", None)
+                write_json_atomic(request_path, request)
+                progress(
+                    "Starting local NVIDIA CUDA qualification (no audio is uploaded)..."
+                    if cuda_runtime is not None else "Starting local CPU separation (no audio is uploaded)…",
+                    None,
+                )
+                try:
+                    with path_leases(read_paths=(
+                        (model, cuda_runtime) if cuda_runtime is not None else (model,)
+                    )):
+                        _run_cancellable(
+                            worker_command(request_path, isolated=self.mode == KEEP_SINGING),
+                            "Local backing-track separation",
+                            cancelled, tick=poll_status,
+                        )
+                except AnalysisCancelled:
+                    raise
+                except AnalysisError as error:
+                    poll_status(0)
+                    check_cancel(cancelled)
+                    if (
+                        self.mode == KEEP_SINGING and cuda_runtime is not None and attempt == 1
+                        and last_status and last_status.get("state") == "cpu_retry"
+                        and last_status.get("attempt") == attempt
+                        and isinstance(last_status.get("fallback_reason"), str)
+                        and last_status["fallback_reason"]
+                    ):
+                        fallback_reason = last_status["fallback_reason"]
+                        cuda_runtime = None
+                        # _run_cancellable reaps the complete child before returning/raising.
+                        # All partial audio and the GPU estimator belong to that failed attempt.
+                        for name in ("backing.wav", "unscaled-bandit.wav"):
+                            (job / name).unlink(missing_ok=True)
+                        progress(
+                            f"GPU fallback: {fallback_reason} Restarting on CPU; time estimate resets.",
+                            None,
+                        )
+                        diagnostic_event("bandit_cpu_retry", reason=fallback_reason)
+                        continue
+                    detail = (last_status or {}).get("message", str(error))
+                    raise SeparationError(f"Local backing-track separation failed: {detail}") from error
                 poll_status(0)
-                detail = (last_status or {}).get("message", str(error))
-                raise SeparationError(f"Local backing-track separation failed: {detail}") from error
-            poll_status(0)
+                break
             check_cancel(cancelled)
             if not last_status or last_status.get("state") != "succeeded":
                 raise SeparationError("The separation worker exited without a successful result")
-            progress("Verifying the full-length backing track…", None)
+            device_details = (
+                f" ({last_status.get('device_name', 'CPU')}"
+                f"{'; GPU fallback: ' + fallback_reason if fallback_reason else ''})"
+                if self.mode == KEEP_SINGING else ""
+            )
+            progress(f"Verifying the full-length backing track{device_details}…", None)
             validate_audio(output, frames, cancelled, sample_rate=self.sample_rate)
             check_cancel(cancelled)
             destination = self.data_root / "backing-tracks" / f"backing-{job_id}.wav"
@@ -491,7 +637,12 @@ class SeparationManager:
                 source_snapshot.verify()
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(output, destination)
-            diagnostic_event("backing_separation_completed", destination=destination, frames=frames)
+            diagnostic_event(
+                "backing_separation_completed", destination=destination, frames=frames,
+                **({key: last_status.get(key) for key in (
+                    "device", "device_name", "fallback_reason", "runtime", "attempt",
+                )} if self.mode == KEEP_SINGING else {}),
+            )
             return destination
         except AnalysisCancelled as error:
             raise SeparationCancelled("Backing-track generation was canceled") from error

@@ -26,6 +26,7 @@ from choicer_voicer_pack_creator.operations import (
     leases,
     operation_scope,
 )
+from choicer_voicer_pack_creator.separation import SeparationRuntimeDownloadRequired
 
 TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled", "blocked"})
 _ALL_PROJECTS = object()
@@ -353,6 +354,11 @@ class JobManager(QObject):
                     context.check_cancelled()
         except OperationCancelled:
             state = "cancelled"
+        except SeparationRuntimeDownloadRequired as failure:
+            if context.cancelled():
+                state = "cancelled"
+            else:
+                state, error = "blocked", f"{type(failure).__name__}: {failure}"
         except BaseException as failure:
             # Cleanup failures remain failures even after a cancellation request.
             state, error = "failed", f"{type(failure).__name__}: {failure}"
@@ -393,6 +399,8 @@ class JobManager(QObject):
             self._schedule()
 
     def _finish(self, handle: JobHandle, state: str, result: Any, error: str | None) -> None:
+        if state == "blocked" and handle.record.cancel_requested:
+            state, result, error = "cancelled", None, None
         self._tasks[handle.id].operation = None
         self._update(
             handle, state=state, finished_at=time.time(), result=result, error=error,

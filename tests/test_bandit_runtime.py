@@ -500,6 +500,7 @@ def test_backing_generation_admission_precedes_decode_and_survives_child_cleanup
     ))
     monkeypatch.setattr(resources, "export_resources", budget)
     monkeypatch.setattr(manager, "_ensure_model", lambda *_: manager.model_path)
+    monkeypatch.setattr(manager, "_select_bandit_runtime", lambda *_: (None, "Test CPU baseline"))
 
     def decode(*_args):
         assert resources.current_ffmpeg_threads() == 2
@@ -538,6 +539,7 @@ def test_bandit_source_mutation_rejects_successful_result_and_releases_budget(tm
     ))
     monkeypatch.setattr(resources, "export_resources", budget)
     monkeypatch.setattr(manager, "_ensure_model", lambda *_: manager.model_path)
+    monkeypatch.setattr(manager, "_select_bandit_runtime", lambda *_: (None, "Test CPU baseline"))
     monkeypatch.setattr(manager, "_decode", lambda *_: 83)
 
     def run(command, *_args, **_kwargs):
@@ -570,6 +572,7 @@ def test_bandit_cancelled_child_is_reaped_before_resource_release(tmp_path, monk
     ))
     monkeypatch.setattr(resources, "export_resources", budget)
     monkeypatch.setattr(manager, "_ensure_model", lambda *_: manager.model_path)
+    monkeypatch.setattr(manager, "_select_bandit_runtime", lambda *_: (None, "Test CPU baseline"))
     monkeypatch.setattr(manager, "_decode", lambda *_: 83)
     processes = []
     popen = analysis.subprocess.Popen

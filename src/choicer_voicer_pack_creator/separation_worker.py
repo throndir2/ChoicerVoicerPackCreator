@@ -1,4 +1,4 @@
-"""Qt-free local CPU worker. Streaming overlap-add adapted from StemSplit's MIT infer.py.
+"""Qt-free isolated worker. Streaming overlap-add adapted from StemSplit's MIT infer.py.
 
 See resources/backing-separation.json and StemSplit-MIT.txt for immutable provenance.
 """
@@ -140,10 +140,17 @@ def worker_main(request_path: Path) -> int:
     status_path = job / "status.json"
     output_path = job / "backing.wav"
     job_id = job.name
+    execution: dict[str, Any] = {}
 
     def status(message: str, fraction: float | None, state: str = "running") -> None:
+        device = execution.get("device")
+        if device:
+            label = execution.get("device_name", device)
+            reason = execution.get("fallback_reason")
+            message = f"{label}{f' (GPU fallback: {reason})' if reason else ''}: {message}"
         write_json_atomic(status_path, {
             "job_id": job_id, "state": state, "message": message, "progress": fraction,
+            **execution,
         })
 
     try:
@@ -151,8 +158,22 @@ def worker_main(request_path: Path) -> int:
         if request.get("version") != 1 or request.get("job_id") != job_id:
             raise SeparationError("Invalid separation worker request")
         mode = validate_backing_mode(request.get("mode", REMOVE_ALL_VOCALS))
+        if request.get("probe_cuda") is True:
+            if mode != KEEP_SINGING:
+                raise SeparationError("CUDA discovery is only supported for BandIt")
+            from choicer_voicer_pack_creator.bandit_gpu import probe_nvidia
+
+            write_json_atomic(job / "probe.json", probe_nvidia())
+            status("NVIDIA driver discovery completed.", 1.0, "succeeded")
+            return 0
         if request.get("smoke_test") is True:
-            if mode == KEEP_SINGING:
+            if request.get("cuda_runtime_smoke") is True:
+                if mode != KEEP_SINGING:
+                    raise SeparationError("CUDA runtime smoke is only supported for BandIt")
+                from choicer_voicer_pack_creator.bandit_cuda_runtime import native_import_smoke
+
+                report = native_import_smoke(Path(request["cuda_runtime"]))
+            elif mode == KEEP_SINGING:
                 from choicer_voicer_pack_creator.bandit_runtime import smoke_test as bandit_smoke
 
                 report = bandit_smoke(job)
@@ -165,16 +186,68 @@ def worker_main(request_path: Path) -> int:
             frames = request.get("frames")
             if type(frames) is not int or frames <= 0:
                 raise SeparationError("Invalid separation worker frame count")
-            status("Loading the verified local CPU model…", None)
             if mode == KEEP_SINGING:
                 from choicer_voicer_pack_creator import bandit_runtime
 
-                model = bandit_runtime.load_cpu_model(Path(request["model"]), request.get("threads"))
-                bandit_runtime.separate_stream(
-                    job / "decoded.wav", output_path, bandit_runtime.make_predictor(model),
-                    frames, status, lambda: False,
-                )
+                attempt = request.get("attempt", 1)
+                if type(attempt) is not int or not 1 <= attempt <= 2:
+                    raise SeparationError("Invalid BandIt worker attempt")
+                execution["attempt"] = attempt
+                runtime_path = request.get("cuda_runtime")
+                if runtime_path is not None and attempt != 1:
+                    raise SeparationError("A BandIt retry must use the CPU runtime")
+                device = "cpu"
+                if runtime_path is not None:
+                    from choicer_voicer_pack_creator.bandit_cuda_runtime import (
+                        CUDARuntimeError,
+                        activate_runtime,
+                    )
+                    from choicer_voicer_pack_creator.bandit_gpu import (
+                        GPUUnavailable,
+                        load_gpu_model,
+                        recoverable_gpu_error,
+                    )
+
+                    try:
+                        status("Initializing the isolated NVIDIA CUDA runtime...", None)
+                        try:
+                            activate_runtime(Path(runtime_path))
+                        except (CUDARuntimeError, ImportError, OSError) as error:
+                            raise GPUUnavailable(f"CUDA runtime initialization failed: {error}") from error
+                        model, device, details = load_gpu_model(
+                            Path(request["model"]), request.get("threads"), status, lambda: False,
+                        )
+                        execution.update(details)
+                        execution["device_name"] = f"NVIDIA {details['device_name']} ({device})"
+                        status("GPU qualification passed; starting full-length separation.", None)
+                        bandit_runtime.separate_stream(
+                            job / "decoded.wav", output_path,
+                            bandit_runtime.make_predictor(model, device=device),
+                            frames, status, lambda: False,
+                        )
+                    except RuntimeError as error:
+                        if not recoverable_gpu_error(error):
+                            raise
+                        output_path.unlink(missing_ok=True)
+                        execution["fallback_reason"] = f"{type(error).__name__}: {error}"
+                        status("Releasing the GPU worker before a fresh CPU retry.", None, "cpu_retry")
+                        return 2
+                else:
+                    execution.update(
+                        device="cpu", device_name="CPU",
+                        fallback_reason=request.get("fallback_reason", ""),
+                    )
+                    status("Loading the verified local CPU model...", None)
+                    model = bandit_runtime.load_cpu_model(
+                        Path(request["model"]), request.get("threads"),
+                    )
+                    execution["runtime"] = "2.8.0+cpu"
+                    bandit_runtime.separate_stream(
+                        job / "decoded.wav", output_path, bandit_runtime.make_predictor(model),
+                        frames, status, lambda: False,
+                    )
             else:
+                status("Loading the verified local CPU model…", None)
                 session = load_session(Path(request["model"]))
                 separate_stream(job / "decoded.wav", output_path, session, frames, status, lambda: False)
         status("Full-length backing track generated and verified.", 1.0, "succeeded")
