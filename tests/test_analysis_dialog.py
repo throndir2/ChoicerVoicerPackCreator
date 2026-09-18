@@ -198,7 +198,7 @@ def test_workspace_backing_and_whisper_overlap_within_cpu_budget(
 
     class Separation:
         def __init__(self, _root, *, mode):
-            pass
+            self.mode = mode
 
         def generate(self, *_args, **_kwargs):
             backing_started.set()

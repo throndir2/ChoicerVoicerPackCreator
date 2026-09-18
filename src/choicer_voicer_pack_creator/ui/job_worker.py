@@ -55,14 +55,10 @@ class JobWorker(QThread):
             self.completed.connect(self._capture_result, Qt.ConnectionType.DirectConnection)
         if hasattr(self, "canceled"):
             self.canceled.connect(self._capture_cancelled, Qt.ConnectionType.DirectConnection)
-        if hasattr(self, "download_required"):
-            self.download_required.connect(
-                self._capture_setup_required, Qt.ConnectionType.DirectConnection,
-            )
-        if hasattr(self, "preparation_required"):
-            self.preparation_required.connect(
-                self._capture_setup_required, Qt.ConnectionType.DirectConnection,
-            )
+        for name in ("download_required", "runtime_download_required", "preparation_required"):
+            signal = getattr(self, name, None)
+            if signal is not None:
+                signal.connect(self._capture_setup_required, Qt.ConnectionType.DirectConnection)
 
     def _report_job_progress(self, *values: object) -> None:
         context = self._job_context
@@ -90,8 +86,11 @@ class JobWorker(QThread):
             OperationCancelled(str(error) if error else "Operation cancelled")
         )
 
-    def _capture_setup_required(self) -> None:
-        self._job_exception = sys.exception() or RuntimeError("Download consent required")
+    def _capture_setup_required(self, error: object = None) -> None:
+        self._job_exception = (
+            error if isinstance(error, BaseException)
+            else sys.exception() or RuntimeError("Download consent required")
+        )
         self._job_error = str(self._job_exception)
 
     def _capture_result(self, *values: object) -> None:

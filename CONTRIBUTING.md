@@ -23,6 +23,55 @@ follow [the CPU setup commands](README.md#optional-singing-preserving-cpu-backen
 downgrade NumPy. This backend restriction does not change the core `requires-python >=3.11`.
 Portable recipients never need this source setup.
 
+BandIt automatic NVIDIA acceleration is an optional runtime cache, not a replacement for that
+CPU installation. Eligible candidates are Windows x64 CPython 3.11/3.12 with a CUDA 12.8-capable
+NVIDIA driver. Keep `torch==2.8.0+cpu` and `torchaudio==2.8.0+cpu` installed and packaged;
+the separately consented runtime uses only the pinned, SHA-256-verified official Windows
+`torch==2.8.0+cu128` and `torchaudio==2.8.0+cu128` wheels matching the interpreter ABI.
+Do not install CUDA over the source/build environment or into the portable folder. The source
+interpreter or frozen executable launches the isolated worker using cached runtime files, with
+their metadata and license notices retained. Portable users require no external Python, pip,
+CUDA toolkit, or research-environment setup.
+
+Model consent never grants runtime consent. Keep the runtime's several-GiB download optional
+and show its pinned total size through the existing setup coordinator/nonmodal message path.
+Declining continues on CPU without discarding model permission. Retain dialog-local choices
+across retries, reject canceled/stale callbacks, and keep setup-wait jobs from reporting success.
+Do not add a device selector, persistent settings, panels, or automatically opened details.
+Preserve job resource admission and cancellation while probing, downloading, or falling back.
+
+Actual CUDA qualification requires a verified-model, full eight-second float32 warmup in the
+isolated worker on both stereo channels, not just `nvidia-smi`, allocation, or tiny synthetic
+kernels. Check the actual driver through `cuDriverGetVersion >= 12080`, match the GPU architecture
+against the wheel's compiled SM/PTX support, and require at least 3.5 GiB free VRAM (3 GiB plus
+512 MiB headroom) before warmup. The shared resource budget reserves 5 GiB of system RAM for a
+CUDA attempt versus 3 GiB for CPU. These RAM reservations and the VRAM screening threshold are
+conservative engineering allowances, not measured peaks or hardware qualification. If CUDA host
+resource admission fails, diagnose that fallback and acquire the original CPU budget before
+proceeding; do not bypass admission, swallow cancellation, or ignore insufficient CPU resources.
+Preserve the same 48 kHz stereo/independent-channel, eight-second-window/one-second-hop math and final global
+gain; no TF32, autocast, reduced precision, or changed model to make VRAM fit. A recoverable GPU
+failure must reap that worker before one fresh CPU retry, discard partial output, and reset
+the measured ETA. Cancellation must not launch fallback. Test separate consent, runtime
+verification, worker isolation, fallback, and stale requests locally without downloading
+multi-GiB files during ordinary tests. Record actual hardware, driver, runtime, checkpoint,
+native/frozen path, precision, warmup/VRAM, and inference results when hardware is available;
+otherwise explicitly defer hardware qualification. Synthetic tests do not establish GPU fit,
+performance, or CPU/GPU numerical parity.
+
+For an already consented and verified CUDA cache, native imports and original DLL origins can
+also be checked without a GPU or model download:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\smoke_packaged.py "C:\Portable\Choicer Voicer Pack Creator.exe" --cuda-runtime-smoke "C:\Path\To\Verified\RuntimeCache"
+```
+
+Run this opt-in check separately for the editor and `MCP\Choicer Voicer MCP.exe`, including a
+clean ZIP extraction. It exercises CPU tensor operations from the CUDA wheels and reports that
+fact explicitly; it is not GPU inference or checkpoint parity. Ordinary packaged smoke still
+checks the bundled CPU runtime and never downloads the optional CUDA runtime. Cache extraction
+and loading use extended-length Windows paths without requiring a system-wide long-path policy.
+
 Use `.\Build-Portable.ps1 -BuildEnvironment .\build\environments\<task-name>` for a task-owned
 build environment; do not reset or install into another session's environment or the shared
 default during concurrent development. Reset requires this script's ownership marker and an

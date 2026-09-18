@@ -23,6 +23,7 @@ from choicer_voicer_pack_creator.separation import (
     SeparationCancelled,
     SeparationDownloadRequired,
     SeparationManager,
+    SeparationRuntimeDownloadRequired,
 )
 from choicer_voicer_pack_creator.separation_types import (
     KEEP_SINGING,
@@ -45,6 +46,7 @@ class BackingWorker(JobWorker):
     completed = Signal(object)
     failed = Signal(str)
     download_required = Signal()
+    runtime_download_required = Signal(object)
     canceled = Signal()
 
     def __init__(
@@ -54,12 +56,16 @@ class BackingWorker(JobWorker):
         video: Path,
         *,
         allow_download: bool,
+        allow_runtime_download: bool = False,
+        offer_runtime_download: bool = True,
     ) -> None:
         super().__init__()
         self.manager = manager
         self.media = media
         self.video = video
         self.allow_download = allow_download
+        self.allow_runtime_download = allow_runtime_download
+        self.offer_runtime_download = offer_runtime_download
 
     def run(self) -> None:
         def report(message: str, fraction: float | None) -> None:
@@ -67,16 +73,26 @@ class BackingWorker(JobWorker):
             self.progress.emit(message, value)
 
         try:
+            runtime_options = (
+                {
+                    "allow_runtime_download": self.allow_runtime_download,
+                    "offer_runtime_download": self.offer_runtime_download,
+                }
+                if self.manager.mode == KEEP_SINGING else {}
+            )
             result = self.manager.generate(
                 self.media,
                 self.video,
                 allow_download=self.allow_download,
                 progress=report,
                 cancelled=self.isInterruptionRequested,
+                **runtime_options,
             )
             if not isinstance(result, Path) or not result.is_file():
                 raise ValueError("Backing generation returned no usable audio file.")
             self.completed.emit(result)
+        except SeparationRuntimeDownloadRequired as error:
+            self.runtime_download_required.emit(error)
         except SeparationDownloadRequired:
             self.download_required.emit()
         except SeparationCancelled:
@@ -127,7 +143,11 @@ class BackingDialog(QDialog):
         self._outcome = ""
         self._closing = False
         self._pending_consent = False
-        self._consent_callback = None
+        self._consent_callback: Callable[[bool], None] | None = None
+        self._allow_download = False
+        self._allow_runtime_download = False
+        self._offer_runtime_download = True
+        self._runtime_download_bytes = 0
         self.setWindowTitle("Generate backing track")
         self.setMinimumWidth(540)
         layout = QVBoxLayout(self)
@@ -202,7 +222,10 @@ class BackingDialog(QDialog):
         self.generate_button.setEnabled(False)
         self.close_button.setText("Close")
 
-    def start(self, *, allow_download: bool = False) -> None:
+    def start(
+        self, *, allow_download: bool = False, allow_runtime_download: bool = False,
+        offer_runtime_download: bool = True,
+    ) -> None:
         if self.worker is not None or self._closing or self._pending_consent:
             return
         if self._started:
@@ -224,6 +247,9 @@ class BackingDialog(QDialog):
             self.keep_singing_choice.setEnabled(False)
             self.generate_button.setVisible(False)
             self.change_mode_button.setVisible(self._on_change_mode is not None)
+        self._allow_download = self._allow_download or allow_download
+        self._allow_runtime_download = self._allow_runtime_download or allow_runtime_download
+        self._offer_runtime_download = self._offer_runtime_download and offer_runtime_download
         if self.manager is None:
             try:
                 self.manager = SeparationManager(self.data_root, mode=self.mode)
@@ -241,7 +267,9 @@ class BackingDialog(QDialog):
         self.progress_bar.setFormat("%p%")
         self._progress("Checking local separation model...", -1)
         worker = BackingWorker(
-            self.manager, self.media, self.video, allow_download=allow_download,
+            self.manager, self.media, self.video, allow_download=self._allow_download,
+            allow_runtime_download=self._allow_runtime_download,
+            offer_runtime_download=self._offer_runtime_download,
         )
         self.worker = worker
         if self.job_manager is not None:
@@ -255,6 +283,7 @@ class BackingDialog(QDialog):
         worker.progress.connect(self._progress)
         worker.completed.connect(self._completed)
         worker.download_required.connect(self._download_required)
+        worker.runtime_download_required.connect(self._runtime_download_required)
         worker.failed.connect(self._failed)
         worker.canceled.connect(self._canceled)
         worker.finished.connect(self._worker_finished)
@@ -289,6 +318,11 @@ class BackingDialog(QDialog):
     def _download_required(self) -> None:
         self._outcome = "download"
 
+    @Slot(object)
+    def _runtime_download_required(self, error: SeparationRuntimeDownloadRequired) -> None:
+        self._runtime_download_bytes = error.download_bytes
+        self._outcome = "runtime-download"
+
     @Slot(str)
     def _failed(self, message: str) -> None:
         self._outcome = "failed"
@@ -313,29 +347,71 @@ class BackingDialog(QDialog):
             super().accept()
         elif not self.request_is_current():
             self._stale_request()
-        elif self._outcome == "download":
-            assert self.manager is not None
+        elif self._outcome in {"download", "runtime-download"}:
+            self._request_download_consent(runtime=self._outcome == "runtime-download")
+        else:
+            if self._outcome != "failed":
+                self._failed("Backing generation stopped without returning a result.")
+            self.retry_button.setVisible(True)
+            self.close_button.setText("Close")
+
+    def _request_download_consent(self, *, runtime: bool) -> None:
+        assert self.manager is not None
+        if self._pending_consent:
+            return
+        self._pending_consent = True
+
+        def consent(accepted: bool) -> None:
+            if self._consent_callback is not consent or not self._pending_consent:
+                return
+            self._pending_consent = False
+            self._consent_callback = None
+            if self._closing:
+                return
+            diagnostic_event(
+                "backing_runtime_download_consent" if runtime else "backing_download_consent",
+                accepted=accepted,
+            )
+            if not self.request_is_current():
+                self._stale_request()
+                return
+            if runtime:
+                self.start(allow_runtime_download=accepted, offer_runtime_download=accepted)
+            elif accepted:
+                self.start(allow_download=True)
+            else:
+                self.progress_label.setText("Backing generation not started; download declined.")
+                report_processing(
+                    self, "backing", "cancelled", "Backing download declined; use Retry to resume.",
+                )
+                self.close_button.setText("Close")
+                self.retry_button.setVisible(True)
+                if self.job_manager is None:
+                    super(BackingDialog, self).reject()
+
+        self._consent_callback = consent
+        if runtime:
+            size = self._runtime_download_bytes / 1024**2
+            component = "bandit-cuda-runtime:2.8.0+cu128"
+            label = (
+                f"Optional BandIt NVIDIA CUDA runtime (~{size:.0f} MiB) — "
+                "separate from the model; Cancel continues on CPU. "
+                "Verified runtime files and license notices are retained in the local cache"
+            )
+            title = "Download optional NVIDIA acceleration?"
+            message = (
+                f"Download approximately {size:.0f} MiB of checksum-verified official "
+                "PyTorch/TorchAudio CUDA runtime files for BandIt?\n\n"
+                "This optional download is separate from model permission. Runtime files and "
+                "their license notices are kept in your local application-data cache and reused "
+                "offline. Your installed CPU runtime stays unchanged. No separate Python or CUDA "
+                "installation is needed for the portable app.\n\n"
+                "The GPU must pass a full-model compatibility and memory check before use. "
+                "Cancel continues this generation on CPU. Audio stays on this computer."
+            )
+            waiting = "Waiting for optional NVIDIA runtime permission; declining continues on CPU."
+        else:
             size = self.manager.model_download_bytes / 1024**2
-            self._pending_consent = True
-
-            def consent(accepted: bool) -> None:
-                self._pending_consent = False
-                self._consent_callback = None
-                diagnostic_event("backing_download_consent", accepted=accepted)
-                if not self.request_is_current():
-                    self._stale_request()
-                    return
-                if accepted and not self._closing:
-                    self.start(allow_download=True)
-                else:
-                    self.progress_label.setText("Backing generation not started; download declined.")
-                    report_processing(self, "backing", "cancelled", "Backing download declined; use Retry to resume.")
-                    self.close_button.setText("Close")
-                    self.retry_button.setVisible(True)
-                    if self.job_manager is None:
-                        super(BackingDialog, self).reject()
-
-            coordinator = getattr(_workspace_for(self), "setup_consent", None)
             model_label = (
                 "BandIt singing-preserving model"
                 if self.mode == KEEP_SINGING else "Music-separation model"
@@ -343,32 +419,31 @@ class BackingDialog(QDialog):
             restriction = (
                 " — CC BY-NC 4.0, non-commercial use only" if self.mode == KEEP_SINGING else ""
             )
-            if coordinator is not None:
-                model = self.manager.manifest["model"]
-                self._consent_callback = consent
-                report_processing(self, "backing", "consent", "Waiting for backing-model download permission.")
-                coordinator.request(
-                    self.project_id,
-                    {f"separation:{model['sha256']}": f"{model_label} (~{size:.0f} MiB){restriction}"},
-                    consent, self.request_is_current,
-                )
-            else:
-                show_message(
-                    self, "question",
-                    "Download local music-separation model?",
-                    f"{model_label}{restriction}.\n\n"
-                    f"Download approximately {size:.0f} MiB of checksum-verified model data? "
-                    "The model is stored in your local application data and reused offline. "
-                    "A missing or damaged model needs this download before generation can continue.\n\n"
-                    "Audio stays on this computer. Canceling keeps your imported video and dialogue "
-                    "work; you can generate backing later from Project → Generate Backing Track.",
-                    consent, QMessageBox.StandardButton.Yes,
-                )
+            label = f"{model_label} (~{size:.0f} MiB){restriction}"
+            component = ""
+            title = "Download local music-separation model?"
+            message = (
+                f"{model_label}{restriction}.\n\n"
+                f"Download approximately {size:.0f} MiB of checksum-verified model data? "
+                "The model is stored in your local application data and reused offline. "
+                "A missing or damaged model needs this download before generation can continue.\n\n"
+                "Audio stays on this computer. Canceling keeps your imported video and dialogue "
+                "work; you can generate backing later from Project → Generate Backing Track."
+            )
+            waiting = "Waiting for backing-model download permission."
+        coordinator = getattr(_workspace_for(self), "setup_consent", None)
+        report_processing(self, "backing", "consent", waiting)
+        if coordinator is not None:
+            if not runtime:
+                component = f"separation:{self.manager.manifest['model']['sha256']}"
+            coordinator.request(
+                self.project_id, {component: label}, consent, self.request_is_current,
+            )
         else:
-            if self._outcome != "failed":
-                self._failed("Backing generation stopped without returning a result.")
-            self.retry_button.setVisible(True)
-            self.close_button.setText("Close")
+            show_message(
+                self, "question", title, message, consent,
+                QMessageBox.StandardButton.Cancel if runtime else QMessageBox.StandardButton.Yes,
+            )
 
     def accept(self) -> None:
         if self.worker is None and self.backing_path is not None:
@@ -386,10 +461,15 @@ class BackingDialog(QDialog):
             self._on_stale()
         self._closing = True
         self.change_mode_button.setEnabled(False)
-        if self._consent_callback is not None:
+        callback, self._consent_callback = self._consent_callback, None
+        self._pending_consent = False
+        if callback is not None:
             coordinator = getattr(_workspace_for(self), "setup_consent", None)
             if coordinator is not None:
-                coordinator.cancel_request(self._consent_callback)
+                coordinator.cancel_request(callback)
+            else:
+                for box in self.findChildren(QMessageBox):
+                    box.reject()
         if current:
             report_processing(
                 self, "backing", "cancelled", "Backing generation paused; existing audio kept.",

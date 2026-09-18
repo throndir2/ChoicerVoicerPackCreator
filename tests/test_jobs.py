@@ -12,6 +12,10 @@ from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, QThread, Slot
 
 from choicer_voicer_pack_creator.jobs import JobManager
 from choicer_voicer_pack_creator.operations import check_cancelled, path_leases
+from choicer_voicer_pack_creator.separation import (
+    SeparationDownloadRequired,
+    SeparationRuntimeDownloadRequired,
+)
 
 
 @pytest.fixture
@@ -38,6 +42,27 @@ def test_adopted_results_can_be_released_without_losing_diagnostics(qtbot, manag
     assert job.record.state == "succeeded"
     assert job.record.title == "Restore"
     assert manager.tasks("one") == (job.record,)
+
+
+def test_runtime_consent_result_queued_before_cancel_is_not_revived(qtbot, manager):
+    reached = threading.Event()
+    queued = threading.Event()
+    manager._events.connect(
+        lambda event: queued.set() if event[1] == "finished" else None,
+        Qt.ConnectionType.DirectConnection,
+    )
+    def operation(_context):
+        reached.set()
+        raise SeparationRuntimeDownloadRequired("Runtime consent required", 1)
+    job = manager.submit("one", "backing", "Generate", operation)
+    manager._schedule()
+    # Block Qt event delivery until the worker has queued its blocked result.
+    assert reached.wait(3)
+    assert queued.wait(3)
+    job.cancel()
+    finish(qtbot, manager)
+    assert job.record.state == "cancelled"
+    assert job.record.result is None
 
 
 def test_projects_run_concurrently_and_results_reach_qt_thread(qtbot, manager):
@@ -189,6 +214,36 @@ def test_failed_job_isolated_and_dependency_explains_block(qtbot, manager):
     assert "required task" in dependent.record.error
     assert second.record.result == 42
     assert manager.tasks(None) == (first.record,)
+
+
+@pytest.mark.parametrize("kind", ["runtime", "runtime-subclass", "model", "failure"])
+def test_runtime_consent_blocks_without_reclassifying_other_errors(qtbot, manager, kind):
+    class RuntimeRepairRequired(SeparationRuntimeDownloadRequired):
+        pass
+
+    failure = {
+        "runtime": SeparationRuntimeDownloadRequired("CUDA runtime missing", 3 * 1024**3),
+        "runtime-subclass": RuntimeRepairRequired("CUDA runtime damaged", 3 * 1024**3),
+        "model": SeparationDownloadRequired("Model missing"),
+        "failure": ValueError("Invalid input"),
+    }[kind]
+
+    def operation(_context):
+        raise failure
+
+    job = manager.submit("one", "backing", "Generate backing", operation)
+    completed = []
+    job.completed.connect(completed.append)
+    dependent = manager.submit(
+        "one", "export", "Use backing", lambda _context: pytest.fail("No backing generated"),
+        depends_on=[job],
+    )
+    finish(qtbot, manager)
+    assert job.record.state == ("blocked" if kind.startswith("runtime") else "failed")
+    assert str(failure) in job.record.error
+    assert job.record.result is None
+    assert not completed
+    assert dependent.record.state == "blocked"
 
 
 def test_global_setup_dependency_waits_then_starts(qtbot, manager):
