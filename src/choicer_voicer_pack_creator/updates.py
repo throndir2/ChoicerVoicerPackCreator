@@ -341,7 +341,7 @@ def installation_directory() -> Path | None:
 
 def verify_installation(
     target: Path, version: str, cancelled: Cancelled = lambda: False,
-    *, progress: Progress | None = None, message: str = "Checking application files",
+    *, progress: Progress | None = None, message: str = "Verifying application files",
 ) -> dict[str, str]:
     files = read_portable_manifest(target, version)
     file_progress = _FileProgress(progress, message, len(files))
@@ -354,8 +354,8 @@ def verify_installation(
             path, cancelled, progress=file_progress.update if progress is not None else None,
         ) != digest:
             raise UpdateError(
-                f"An application file is missing or locally modified:\n{path}\n\n"
-                "It will not be overwritten. Extract the new release into a separate folder."
+                f"An application file is missing or does not match its package:\n{path}\n\n"
+                "Extract a fresh release into a separate folder."
             )
         file_progress.finish()
     return files
@@ -429,11 +429,9 @@ def prepare_update(
 ) -> PreparedUpdate:
     if version_key(release.version) <= version_key(current_version):
         raise UpdateError("The selected release is not newer than the installed application.")
-    progress("Checking application files...", 0.0)
-    old = verify_installation(
-        target, current_version, cancelled,
-        progress=lambda message, fraction: progress(message, 0.1 * fraction),
-    )
+    progress("Reading application inventory...", 0.0)
+    _check_cancel(cancelled)
+    old = read_portable_manifest(target, current_version)
     manifest_hash = sha256(target / MANIFEST, cancelled)
     _check_cancel(cancelled)
     if shutil.disk_usage(target.parent).free < release.archive_size * 3:
@@ -441,7 +439,7 @@ def prepare_update(
     directory = Path(tempfile.mkdtemp(prefix=".cvpc-update-", dir=target.parent))
     prepared = PreparedUpdate(directory, target, release.version)
     try:
-        progress("Fetching update checksum...", 0.1)
+        progress("Fetching update checksum...", 0.0)
         checksum_text = _read(release.checksum_url, 1024, cancelled).decode("ascii").strip()
         match = re.fullmatch(
             r"([0-9a-fA-F]{64}) [ *]" + re.escape(release.archive_name), checksum_text
@@ -455,7 +453,7 @@ def prepare_update(
         digest = hashlib.sha256()
         downloaded = 0
         deadline = time.monotonic() + 1800
-        progress("Downloading update...", 0.1)
+        progress("Downloading update...", 0.0)
         with _open(release.archive_url) as response, archive.open("xb") as output:
             while chunk := response.read(BUFFER_SIZE):
                 _check_cancel(cancelled)
@@ -464,7 +462,7 @@ def prepare_update(
                     raise UpdateError("The update download exceeded its size or time limit.")
                 output.write(chunk)
                 digest.update(chunk)
-                progress("Downloading update...", 0.1 + 0.6 * (downloaded / release.archive_size))
+                progress("Downloading update...", 0.7 * (downloaded / release.archive_size))
             output.flush()
             os.fsync(output.fileno())
         if downloaded != release.archive_size or digest.hexdigest() != expected_hash:
@@ -505,15 +503,14 @@ def apply_update(prepared: PreparedUpdate, previous_version: str, manifest_hash:
     target = prepared.target
     if sha256(_safe_path(target, MANIFEST)) != manifest_hash:
         raise UpdateError("The installed package changed after the update was prepared.")
-    old = verify_installation(target, previous_version)
+    old = read_portable_manifest(target, previous_version)
     new = verify_installation(prepared.staged, prepared.version)
     _check_collisions(target, old, new)
     # Only inventoried files are touched. Never mirror/delete an application directory.
     names_by_case = {name.casefold(): name for name in old}
     names_by_case.update({name.casefold(): name for name in new})
     names = sorted(names_by_case.values()) + [MANIFEST]
-    original_hashes = {name.casefold(): digest for name, digest in old.items()}
-    original_hashes[MANIFEST.casefold()] = manifest_hash
+    original_names = {name.casefold() for name in old} | {MANIFEST.casefold()}
     backup = prepared.directory / "backup"
     backup.mkdir()
     backed_up: list[str] = []
@@ -523,11 +520,10 @@ def apply_update(prepared: PreparedUpdate, previous_version: str, manifest_hash:
             destination = _safe_path(target, name)
             source = _safe_path(prepared.staged, name)
             if destination.is_file():
-                if (
-                    name.casefold() not in original_hashes
-                    or sha256(destination) != original_hashes[name.casefold()]
-                ):
-                    raise UpdateError(f"A file changed while installing the update: {destination}")
+                if name.casefold() not in original_names:
+                    raise UpdateError(f"The update would overwrite an unrelated file:\n{destination}")
+                if name == MANIFEST and sha256(destination) != manifest_hash:
+                    raise UpdateError("The installed package changed while installing the update.")
                 saved = backup / name
                 saved.parent.mkdir(parents=True, exist_ok=True)
                 # Locked binaries are retried briefly after the editor/bootloader exits.

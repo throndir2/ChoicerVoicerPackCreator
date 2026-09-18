@@ -330,9 +330,9 @@ status bar without interrupting your work. Checks contact GitHub, not your media
 
 When a newer compatible release is found, you can decline it or download its Windows x64 ZIP.
 Downloads are cancelable and checked against the release's SHA-256 checksum and GitHub asset
-digest when available. The progress bar covers application-file checks, download, extraction,
-and verification; file-processing steps show the current file, file count, and progress within
-large files. After the download is verified, a separate confirmation offers a restart.
+digest when available. The progress bar covers download, extraction, and new-package verification;
+file-processing steps show the current file, file count, and progress within large files.
+After the download is verified, a separate confirmation offers a restart.
 Save / Discard / Cancel decisions protect every dirty project, not just the selected tab.
 Active tasks must finish or stop cooperatively before exit. The app restarts in the same folder
 and restores its workspace list, including independent unsaved recovery records.
@@ -340,16 +340,19 @@ and restores its workspace list, including independent unsaved recovery records.
 Each new portable package includes `portable-files.json`, an inventory of shipped files. The
 updater replaces only those files and removes obsolete inventoried files. Extra files, projects,
 media, Windows preferences, recovery data, and downloaded Whisper components are not removed.
-Missing or modified application files (including custom FFmpeg binaries), path conflicts,
-links/junctions, locked files, and permission problems prevent an unsafe replacement. The app
-offers the GitHub release page when preparation fails. For a manual update, extract the new
-release into a separate folder. The updater never requests administrator access or
+Existing application files are not scanned for integrity before replacement: missing files are
+reinstalled, and modified shipped files (including custom FFmpeg binaries) are replaced.
+The inventory must remain valid. Path conflicts, links/junctions, locked files, and permission
+problems prevent an unsafe replacement. The app offers the GitHub release page when preparation
+fails. For a manual update, extract the new release into a separate folder. The updater never
+requests administrator access or
 mirrors/deletes your application folder.
 
 Updates are staged beside the application and installed by a separate process after the editor
-exits. Previous application files are retained as rollback backups until installation succeeds.
-A failed replacement attempts to restore them and reports any incomplete rollback, retaining the
-staging/backup folder for recovery. If an update is interrupted by a power loss or the updater is
+exits. Previous application files, including local modifications, are retained as rollback backups
+until installation succeeds. A failed replacement attempts to restore them and reports any
+incomplete rollback, retaining the staging/backup folder for recovery. If an update is interrupted
+by a power loss or the updater is
 forcibly terminated, keep that `.cvpc-update-*` folder and restore from its `backup` directory or
 extract a fresh release into a separate folder. Do not delete backups until the app works again.
 
