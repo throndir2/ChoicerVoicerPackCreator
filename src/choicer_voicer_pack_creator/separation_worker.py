@@ -24,6 +24,7 @@ from choicer_voicer_pack_creator.separation import (
     verify_model_file,
     write_json_atomic,
 )
+from choicer_voicer_pack_creator.separation_progress import SeparationProgress
 from choicer_voicer_pack_creator.separation_types import (
     KEEP_SINGING,
     REMOVE_ALL_VOCALS,
@@ -57,6 +58,7 @@ def separate_stream(
             if (source.frames, source.samplerate, source.channels) != (frames, SAMPLE_RATE, 2):
                 raise SeparationError("Decoded source audio has an incorrect duration or format")
             total_chunks = (frames + stride - 1) // stride
+            timing = SeparationProgress(total_chunks, "Separating locally", progress)
             for index, start in enumerate(range(0, frames, stride)):
                 check_cancel(cancelled)
                 source.seek(start)
@@ -66,8 +68,7 @@ def separate_stream(
                     raise SeparationError("Decoded source audio is incomplete or non-finite")
                 mix = np.zeros((1, 2, chunk_frames), dtype=np.float32)
                 mix[0, :, :length] = block.T
-                progress(f"Separating locally: chunk {index + 1} of {total_chunks}…",
-                         index / total_chunks * 0.9)
+                timing.start_chunk(index)
                 predictions = session.run(["stems"], {"mix": mix})[0]
                 check_cancel(cancelled)
                 if predictions.shape != (1, 4, 2, chunk_frames):

@@ -23,6 +23,7 @@ from choicer_voicer_pack_creator.separation import (
     check_cancel,
     validate_audio,
 )
+from choicer_voicer_pack_creator.separation_progress import SeparationProgress
 
 Predict = Callable[[Any], Mapping[str, Any]]
 # CPU 2.8.0, one thread, real 384000-sample mono probe: 2,133,352,448-byte
@@ -160,6 +161,7 @@ def overlap_add_blocks(
     weights = np.zeros(chunk_frames, dtype=np.float32)
     overlap = chunk_frames - hop_frames
     total = (frames + hop_frames - 1) // hop_frames
+    timing = SeparationProgress(total, "Keeping singing locally", progress)
     for index, start in enumerate(range(0, frames, hop_frames)):
         check_cancel(cancelled)
         source.seek(start)
@@ -169,7 +171,7 @@ def overlap_add_blocks(
             raise SeparationError("Decoded source audio is incomplete or non-finite")
         mix = np.zeros((chunk_frames, 2), dtype=np.float32)
         mix[:length] = block
-        progress(f"Keeping singing locally: chunk {index + 1} of {total}…", index / total * 0.9)
+        timing.start_chunk(index)
         predictions = predict(mix)
         check_cancel(cancelled)
         if not isinstance(predictions, Mapping) or set(predictions) != set(COMBINED_CHECKPOINT.stems):

@@ -348,6 +348,45 @@ def test_generation_publishes_only_verified_unique_durable_assets(manager, monke
     assert not list((manager.data_root / "separation-jobs").iterdir())
 
 
+def test_worker_status_preserves_estimate_and_clears_it_for_verification(
+    manager, monkeypatch, source_video,
+):
+    from choicer_voicer_pack_creator import separation_progress
+
+    _mock_preparation(manager, monkeypatch)
+    clock = [0.0]
+    monkeypatch.setattr(separation_progress, "monotonic", lambda: clock[0])
+    updates = []
+
+    def run(command, _description, _cancelled, *, tick):
+        job = Path(command[-1]).parent
+
+        def status(message, fraction):
+            separation.write_json_atomic(job / "status.json", {
+                "job_id": job.name, "state": "running",
+                "message": message, "progress": fraction,
+            })
+            tick(0)
+
+        timing = separation_progress.SeparationProgress(4, "Separating locally", status)
+        timing.start_chunk(0)
+        clock[0] += 20
+        timing.start_chunk(1)
+        _write_successful_result(command)
+        tick(0)
+
+    monkeypatch.setattr(separation, "_run_cancellable", run)
+    manager.generate(
+        None, source_video, progress=lambda *update: updates.append(update), cancelled=lambda: False,
+    )
+    estimates = [(text, value) for text, value in updates if "remaining" in text]
+    assert len(estimates) == 1
+    assert "about 1m 0s remaining" in estimates[0][0]
+    assert estimates[0][1] == pytest.approx(0.225)
+    assert any(text.startswith("Verifying the full-length") for text, _ in updates)
+    assert "remaining" not in updates[-1][0]
+
+
 @pytest.mark.parametrize("change", ["modify", "replace", "delete"])
 def test_generation_rejects_changed_source_before_publishing(
     manager, monkeypatch, source_video, change,

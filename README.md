@@ -1046,10 +1046,15 @@ HT-Demucs model (approximately 302 MiB). Processing runs locally on the CPU; aud
 The verified model is retained for offline reuse. Missing or damaged model data requires download
 permission again.
 
-Generation has progress and cancellation and may take several minutes. It mixes the model's drums,
-bass and other stems, excluding vocals, into a full-length backing aligned with the video. Separation
-is approximate: some dialogue can bleed through and some effects or singing may be removed. Listen
-to the result before sharing. Prompt extraction still uses the source video's original audio.
+Generation has progress and cancellation and may take several minutes. Both backing modes show
+an approximate remaining **separation** time in the generation details and **Tools > Tasks**,
+based on this run's average time per completed chunk. The first chunk shows "estimating";
+the estimate updates at each subsequent chunk, not as a live countdown. Downloading, loading,
+decoding, and final writing/verification are separate stages, not included in that estimate.
+HTDemucs mixes its drums, bass and other stems, excluding vocals, into a full-length backing
+aligned with the video. Separation is approximate: some dialogue can bleed through and some
+effects or singing may be removed. Listen to the result before sharing. Prompt extraction
+still uses the source video's original audio.
 
 Use **Generate backing** in Pack Details or **Project → Generate Backing Track** at any time.
 The on-demand dialog offers **Remove all vocals (dialogue and singing)** or
@@ -1076,6 +1081,10 @@ when moving a project, or relink them using **Choose**.
 BandIt uses bounded, full-length 48 kHz stereo processing and one whole-track clipping-safety gain.
 It can take longer and need more memory than HTDemucs; resource failures are reported without
 silently changing the selected model. Separation remains approximate in both modes.
+The editor currently runs BandIt only on the CPU, using one or two admitted threads.
+Its eight-second windows advance one second at a time, with separate inference for the left
+and right channels. BandIt itself supports GPU inference, but the editor's pinned CPU-only
+runtime does not use an installed GPU; CUDA support is limited to the separate research setup.
 
 Developers can use the separate [singing-preservation comparison](docs/SEPARATION_COMPARISON.md)
 for local reference evaluation; its GPU research setup is not required by the editor.
