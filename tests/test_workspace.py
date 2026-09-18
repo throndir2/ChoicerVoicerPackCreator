@@ -815,6 +815,63 @@ def test_background_jobs_do_not_open_tasks_or_resize_editor(workspace, qtbot, ki
     assert not tasks._timer.isActive()
 
 
+def test_backing_estimate_reaches_details_and_hidden_tasks(workspace, qtbot, tmp_path, monkeypatch):
+    from choicer_voicer_pack_creator import separation_progress
+    from choicer_voicer_pack_creator.ui import backing_dialog
+
+    clock = [0.0]
+    monkeypatch.setattr(separation_progress, "monotonic", lambda: clock[0])
+    finish_separation, finish_writing = threading.Event(), threading.Event()
+    output = tmp_path / "backing.wav"
+    output.write_bytes(b"backing")
+
+    class Manager:
+        def __init__(self, _root, *, mode):
+            pass
+
+        def generate(self, *_args, progress, **_kwargs):
+            timing = separation_progress.SeparationProgress(4, "Separating locally", progress)
+            timing.start_chunk(0)
+            clock[0] += 20
+            timing.start_chunk(1)
+            assert finish_separation.wait(10)
+            progress("Writing full-length backing track...", 0.9)
+            assert finish_writing.wait(10)
+            return output
+
+    monkeypatch.setattr(backing_dialog, "SeparationManager", Manager)
+    editor = workspace.active_editor
+    dialog = backing_dialog.BackingDialog(
+        workspace.media, tmp_path / "source.mp4", tmp_path, editor,
+        job_manager=workspace.job_manager, project_id=editor.session.id,
+    )
+    qtbot.addWidget(dialog)
+    dialog.start()
+    tasks = workspace.tasks_window
+    try:
+        qtbot.waitUntil(lambda: "about 1m 0s remaining" in dialog.progress_label.text())
+        qtbot.waitUntil(lambda: "about 1m 0s remaining" in dialog.worker.job_handle.record.message)
+        assert not dialog.isVisible() and not tasks.isVisible()
+        dialog.show()
+        assert "then writing and verification" in dialog.progress_label.text()
+        tasks.show_tasks()
+        row = next(
+            row for row in range(tasks.table.rowCount())
+            if tasks.table.item(row, 0).data(Qt.ItemDataRole.UserRole) == dialog.worker.job_handle.id
+        )
+        assert "about 1m 0s remaining" in tasks.table.item(row, 3).text()
+        dialog.hide()
+        finish_separation.set()
+        qtbot.waitUntil(lambda: "Writing full-length" in tasks.table.item(row, 3).text())
+        assert "remaining" not in tasks.table.item(row, 3).text()
+        assert "remaining" not in dialog.progress_label.text()
+    finally:
+        finish_separation.set()
+        finish_writing.set()
+        qtbot.waitUntil(lambda: dialog.worker is None)
+    assert dialog.backing_path == output
+
+
 def test_running_project_does_not_block_edit_save_or_open(workspace, qtbot, tmp_path):
     window = workspace
     a = window.active_editor
