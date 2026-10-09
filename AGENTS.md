@@ -31,6 +31,19 @@ anything blocks delivery, report the blocker and PR URL rather than claiming com
 - Do not delete or prune branches/worktrees belonging to other sessions. Leave cleanup of
   app-managed worktrees to the app.
 
+## Clean up generated output
+
+Builds and tests here make several GB of output (`dist\`, `build\`, `.cache\`, `.venv\`).
+See [docs/CLEANUP.md](docs/CLEANUP.md) for what each path holds and how to remove it.
+
+- Before you finish a task, remove the large output that you made in this task's worktree.
+  Run `.\Clean-Workspace.ps1` (dry run), read the list, then run `.\Clean-Workspace.ps1 -Apply`.
+- Keep output that the user asked for, for example a ZIP to share, and tell the user its path.
+- After a release build, remove the local `dist\v<version>\` and `build\` output.
+- Never delete tracked files, uncommitted work, application user data, the shared build
+  environment while a build can run, or another session's worktree or output.
+- Clean the shared main checkout, `.venv\`, or local branches only when the user asks.
+
 ## Sync with main
 
 1. Before starting edits, run `git fetch origin main` from this task's worktree. Create the

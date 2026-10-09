@@ -9,6 +9,11 @@ isolated branch/worktree, stays current with `origin/main`, and is delivered thr
 submitted PR merged into `main` unless the user limits the scope or a blocker prevents
 completion. Never modify another active session's checkout or work directly on `main`.
 
+## Disk cleanup
+
+Builds make several GB of output in `dist\` and `build\`. Run `.\Clean-Workspace.ps1` for a
+dry run and add `-Apply` to delete. See [docs/CLEANUP.md](docs/CLEANUP.md) for details.
+
 ## Development setup
 
 1. Install Python 3.11 or newer and FFmpeg with `ffmpeg` and `ffprobe` on `PATH`.
