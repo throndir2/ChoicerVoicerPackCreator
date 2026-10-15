@@ -64,7 +64,8 @@ Update the configured path if you move the portable folder.
 
 ### Run from source
 
-Install the project into a Python 3.11+ environment as described in the README, including its MCP
+Install the project into a Python 3.11+ environment as described in
+[docs/DEVELOPMENT.md](../docs/DEVELOPMENT.md#run-from-source), including its MCP
 dependency. Source media work also requires a compatible FFmpeg/FFprobe pair.
 
 ```powershell

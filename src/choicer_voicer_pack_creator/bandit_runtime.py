@@ -52,7 +52,7 @@ def configure_cpu(threads: int) -> Any:
     except (ImportError, OSError) as error:
         raise SeparationError(
             "The optional singing-preserving CPU runtime is unavailable. Source users: follow "
-            "README's singing setup (pinned CPU wheels, then the singing extra). Portable users: "
+            "the singing setup in docs/DEVELOPMENT.md (pinned CPU wheels, then the singing extra). Portable users: "
             "re-extract the complete application; do not install Python or CUDA."
         ) from error
     if (

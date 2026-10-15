@@ -30,7 +30,7 @@ hardware-validation claim.
 
 Automatic generation on import still uses the original all-vocals HTDemucs CPU mode.
 SAM Audio remains an experiment, not an application backend. See
-[automatic BandIt acceleration](../README.md#automatic-bandit-acceleration) for production
+[automatic BandIt acceleration](USER_GUIDE.md#automatic-bandit-acceleration) for production
 behavior; **do not install this GPU comparison environment into the editor**.
 
 The initial target is native Windows, Python 3.11, and an NVIDIA RTX 5080 (16 GB).
