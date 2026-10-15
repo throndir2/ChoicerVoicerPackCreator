@@ -1,0 +1,1078 @@
+# Choicer Voicer Pack Creator user guide
+
+This guide explains every feature of the editor in detail. For a short overview, see the
+[README](../README.md). For build and release steps, see [DEVELOPMENT.md](DEVELOPMENT.md).
+
+> **Unofficial community project.** This project is not affiliated with, endorsed by, or sponsored by the creators of *The Choicer Voicer*. Do not redistribute video, audio, or artwork unless you have permission to do so.
+
+## Install on Windows
+
+Each [GitHub release](https://github.com/throndir2/ChoicerVoicerPackCreator/releases) has two
+Windows downloads with the same application:
+
+- `Choicer-Voicer-Pack-Creator-<version>-Setup.exe` (recommended). Run it to install the editor for
+  the current Windows user. It does not need administrator access. The default folder is
+  `%LOCALAPPDATA%\Programs\Choicer Voicer Pack Creator`. Setup adds a Start menu shortcut, an
+  optional desktop shortcut, and an entry in **Settings > Apps** to uninstall the editor.
+  The installed editor updates itself automatically; see [Application updates](#application-updates).
+- `Choicer-Voicer-Pack-Creator-<version>-Portable-Windows-x64.zip`: the portable folder. Extract it and run
+  the EXE. Portable copies keep their own in-place updater, so older portable copies can still update.
+
+Uninstalling removes the application files only. Projects, media, preferences, logs, and
+downloaded components stay in their own folders.
+
+## Application updates
+
+Installed and portable Windows builds check the public
+[GitHub releases](https://github.com/throndir2/ChoicerVoicerPackCreator/releases) in the background
+on startup. **Prereleases are included by default**, alongside stable releases.
+The **Help → Updates** submenu provides **Check for Updates**, **Check for Updates on Startup**, and
+**Include Prereleases**. An offline or rate-limited automatic check reports its failure in the
+status bar without interrupting your work. Checks contact GitHub, not your media or project files.
+
+### Installed copies (Setup)
+
+An installed editor updates automatically:
+
+1. On startup, it finds the newest release that has a Setup installer.
+2. It downloads that `Setup.exe` in the background and shows the progress in the status bar.
+   The download must match the release's SHA-256 checksum and the GitHub asset digest.
+3. When the download is verified, the editor asks to restart. Choose **Yes** to close the editor,
+   install the update silently, and start the new version. The usual Save / Discard / Cancel
+   decisions protect every unsaved project first.
+4. If you choose **No**, the update installs silently when you close the editor.
+
+The installer waits for the editor to exit before it changes files. It replaces the whole
+`_internal` runtime folder, so files from older versions do not remain, and it restores the old
+runtime folder if the installation fails. After a restart, the status bar shows the new version.
+If the update did not install, a message gives the path of the Setup log. Downloads are kept in
+`%TEMP%\ChoicerVoicerPackCreator-updates` and removed at the next startup.
+A manual **Check for Updates** shows a progress dialog that you can cancel. Failed automatic
+downloads are reported only in the status bar.
+
+### Portable copies (ZIP)
+
+When a newer compatible release is found, you can decline it or download its Windows x64 ZIP.
+Portable updates use the `-Portable-Windows-x64.zip` asset of the release.
+
+**Required update 1.4.1.** Portable copies of 1.4.0 and older always update to 1.4.1 first, also
+when a newer release is available. Release 1.4.1 is the last release that publishes the old ZIP name
+(`-Windows-x64.zip`), which is the only name that these older updaters look for. After a copy runs
+1.4.1, its next update goes to the newest release. A later release can also be a required update.
+The app then labels it "required update" and installs it before any newer release.
+Downloads are cancelable and checked against the release's SHA-256 checksum and GitHub asset
+digest when available. The progress bar covers download, extraction, and new-package verification;
+file-processing steps show the current file, file count, and progress within large files.
+After the download is verified, a separate confirmation offers a restart.
+Save / Discard / Cancel decisions protect every dirty project, not just the selected tab.
+Active tasks must finish or stop cooperatively before exit. The app restarts in the same folder
+and restores its workspace list, including independent unsaved recovery records.
+
+Each new portable package includes `portable-files.json`, an inventory of shipped files. The
+updater replaces only those files and removes obsolete inventoried files. Extra files, projects,
+media, Windows preferences, recovery data, and downloaded Whisper components are not removed.
+Existing application files are not scanned for integrity before replacement: missing files are
+reinstalled, and modified shipped files (including custom FFmpeg binaries) are replaced.
+The inventory must remain valid. Path conflicts, links/junctions, locked files, and permission
+problems prevent an unsafe replacement. The app offers the GitHub release page when preparation
+fails. For a manual update, extract the new release into a separate folder. The updater never
+requests administrator access or
+mirrors/deletes your application folder.
+
+Updates are staged beside the application and installed by a separate process after the editor
+exits. Previous application files, including local modifications, are retained as rollback backups
+until installation succeeds. A failed replacement attempts to restore them and reports any
+incomplete rollback, retaining the staging/backup folder for recovery. If an update is interrupted
+by a power loss or the updater is
+forcibly terminated, keep that `.cvpc-update-*` folder and restore from its `backup` directory or
+extract a fresh release into a separate folder. Do not delete backups until the app works again.
+
+**Existing packages without an updater/inventory need one manual upgrade** to a release containing
+this feature. Extract that release into a new folder rather than merging it over an old package.
+Source checkouts can check releases manually but are never modified by the updater. Release
+checksums verify integrity, not publisher identity; continue to use only the official repository,
+as these builds are not code-signed.
+
+## All features at a glance
+
+- Creates a new project from MP4, MKV, MOV, WebM, OGV, or AVI video.
+- Keeps multiple projects in independent tabs, with an optional separate **Tasks** window.
+- Downloads a single YouTube video from its URL and offers YouTube and local Whisper transcripts
+  side by side, each with its own text and timings.
+- Plays the source video inside the editor. Press **Space** in the video preview, timeline,
+  or segment list to play/pause; spaces still work normally when editing text.
+- Overlays each segment's line during playback with its speaker(s) above it. Subtitles update
+  as you edit, follow seeking and segment timings, and work with saved projects and imported packs.
+  Overlapping lines are shown together; source video and exports are not changed.
+- Keeps the decoded video frame visible when seeking while playback is stopped.
+- Cues playback to a segment's In point when you select or click it in the list or timeline,
+  including another click on the selected segment. Scrub the playhead or click the waveform
+  to seek to an exact point instead.
+- Automatically selects and scrolls to each active segment during video playback, keeping the
+  Selected Segment editor in sync without interrupting playback. Gaps keep the current selection;
+  overlapping lines follow the most recently started segment. Paused editing and single-segment
+  previews keep their selection.
+- Extracts and displays a high-detail, zoomable waveform for precise timing.
+- Marks precise In/Out points in seconds.
+- Cuts unwanted video from the beginning, end, or middle via **Project > Cut Out Video Range**.
+  The remaining video closes the gap, with dialogue timings and backing audio kept in sync.
+- Creates a saved project for a specific scene via **Project > New Project from Scene**.
+  Select a segment or mark an In/Out range first, then repeat to make multiple scene packs
+  from the same video without changing the original project.
+- Adds, previews, splits, combines, duplicates, deletes, and re-times segments.
+- Shift-click or Ctrl-click segment blocks below the waveform to add/remove individual
+  selections. In the segment list, Shift-click selects a range and Ctrl-click toggles a row.
+  Both views highlight the same selection. Right-click either view's segment for **Merge
+  Selected Segments**, **Duplicate**, or **Delete**; a single segment also offers **Play**
+  and **Split at Playhead**. Right-click keeps an existing group selected and does not seek.
+  Merge spans the earliest In through the latest Out (including gaps), joining lines and
+  speakers in timeline order. Preserved prompt recordings must be explicitly regenerated
+  from source-video ranges before merging. Duplicates keep their original timing and media;
+  group duplication or deletion is one undoable edit, with one confirmation for deletion.
+  Press **Backspace** (or **Ctrl+Delete**) to delete the selected segments after confirmation;
+  check **Don't ask again** to skip future segment confirmations. Backspace still works
+  normally when editing text or numbers.
+- Keeps the latest **100 project edits** per open tab. Use **Ctrl+Z** to undo and
+  **Ctrl+Y** or **Ctrl+Shift+Z** to redo. Text fields undo/redo their own typing first;
+  empty local histories fall back to project history. **Project > Edit History** shows the history, restores a selected state,
+  and lets you turn deletion confirmations back on.
+- Resizes or collapses Pack Details, Segments, and Selected Segment so the segment list can use
+	most of the sidebar when needed.
+- Freely shrinks or fully collapses the video/timeline pane; drag the thin divider back to reopen it.
+- Remembers one shared pane layout across project tabs and restarts, including collapsed sections,
+  window size, position, and maximized state. **View > Reset UI Layout** restores the default
+  window and panes for all tabs without changing projects or other preferences.
+- Defines, moves, and trims ranges directly on the waveform; segment blocks also support body and
+	edge dragging. Project checks run in the background after editing settles; newer edits
+	supersede obsolete checks and affected voice work without blocking the editor.
+	Prompt audio from the source video is regenerated on export, not while dragging.
+- Highlights substantial, non-identical segment overlaps for deterministic human review.
+- Offers a one-time initial scan that proposes editable ranges from deterministic audio activity.
+- Optionally downloads a pinned local Whisper CPU runtime/model to draft captions and timestamps;
+	source audio and transcripts are not uploaded.
+- Assigns one or more speakers and an exact performance line to every segment.
+- Duplicates a segment at the same timestamp for independently recorded simultaneous speakers.
+- Imports existing Choicer Voicer pack folders and preserves their prompt audio and still images.
+- Lets an imported segment switch back to source-video audio when its cut needs to be regenerated.
+- Saves a relocatable editable `.cvpack.json` project (media beside the project is stored by relative path).
+- Reopens the last 10 saved or opened projects from **File > Open Recent**, even after restarting.
+- Atomically exports a game-ready folder and sharing ZIP.
+- Finds game recording takes, previews their dubbed video, and exports standalone MP4 videos
+  from **Tools > Recordings**, without changing packs, recordings, or open projects.
+- Validates metadata, references, inventory, PNG signatures, timestamps, codecs, complete media decoding, and ZIP CRC before publishing.
+- Lets an MCP-compatible assistant work with a live visible editor, or an explicitly headless
+	project, using local stdio tools for media review, editing, saving, and validated export.
+- Installs per user with a Windows Setup program that updates itself automatically from public
+  GitHub releases. The portable ZIP is still published and keeps its verified, in-place updates
+  without replacing projects, media, or unrelated files.
+
+## Create a pack
+
+1. Choose **File → New → From Video**.
+2. Once the source is ready, start editing immediately. Transcript analysis, voice-fingerprint
+   preparation, and backing generation use the shared background queue. One bottom status bar
+   shows current activity on the left and export readiness or issues on the right. Routine
+   confirmations such as **Project saved** disappear after five seconds without replacing
+   active work. The readiness link also indicates background work or notices needing attention;
+   those indicators clear when resolved, while the readiness summary stays visible.
+   Click it, or choose **Tools > Background Processing**, to see waveform readiness, transcript,
+   speaker and backing status, export requirements, and full save/notice details in a nonmodal
+   popup. Reported notices remain available until resolved or acknowledged; acknowledging them
+   does not dismiss export requirements or background failures. Processing retains its
+   permission status and cancel/retry controls.
+   **Review** opens the transcript when you want it; the overview never opens automatically,
+   and closing it does not stop processing.
+   Voice preparation starts as dialogue ranges become available, before you name any characters.
+   A shared nonmodal prompt combines requests for
+   missing runtime/model versions across projects. Declining keeps your media and drafts; other
+   workflows continue. Review and explicitly use only the suggestions you want to add.
+3. Assign a speaker and verify every suggested caption and boundary against the source video.
+4. Scrub the video or click the waveform to find any remaining line.
+5. Set **In** at the beginning of the spoken line and **Out** after its final phoneme.
+6. Select **Add Segment**.
+7. Enter the speaker name and the exact line in the right panel.
+8. Repeat for the whole video. Drag segment edges on the timeline for fine adjustments.
+9. Review the generated backing, or choose a custom clean backing track and icon.
+10. Save the editable project.
+11. Choose **Export Pack + ZIP**, review export options, and select an output directory.
+
+Use **Next Unassigned** below the Segments list (or **Segments > Next Line Without a Speaker**)
+to select the next line without a speaker, seek to its start, and focus the speaker field.
+Navigation follows the list's timeline order and wraps to the beginning. With no single line
+selected, it starts at the first unassigned line. It also includes lines marked **Keep unassigned**;
+that setting only excludes automatic matching. If no other line is missing a speaker, a short
+status message appears without changing the selection.
+
+**File > Open Recent** remembers the last 10 successfully opened or saved projects, newest first.
+Opening or saving the same project moves it to the top without duplicates; **Save Project As**
+also remembers the new copy. Entries show the filename and folder so similarly named projects
+can be distinguished. Unsaved new projects, source videos, and imported packs are not added until
+saved as an editable project. **Clear Recent Projects** clears only the list, not any files.
+If a project has moved or is unavailable, reopening it reports the usual error; use **Open Project**
+to find its new location. An already-open project focuses its tab. Opening another project never
+asks you to discard unrelated edits.
+
+### Project workspace and background tasks
+
+Each tab owns its project, selected segment, playback position, range, zoom, analysis drafts, and
+dirty state. Switching tabs pauses the previous audible preview without cancelling processing.
+The tab's `*`, `[working]`, and `[!]` indicators show unsaved edits, work in progress, and errors.
+Completion does not select a different tab.
+
+The permanent menu bar sits directly below the Windows title bar, above the project tabs.
+**File → New** groups **From Video** and **From YouTube**; **File → Import Pack** groups **Folder**
+and **ZIP**. **File** also contains open/recent projects and the active project's save/export/close
+commands. **Project** contains video analysis and backing-track generation; **Segments** contains
+segment editing and preview commands. **Tools > Tasks** and **Help** apply to the whole application.
+**Help → Updates** groups update commands and preferences, and **Help → Diagnostics** groups log
+collection commands; **About** remains directly under **Help**.
+
+Each tab has a compact **Save / Export / Analyze** toolbar above the video in the left pane,
+leaving the full workspace height available to the right-side panels. Its commands and the
+project-related menus always target the active tab. Primary actions pair icons with short labels;
+secondary segment, file-picker, and tab-close controls use icons with descriptive tooltips.
+Hover over a command for its purpose and available shortcut. **File → Close Project** or **Ctrl+W**
+closes the active project, with the same unsaved-change and running-task prompts as its tab's close
+button. The Windows close button or **Alt+F4** exits the application, prompting to save/discard/cancel
+unsaved projects and to stop active tasks before exiting.
+Backing generation remains in Pack Details and the Project menu.
+The right-side sections use the same thin dividers as the video/timeline panes; drag them to
+resize sections, or click a section header to collapse it.
+
+The In/Out fields, segment actions, and timeline zoom share one row below the waveform;
+actions wrap to a second row only when the video pane is too narrow.
+Drag the divider between the video preview and playback controls up or down to give the video
+or timeline more room. The waveform grows with its pane, and the divider position is remembered
+between launches and when restoring each project's workspace view.
+
+Drag local video files (MP4, MKV, MOV, WebM, OGV, or AVI) or saved `.cvpack.json` projects
+anywhere in the main editor window to open each in its own tab, without replacing existing
+work or discarding unsaved edits. Dropping an already-open project focuses its tab instead
+of opening a duplicate. Videos use the same background import and initial processing as
+**File → New → From Video**. Drops over text fields also open tabs rather than inserting file paths;
+ordinary text dragging still edits text. Folders, web links, and other file types are not
+accepted; if a drop mixes supported and unsupported items, none are opened.
+
+Switch projects using their tabs. **Tools > Tasks** opens a separate, nonmodal window only when
+requested; it never opens automatically or takes space from the editor. Filter it to all projects
+or the current project, inspect stage progress and elapsed time, cancel supported work, reopen
+review/details, or open a successful output. Closing the Tasks window does not stop processing.
+CPU, speaker-preparation, I/O, and network budgets bound concurrent work; jobs sharing output
+files or inference components wait rather than overwrite each other. The general CPU queue runs
+one job at a time across projects, with queued waveform and transcript work taking priority over
+backing generation. Voice preparation has its own worker slot and runs alongside those tasks,
+even when the CPU, I/O, and network queues are full. Already-running jobs are not interrupted
+when higher-priority work arrives. Cached voice comparisons use the I/O queue and can finish
+even while backing generation occupies the CPU queue. You can edit or save another project
+while a pack exports, a source opens, or analysis runs.
+
+**Retry** is enabled for failed/canceled analysis, refinement, YouTube imports, exports, and failed
+backing generation when the originating document/source and review are still current. Analysis
+retries retain draft-replacement confirmation; export retries reopen options, destination and overwrite
+confirmation rather than blindly replaying publication. Successful tasks, retired documents,
+superseded sources/backing choices, and workflows without a safe retry are not replayed.
+
+Setup consent is shared for the session and keyed by exact component checksums. Closing one
+requesting project does not dismiss another project's prompt. Setup/download progress is reported
+within its processing task; it is not a separate permanent global job.
+
+Closing a tab with active work offers **Keep processing**, **Cancel tasks and close**, or
+**Keep open**. Keep processing retains a hidden document and its recovery data; **Restore tab**
+in **Tools > Tasks** restores that same tab. Open projects are selected through their tabs, not
+the Tasks window. Processing does not survive application exit.
+
+Click **Export** to review options before any export processing starts. Choose **Fast (480p at
+30 FPS)** for quicker encoding and smaller output, **Higher quality (720p at 30 FPS)** for more
+picture detail with longer encoding times, or **Custom** to edit Height (144-2160 pixels) and
+FPS (1-120). The current quality is shown first: new projects select Fast, while saved settings
+and compatible imported OGV profiles stay selected as a matching preset or Custom.
+
+**Copy compatible imported OGV without re-encoding** avoids conversion when the imported video
+passes compatibility checks and its height/FPS match. Changing Height or FPS turns copying off;
+restoring the original profile makes the original copy preference available again. Merely opening
+the dialog or accepting unchanged settings does not downscale or re-encode compatible imports.
+Expand **Advanced: prompt audio padding** to review head/tail silence (0-2 seconds each) for newly
+generated prompts. Imported prompt recordings are not repadded.
+
+**Continue to export location...** applies the choices to the project, then
+continues through backing music, destination and overwrite decisions. Changed settings mark the
+project unsaved; use **Save** to retain them for next time. Exporting does not save the editable
+project. **Cancel**, Escape, or closing the options dialog leaves the project unchanged and starts
+no export. Cancelling a later destination/overwrite decision keeps accepted edits unsaved.
+Export quality, imported-video preservation, and padding are configured here rather than in
+Pack Details, which stays focused on the title, authors, notes, and media.
+
+Repeat exports to the same destination reuse the previous video conversion when source content,
+height, FPS, and encoding recipe still match and the exported video's checksum is intact.
+Small reuse receipts live in the application's `export-cache` data directory, not in game packs;
+no duplicate video cache is kept. Deleting a receipt or the previous export simply causes the next
+export to encode again. Both desktop and MCP exports use this behavior.
+Prompt generation runs up to two prompts at a time, and generated stills use accurate seeking
+and resizing in one FFmpeg operation. ZIPs store already-compressed media without recompressing it
+and lightly compress metadata; they may be larger, but their contents and game compatibility are
+unchanged. Full staged/published validation and rollback protection remain enabled.
+
+After options and destination confirmation, export opens a progress dialog with the current operation, total and current-step elapsed
+time, and a scrollable activity history without repetitive timestamp prefixes. Video conversion
+processes the **full video before extracting prompts**. Its live status shows encoded video
+position, frame count, percentage, and encoding speed when FFmpeg supplies those measurements.
+It identifies the prompt at that position (number, speaker,
+source range, and caption), or the gap between prompts. If no newer frame is reported for 15
+seconds, the dialog says it is waiting for a newer frame report rather than implying progress.
+Live updates replace the current history entry instead of filling the log.
+
+Each prompt's audio, image, and metadata steps show its identity and source range; parallel prompts
+can interleave in the activity history. Prompt progress counts completely prepared prompts. The dialog
+also reports staged and published media validation, ZIP creation, and publication.
+The **current-step time remaining** and **whole-export time remaining** start with rough workload
+estimates, then adapt to measured video throughput and completed prompt/validation timings.
+The separate **estimated overall progress** bar includes all remaining steps, including ZIP
+creation (when requested), final validation, and cleanup. Estimates can move backward as timings
+change; an unmeasured step that outlasts its estimate shows **re-estimating** instead of a false
+zero-second countdown. Only a successful export reaches 100%. The current-step bar shows measured
+video or completed-prompt progress separately and stays indeterminate for operations without measurable progress.
+The nonmodal details window has a **Hide** button while export runs and **Close** when it finishes. It retains
+output locations, cleanup notes, and failures for later inspection. Export uses a snapshot; edits
+made during export affect the next export, not the one already running.
+
+### Timeline controls
+
+The bottom controls separate the **In/Out** range fields and zoom from the segment actions.
+Hover over the controls or timeline for instructions.
+
+- **Set In / Set Out** copy the current playback position into the range start or end.
+  Changing these fields only marks a range; it does not edit an existing segment.
+- **Add Segment** creates a new segment from the marked In/Out range.
+- **Update Segment Timing** replaces the selected segment's start and end with that range.
+  Dragging a segment or its linked waveform handles updates its timing directly, without this step.
+- **Split at Playhead** divides the selected segment at the white playback line.
+- **Play Selected Segment** plays its saved range and pauses at the end. For preserved prompt
+  audio, it plays the recording instead of the video. It does not preview unapplied In/Out changes.
+
+Timing, split, and segment playback buttons require a single selected segment.
+
+### Combine segments
+
+In the **Segments** list, use **Ctrl-click** to select individual rows or **Shift-click** to select
+a range, then click **Combine** (or **Segments > Combine Selected Segments**, `Ctrl+Shift+M`).
+The selected segments become one segment from the earliest In to the latest Out, including any
+gaps. Their nonempty lines are joined with spaces in timeline order, and their speakers are
+combined without duplicates. Unselected segments are left unchanged.
+
+The combined segment uses source-video audio. Preserved recordings must first be given precise
+source-video In/Out values using **Update Segment Timing** and explicitly switched to regenerated audio.
+A custom still image is retained; if the selection contains different custom stills, the app
+asks before keeping the first one in timeline order. No source media files are deleted.
+Playback keeps a multi-selection intact so you can combine segments while listening.
+Select a single row again to edit or preview an individual segment and resume playback following.
+
+### Analyze and transcribe a video
+
+The nonmodal analysis window opens after **File → New → From Video** and can be reopened with **Project →
+Analyze Video & Suggest Segments** (`Ctrl+Shift+R`). New local-video and YouTube imports both start
+Whisper automatically, subject to download consent, while reopening existing drafts does not rerun it.
+Backing generation, waveform extraction, caption refinement, and transcription are independent tasks;
+waiting for one does not block editing another project. The window also offers a dependency-free activity
+scan with Balanced, Sensitive, and Conservative modes. This scan measures deterministic audio
+energy and suggests possible regions; music, effects, and silence changes can still be false
+positives.
+
+Local transcription is optional. On first use, the app asks before downloading:
+
+- an official, pinned whisper.cpp 1.9.3 Windows x64 CPU runtime (about 8 MiB); and
+- either the multilingual Tiny model (about 74 MiB) or Base model (about 141 MiB).
+
+The app recommends Base when at least 2 GiB of physical memory is currently available and Tiny on
+more constrained systems. The
+CPU runtime automatically selects an optimized instruction-set backend and does not require CUDA.
+Every download uses an immutable upstream revision and is checked for exact size and SHA-256 before
+use. Components are cached in the current user's local application-data directory, while temporary
+analysis audio and transcript JSON are deleted after each scan.
+
+Results list editable In/Out values and draft captions. Double-click a line or use **Play Selected
+Whisper Line** (or **Play Selected Range** for an activity-only scan) to audition it. Uncheck unwanted
+lines, correct text, then use the highlighted **Use Whisper Transcript** action. **Rerun Whisper**
+is a separate, secondary action. Existing drafts stay editable during a rerun; if they change
+before it finishes, the new candidate requires an explicit replacement decision. Existing segments
+are never replaced. Suggested segments initially have no speaker. Name a reviewed dialogue segment
+to start optional background matching, or assign every speaker manually.
+Whisper is probabilistic and can mishear names, stylized vocalizations, non-English speech, music,
+or overlapping speakers, so every result remains review evidence rather than authoritative data.
+One language selection applies to an entire scan; use Auto-detect for primarily single-language
+sources, or rerun selected-language passes when a video deliberately mixes languages. Long videos
+also receive conservative free-disk and memory checks before analysis begins.
+
+New Whisper and YouTube drafts include **up to 0.15 seconds of source audio before**
+and **0.25 seconds after** each range. These are real audio handles, not inserted silence, so
+slightly early consonants and trailing syllables can survive extraction. Short gaps are shared
+at their midpoint to avoid introducing overlaps; touching ranges have no room for extra audio,
+and already-overlapping rows retain their boundaries. The shown, previewed, saved, and imported
+In/Out values include these handles once. Existing saved drafts and manual segment edits are not
+automatically repadded. Adjust In/Out by ear when a boundary still clips speech.
+
+Whisper retains its full segment range rather than shrinking it to lexical-token offsets:
+even complete, ordered token timestamps can exclude a final word, while zero-duration tokens
+can lose the first word. This conservative choice may leave extra silence or music to trim
+manually. Neither segment timings nor small audio handles guarantee phoneme-accurate alignment,
+particularly with music. Export's
+separate head/tail padding still inserts silence around the selected source range; increasing
+that silence cannot recover speech already cut out of the source.
+
+Model download is setup, not transcription completion. The window identifies download,
+checksum verification, model loading, and audio processing as separate steps. During transcription
+it shows Whisper's reported percentage of audio processed and elapsed time; model loading and
+the first audio block show an elapsed-time status until Whisper reports measurable progress.
+The scan button says **Whisper Running** while busy and is not highlighted. **Cancel Scan** remains
+available. Runtime startup and transcription have generous time limits so a stalled process reports
+an error rather than waiting indefinitely, without removing saved drafts.
+
+### Import a YouTube video
+
+Choose **File → New → From YouTube** and paste a video URL. The destination defaults to your
+Windows **Downloads** folder unless a previous location was selected; clearing the field also
+uses Downloads. You can choose a different folder. Only download material you own or have
+permission to use. New videos create a
+`YouTube-<video-id>-<unique-id>` folder. When a matching import already exists in the selected
+location, choose **Use Existing**, **Overwrite**, or **Cancel**. If several copies exist, select
+the folder to use. **Use Existing** is available only for a complete, readable video with audio;
+it skips the video download and fetches the title and selected-language captions again.
+Incomplete downloads must be overwritten. **Overwrite** downloads and checks the replacement
+before replacing source download files, preserves other files in the folder, and restores
+previous media if publication fails. Projects referencing the replaced media may be affected.
+Save your `.cvpack.json`
+beside that folder to keep the project relocatable; downloaded media is not a temporary cache.
+The suggested project filename removes characters Windows cannot use in filenames, trims
+trailing dots/spaces, and avoids reserved device names. If nothing remains, it uses `Dub Pack`.
+The original video title stays unchanged in the project; exported folder/ZIP names use the
+same cleanup.
+The downloader retrieves the best available video/audio and may merge them into MKV.
+Download percentages combine the selected video and audio transfers. Estimates are labeled and
+may pause when sizes change or a transfer retries, but do not move backward. Unknown-size
+transfers, merging, checking, and publication show indeterminate progress. **Ready** means the
+checked video has been successfully published to its media folder.
+
+Network work runs in isolated processes so **Cancel** can stop a blocked connection, DNS
+lookup, or media tool. Video-detail requests have a 60-second limit per attempt; caption
+requests have a 30-second limit. A stalled or failed connection is retried once using IPv4,
+which can help networks with broken IPv6 connectivity. This does not bypass YouTube access
+restrictions. Waiting stages show elapsed time and are included in diagnostic bundles.
+Transfers stop after 2 minutes without advancing bytes; media preparation allows up to
+10 minutes without progress, and the final video check allows 60 seconds. Healthy transfers
+have no overall duration limit. Failed caption requests still fall back to local Whisper,
+and canceled or failed imports never publish partial media.
+
+YouTube can provide timestamped creator captions or automatic speech-recognition captions.
+**Caption language** defaults to **English (en)**, including regional English tracks when needed.
+The importer prefers creator captions in the selected language and otherwise uses available
+automatic captions in that language; it does not silently substitute another language.
+Select another language or type a code such as `pt-BR` to use that language's captions when
+available. **Original language (auto)** is an opt-in choice that uses YouTube's language metadata
+where available. YouTube-generated translations are excluded, but creator-uploaded tracks can
+themselves be translations. If the chosen language has no usable captions, the import reports
+that and falls back to local Whisper. Caption delivery can fail independently of the video download.
+
+The **YouTube** panel stays empty until a local audio-only refinement pass finishes on a
+background task, then selects the processed draft for review and use. Unprocessed YouTube
+captions are never displayed or offered for import. Refinement requires no model download;
+original caption evidence stays in the project for regeneration, not as another transcript choice.
+Whisper starts independently, asking permission first if its runtime/model must be downloaded.
+Its result appears alongside YouTube in the **Whisper Transcript**
+panel without changing the selected draft. Each transcript keeps its own row count, text, and
+In/Out boundaries: a longer Whisper passage is not
+forced onto shorter YouTube captions or flagged as a conflict. You can edit, preview, and uncheck
+rows in each draft independently.
+The playback button names the chosen source: **Play Selected YouTube Line** or
+**Play Selected Whisper Line**.
+
+To adjust pause-aware segmentation, use the **YouTube** panel and click
+**Refine YouTube Again...**. Refinement and Whisper have separate task entries and cancellation. Refinement
+uses the original imported YouTube words, not edits made to either draft.
+New imports retain YouTube's available word/text-fragment offsets. Refinement uses these
+boundaries together with measured audio pauses to split lines and conservatively join display
+fragments, rather than treating subtitle display windows as spoken phrases. **Minimum pause**
+defaults to **0.40 seconds** and can be adjusted from 0.20 to 1.00 seconds before refining again.
+Changing the setting alone does not rewrite a draft.
+
+Refinement never invents equally spaced word timings or splits an untimed phrase. Rows without
+usable timing metadata stay as whole phrases with
+the same conservative source-audio handles and a note in the **Source** column. Hover over that
+column to read the full note. Review every
+suggested boundary: this pass measures audio energy, not speaker identity, so music/effects can
+hide pauses and two speakers without a pause can still share a row. It does not correct
+misrecognized words, perform forced alignment, or separate overlapping voices.
+
+For more accurate cuts, choose **Align Words...** in the **YouTube** panel. This optional
+pass uses a larger local Whisper model to align the original caption words against audio
+with neighboring-caption context. It corroborates the alignment with independent recognition,
+corrects shared boundaries together, adds bounded real-source audio margins, and recognizes
+the proposed cuts again to flag missing opening/closing words or neighboring speech. Caption
+text is preserved; the independent transcript is evidence, not replacement text. This is
+especially useful for creator captions that contain only whole-line display timestamps.
+
+The first use requests permission for approximately 1.5 GB of checksum-verified model files.
+Valid cached files are reused; permission also covers repairing invalid components. The model
+is not included in the portable ZIP. Processing is CPU-based, stays local, and may take several
+minutes. It has its own cancellable task, shares the inference resource with ordinary Whisper,
+and requires enough available memory to leave room for the editor and operating system.
+No audio or captions are uploaded.
+
+Uncertain rows remain in the draft with **Review timing** notes in **Source**, but start
+unchecked. Audition and adjust them before checking them for use. Recognition and confidence
+scores cannot guarantee that every syllable is intact; translations, overlapping voices,
+unusual names, repeated words, long captions, and unsupported alignment can require manual
+review. Continuous sentences are not automatically joined across potential speaker changes.
+Both quick refinement and alignment leave original caption evidence and existing project
+segments untouched. Replacing a completed draft requires confirmation; edits made while
+alignment is waiting or running are kept until the new result is explicitly applied. Saved
+drafts retain corrected boundaries, review notes, confidence, and checked states.
+
+**Export head/tail padding adds silence**, not missing source audio. Use corrected In/Out
+boundaries to recover clipped words; increasing export padding alone cannot fix an early
+ending or late start.
+
+Click **Use YouTube Transcript** or **Use Whisper Transcript** directly below the
+draft you want. Both buttons remain visible; you do not need to select that source first.
+Each button is enabled when its draft is ready and at least one row is checked.
+Click a row in a draft or its **Select** control to choose it for playback and the Enter-key
+Use action; merely finishing a background Whisper run does not select it.
+The checked rows from that source become editable project segments with that source's timings
+and no assigned speakers. Other sources are not mixed in. Playback also uses the chosen draft's
+own edited In/Out range. Choosing an available draft does not cancel another running task.
+Existing project segments are never
+silently replaced; adding another set requires confirmation.
+
+If captions are unavailable, the same automatic Whisper pass drafts suggestions from the audio.
+Declining Whisper setup or a failed/canceled/empty Whisper scan leaves downloaded media and all
+existing drafts intact. **Whisper model (next scan)** and **Spoken language (next scan)** affect
+only a new run; they do not select or change an existing transcript. The current local draft
+shows the model and detected language from its last successful nonempty scan, also after
+saving and reopening the project. Drafts without model information say **model not recorded**.
+If a larger model fails due to memory limits, click **Use Whisper Transcript** below the
+retained draft to use it without rerunning.
+If all rows are unchecked, check at least one before using the transcript.
+If automatic refinement fails, is canceled, or returns no rows, no original rows are shown as a
+fallback. The independent Whisper task is unaffected; either pass can be retried manually.
+Any previously completed refined draft is retained.
+**Cancel Scan** keeps the analysis window open. **Keep Drafts & Close** hides the review while
+manager-owned work continues in the background (inspect it through **Tools > Tasks**), and
+retains all available drafts, including edits, checked rows, source selection, and the pause setting, without adding
+segments. Draft changes are included in recovery snapshots and **Save Project**, just like other
+project edits. **Project → Analyze Video & Suggest Segments** restores completed drafts without
+rerunning analysis. If refinement has never completed, reopening resumes that pass without
+starting Whisper. A successful Whisper rescan replaces only the local draft after confirmation;
+refining again replaces only the YouTube draft after confirmation. A failed or canceled
+scan keeps its previous result. Original YouTube caption evidence, fragment timings, and the source URL
+are also retained. Replacing or clearing the source video clears its caption evidence and drafts.
+
+The portable build includes pinned yt-dlp, its JavaScript solver, and Deno, and uses its existing
+FFmpeg tools; no extra end-user installation is required. YouTube import contacts YouTube and its
+media servers, but local Whisper does not upload your audio or captions. Playlists, live/upcoming
+streams, and age-/sign-in-restricted videos are unsupported. Downloads may fail because of
+availability, rate limits, or upstream changes; the importer does not use browser cookies or
+attempt access-restriction workarounds. An authorized local copy can still be opened with
+**File → New → From Video**. Downloader/solver updates ship with application updates.
+
+### Direct waveform editing
+
+- Zoom in to reveal finer waveform detail rather than widely spaced overview lines. Peaks are
+  drawn at the visible pixel scale, and ruler labels show hundredths or milliseconds when needed.
+- Hold the right mouse button and drag to pan a zoomed-in timeline without moving the playhead
+  or editing ranges. Right-click a segment block without dragging to open its context menu;
+  empty waveform space has no context menu.
+- Drag the white playback line or its top arrow to scrub without changing any ranges. The arrow
+  remains draggable when the line overlaps an In/Out handle or a segment block.
+- Drag across empty waveform space to define a new In/Out range.
+- Drag the cyan **IN** or orange **OUT** handle to trim the range precisely.
+- Drag inside the highlighted waveform range to move it without changing its duration.
+- Drag the center of an existing segment block to move that segment, or either edge to trim it.
+- Press **Esc** during a drag to cancel it. The In/Out number fields remain available for exact
+	entry.
+
+For source-video prompts, a range change automatically affects the MP3 generated during the next
+export. The editor does not create or destructively replace prompt MP3s while dragging. Imported or
+manually selected audio files are preserved by default; after changing one of their ranges, the app
+asks whether to keep that recording, regenerate from source video, or undo the range change.
+
+### Deterministic review assistance
+
+The editor highlights pairs of segments that overlap by more than 125 ms and lists the exact overlap
+duration in the status tooltip. Exact duplicate ranges with disjoint speaker assignments remain
+unflagged because they intentionally support simultaneous speakers; duplicates that repeat any
+speaker are flagged. These amber notices are review evidence, not export-blocking errors; the tool
+never moves a range automatically.
+
+During an edit, the last warnings remain visible as pending, not as current export readiness.
+Only checks for the latest edit can replace them. Repeated drags coalesce into the newest request;
+timing-only releases reuse the segment table's existing cells and selection. Voice preparation
+retains reusable fingerprints: changing a speaker name only requires comparison, and changing one
+audio range does not restart unrelated preparation. **Cancel** in processing/task details pauses
+that work until an explicit resume; automatic supersession is not a user cancellation.
+Explicit saves and exports are independent of these advisory checks and retain their revision,
+validation, and transactional publication guarantees.
+
+Experimental Silero VAD, OCR, and game-dialogue lookup tools were evaluated but
+are not treated as correctness oracles. Their existing results varied with model settings, merged
+speakers, missed stylized vocalizations, or produced timing that did not match the spoken cut.
+Whisper was integrated only as an explicitly optional local drafting tool with pinned provenance;
+it never assigns speakers or silently changes project data. Exact lines still require human review
+against the decoded source.
+
+Backing separation is used only to create music/effects audio, not to infer captions, speakers or
+timings. When no backing is selected, the export dialog offers generation or an explicit
+**Export without music** choice. The exporter never puts the original voices under new recordings.
+
+The exporter stages and validates every file before replacing an existing output. It retains the
+previous folder and ZIP until the newly published copies have been hash-checked and fully validated.
+A failed publication restores both previous artifacts.
+
+## Cutting video and creating scene projects
+
+Set the timeline's In/Out range (or select a segment), then open either video-range command
+from **Project**. Review or adjust the range, preview it, and choose a folder for the result.
+Cuts remove that time from the video, not just a dialogue entry; **Delete Segment** still
+only removes the prompt. A scene project starts at zero and opens in its own tab.
+
+Original media is never overwritten. Each operation saves its own project and lossless
+edited media in a new subfolder of the chosen location; allow enough disk space for the
+retained video, which can be substantially larger than the original. Keep this folder:
+the project references its media. Processing runs in the background and can be cancelled
+from **Tools > Tasks**.
+
+After a cut, use **Save Project** to keep the change in the current project file. If that
+project changes during processing, the cut version opens separately instead of overwriting
+your newer edits. Dialogue and transcript text crossing a cut boundary is kept for review:
+adjust the wording if the cut removes part of a line. A boundary through a preserved prompt
+recording is refused; move the boundary outside that prompt, or explicitly switch it to
+source-video audio before cutting.
+
+## Undo and redo
+
+History covers segment changes, captions and speakers, pack details, media selections,
+export settings, analysis drafts and accepted suggestions, automatic speaker batches,
+assistant edits in the live editor, and completed video cuts/backing selections.
+Continuous typing and timeline drags are grouped into edits. New edits after undo discard
+the redo branch. Each tab has independent history; closing it or restarting clears history.
+
+Undo/redo prepares the restored project and its validation in a background job, then
+updates the segment list in short batches so the application remains responsive.
+It restores references to existing media, rather than copying or regenerating media.
+Keep source and generated files at their recorded paths. Automatic speaker matching is
+paused after a restore so it does not immediately replace restored names; edit a speaker
+or resume **Speaker matching** in **Tools > Background Processing**.
+
+Saving and exporting, downloads, filesystem changes, creating/closing tabs, playback,
+and application preferences are not project edits and are not rolled back. Undo does
+not remove or rewrite saved/exported files; save the restored project explicitly to
+update its project file.
+
+## Saving and recovery
+
+**Save Project** updates the current editable project JSON. Before replacing an existing project,
+the editor retains one previous version beside it with a `.previous` suffix. **File → Restore
+Previous Save** opens that version in a separate unsaved tab. Neither the existing tab nor the
+current saved file is replaced.
+
+**Save Project As** writes a separate project and does not modify the original project. Project
+saves store edit decisions and media references; they do not rewrite imported source packs or media.
+Saving is asynchronous and revision-aware: saving revision N cannot clear unsaved edits made while
+that save runs. Two open documents cannot save to the same project path.
+
+While editing, the app also writes debounced recovery snapshots to the current Windows user's local
+application-data directory, in a separate namespace for each document, including unsaved projects.
+The workspace list and recoveries restore separate tabs without overwriting project files. If the
+saved file changed after recovery was recorded, the recovery opens as a separate unsaved copy.
+Save or explicit Discard clears only that document's snapshot.
+If a saved project becomes unreadable, opening it offers its adjacent previous version.
+Export independently stages every generated file and retains rollback copies until the new folder
+and ZIP pass final validation.
+
+## Modify an existing pack
+
+1. Choose **File → Import Pack → Folder** for a folder containing `_pack_info.ini`, or
+   **File → Import Pack → ZIP** for an exported archive.
+2. Existing MP3 and PNG assets are preserved by default.
+3. Edit captions, speakers, or timeline positions.
+4. Packs with a valid app manifest restore the original spoken cut, so **Use source-video audio**
+	can explicitly regenerate it. Other packs store only a trigger timestamp and padded recording.
+	For those, mark the exact source-video In/Out range, click **Update Segment Timing**, and choose
+	**Yes** when asked whether to regenerate the prompt audio.
+5. Save as a `.cvpack.json` project, then export.
+
+When one recording is reused at multiple timestamps, import expands it into independent editable segments. Exporting then gives each occurrence its own triplet.
+
+Unknown metadata fields, extra sections, and noncanonical files are reported at import. They remain
+untouched in the source folder but are not silently represented as supported. The app refuses to
+overwrite an imported source pack; export a canonical copy to another directory or under another
+title. This protects custom extensions that the editor cannot round-trip.
+
+If a project is moved without its media, use the **Choose** control beside Video, Backing, Audio
+file, or Still image to relink the missing asset.
+
+## Background speaker matching
+
+With **Auto-fill speaker names** enabled in the Segments panel, finish
+typing a speaker name (Enter or move focus out of the field) to compare that voice with eligible
+unassigned segments. You can keep editing captions, timings, and other projects while it runs.
+Rapid name edits are coalesced with a short delay before comparison.
+Typing updates only the edited name and defers whole-project validation until a brief
+pause or commit. Committing a name and applying automatic matches update existing table cells
+without rebuilding the segment list or disturbing its selection and scroll position.
+For the best reference, name a clear, single-speaker dialogue line of about 2 seconds or more,
+rather than an isolated name or reaction. Naming other characters helps reject competing voices;
+you can also manually name more clean lines for the same character to strengthen its reference.
+New video imports prepare name-independent fingerprints from eligible transcript draft ranges
+before those drafts are added as segments. New or retimed segments are prepared incrementally.
+Preparation does not wait for transcription, backing generation, or other CPU-queued work to
+finish, so cached voices can be ready sooner when you name a segment.
+Whisper and YouTube drafts keep their independent ranges; identical ranges share cached fingerprints.
+No names are guessed during preparation, and unfinished or short draft ranges are skipped.
+The first use requests permission for a checksum-verified WeSpeaker voice model (about 25 MiB).
+Inference is local, needs no account or token, and does not upload audio or transcripts.
+Matching runs automatically after a name edit; no matching button is needed in the Segments panel.
+Use **Tools > Background Processing > Speaker matching** to **Start** a pass, **Retry** a
+failure, **Resume** paused work, or **Cancel**. Cancel pauses both preparation and automatic
+matching until resumed. The existing status bar indicates active work or attention needed;
+open Background Processing for progress and permission details. Tasks are also available in
+**Tools > Tasks**.
+
+Only strong matches fill blank names. Existing names are never replaced. Results for segments
+edited, removed, or retimed during processing are discarded; changing a reference name causes a
+new comparison using the latest inputs. Completion does not move the playhead, select a different
+segment, or replace the caption being edited. Automatic names are shown in italics with a review tooltip and saved in the editable project
+but are never reused as trusted voice references. Edit a name yourself to provide a reference.
+New manually added segments start unassigned when matching is enabled.
+
+**Filled N speaker name(s)** appears briefly in the status bar and remains in Background Processing.
+It reports only the names applied by that pass. A count of zero is not
+an error: uncertain or short clips stay unassigned. Try a longer, clean reference line as described
+above, or assign the remaining speakers manually.
+
+Clearing a name deliberately checks **Keep unassigned (skip auto-fill)**. Uncheck it on that
+segment to include it again. **Project > Clear last auto-filled names** clears unchanged names
+from the last automatic batch in the current tab, keeps those segments unassigned, and preserves
+subsequent manual edits. This selective clear is available only during the current session;
+it does not undo intervening edits.
+The project-wide enabled setting and each segment's assignment/exclusion state survive saving.
+Automatic changes mark the project unsaved; use **Save Project** to persist them.
+
+Voice signatures are cached locally by model/preprocessing version, source-file identity, and
+audio range, independently of names or segment IDs. Naming a prepared line uses only cached
+signatures: it does not load or verify a model, decode audio, or launch inference. Missing,
+damaged, or stale signatures return to the bounded preparation queue rather than doing expensive
+work in the comparison task.
+Preparation uses at most two inference threads and does not run full-video speaker diarization.
+Each clip uses at most its central 12 seconds, with at least 0.75 seconds of audible activity
+required; this bounds the work but does not prove the sampled clip contains only one speaker.
+Matching uses training-matched WeSpeaker cosine cutoffs, with stricter evidence when only one
+character has been named or its references are short, and a required lead over competing named voices.
+References whose duration is unknown also use the stricter cutoff. Similarity scores are
+not confidence percentages. A new preprocessing cache version rechecks previously skipped short
+clips without downloading the model again.
+Source media and preserved prompt recordings are never modified. Closing a tab with
+**Keep processing** retains its pending work; quitting the application stops it.
+
+This identifies similar voices, not fictional character identities. Short or silent clips,
+nonverbal-only captions such as `[grunting]` or `Ugh...`, multiple-speaker assignments, and ambiguous
+matches are skipped. Music, overlapping dialogue, shouting, impersonations, or one actor playing
+several characters can still fool the model. Similarity scores are not accuracy percentages:
+review automatic names before exporting. Reopening a saved project does not start matching by
+itself; finish a name edit or use **Start** in Background Processing.
+
+## Simultaneous speakers
+
+Use **Duplicate Segment** to create a second prompt at exactly the same timestamp, then change its speaker and line. This lets each actor record independently while both performances play together. A single metadata item may also list multiple comma-separated speakers when one shared recording is desired.
+
+## Audio and backing tracks
+
+For newly cut segments, prompt audio comes from the source video. The exporter normalizes it and adds 150 ms head / 250 ms tail padding by default; both values are editable. Imported or manually chosen prompt files are preserved when already MP3 and converted otherwise.
+
+**File → New → From Video** and **From YouTube** automatically queue music/effects backing along with
+transcript analysis and voice preparation, without opening processing popups or a mode picker.
+Automatic generation always uses **Remove all vocals (dialogue and singing)** with HTDemucs,
+regardless of the saved manual preference, and never replaces selected backing. The analysis review's
+transcript selection does not control backing generation: choosing a transcript, canceling a scan,
+or closing the review leaves backing queued or running independently. **Tools > Tasks** retains each job's
+progress and error log and offers explicit cancellation, retry, and details, even after the
+transcript review is closed.
+The first run asks permission to download a pinned, checksum-verified
+HT-Demucs model (approximately 302 MiB). Processing runs locally on the CPU; audio is never uploaded.
+The verified model is retained for offline reuse. Missing or damaged model data requires download
+permission again.
+
+Generation has progress and cancellation and may take several minutes. Both backing modes show
+an approximate remaining **separation** time in the generation details and **Tools > Tasks**,
+based on this run's average time per completed chunk. The first chunk shows "estimating";
+the estimate updates at each subsequent chunk, not as a live countdown. Downloading, loading,
+decoding, and final writing/verification are separate stages, not included in that estimate.
+HTDemucs mixes its drums, bass and other stems, excluding vocals, into a full-length backing
+aligned with the video. Separation is approximate: some dialogue can bleed through and some
+effects or singing may be removed. Listen to the result before sharing. Prompt extraction
+still uses the source video's original audio.
+
+Use **Generate backing** in Pack Details or **Project → Generate Backing Track** at any time.
+The on-demand dialog offers **Remove all vocals (dialogue and singing)** or
+**Keep singing; remove dialogue**, followed by **Generate**. The latter uses the
+Facing the Music BandIt combined model: it keeps music (including singing) and effects, and removes
+speech. Its optional, checksum-verified model is approximately 426 MiB and licensed
+**CC BY-NC 4.0 for non-commercial use**; its source is Apache-2.0. Download permission is required
+before first use, and verified cached weights work offline. See **Help → About** and
+`THIRD_PARTY_NOTICES.md` for attribution and terms. Portable builds include the CPU runtime;
+no GPU or external Python installation is needed.
+Eligible NVIDIA systems can optionally accelerate BandIt after a **separate runtime-download
+confirmation**; model permission alone never authorizes that larger download.
+
+If automatic backing is queued, running, or waiting for download permission, open the same action
+and select **Cancel and choose mode...**. The old request must stop and release its resources
+before a fresh picker opens. Choose **Keep singing; remove dialogue** and **Generate** there.
+Closing or hiding a started dialog keeps processing in **Tools > Tasks**; **Cancel** stops it.
+Retry retains the original mode and permission request. Starting a manual request saves its mode
+as a project preference (including undo/redo); merely opening or dismissing the picker changes nothing.
+
+If backing is already selected, regeneration asks before replacing the project's selection. It writes
+a new durable audio file under per-user application data, never over the original backing or video.
+Captions, speakers, segment boundaries, analysis drafts, prompt MP3s and still images are not changed.
+Save the project afterward to retain its new backing reference. Keep application data/media files
+when moving a project, or relink them using **Choose**.
+BandIt uses bounded, full-length 48 kHz stereo processing and one whole-track clipping-safety gain.
+It can take longer and need more memory than HTDemucs; resource failures are reported without
+silently changing the selected model. Separation remains approximate in both modes.
+Its eight-second windows advance one second at a time, with separate inference for the left
+and right channels. The CPU path uses one or two admitted threads; automatic NVIDIA acceleration
+uses the same verified model and float32 separation math, not a different quality setting.
+
+Developers can use the separate [singing-preservation comparison](SEPARATION_COMPARISON.md)
+for local reference evaluation; its GPU research setup is not required by the editor.
+
+You can still choose a custom clean backing track. Declining/canceling automatic generation keeps
+the import and lets you edit normally. If no backing is selected at export, choose generation or
+explicitly **Export without music**; the latter creates the required duration-matched silent MP3.
+Exports also report a warning when an existing or generated backing is silent or below -60 dBFS.
+The source video's original mixed dialogue is never used as automatic backing.
+
+### Automatic BandIt acceleration
+
+**Keep singing; remove dialogue** automatically considers an NVIDIA GPU; there is no device
+picker or persistent setting. **Remove all vocals** remains the existing CPU-only HTDemucs path.
+CUDA candidates require **Windows x64, CPython 3.11 or 3.12**, and an NVIDIA driver supporting
+**CUDA 12.8**. Portable builds already include the matching Python runtime: recipients do not
+install Python, pip, a CUDA toolkit, or the developer comparison environment.
+AMD and Intel GPUs are CPU-only for this feature; DirectML, ROCm, and other GPU backends are not used.
+
+When an eligible GPU is detected but its optional runtime is missing, a one-time setup prompt
+reports the approximate download size from the pinned wheel sizes (several GiB). This is
+**separate from the approximately 426 MiB BandIt model download**. Accepting installs official,
+SHA-256-verified Windows wheels for **`torch==2.8.0+cu128` and `torchaudio==2.8.0+cu128`**, matched
+to the app's CPython 3.11/3.12 ABI, into an isolated per-user application-data cache. Verified
+runtime files, metadata, and license notices are retained for offline reuse. The always-installed
+**`torch==2.8.0+cpu` and `torchaudio==2.8.0+cpu`** remain unchanged. Allow additional disk space
+for extraction as well as the download. Model license restrictions still apply.
+
+**Cancel in the optional runtime prompt continues this generation on CPU**; it does not discard
+your editing work. Model-download consent is still required if the model itself is unavailable.
+Retry within the same dialog retains both the model permission and your runtime choice without
+repeated prompts. Use the generation dialog's or task's cancellation control to stop the job itself.
+
+A GPU name or successful detection is not a compatibility guarantee. Before processing your
+track, an isolated worker must load the verified model and complete a **full eight-second,
+float32 warmup on both stereo channels**, checking the actual architecture, driver, and available
+VRAM. The GPU architecture must be supported by the pinned wheel, and the preliminary check
+requires at least **3.5 GiB free VRAM** (3 GiB plus 512 MiB headroom). This is a conservative
+screening threshold, not a measured peak or guarantee that the real model will fit. Unsupported or
+unavailable hardware/driver/runtime, insufficient VRAM or host RAM for the GPU attempt, or a
+recoverable GPU failure uses the unchanged CPU backend if its own resource checks pass.
+After a recoverable GPU-worker failure, that worker exits and a fresh CPU
+worker retries once; it does not continue with partial GPU output. Cancellation is not a fallback
+request. The generation details and **Tools > Tasks** report execution/fallback progress. The
+measured separation ETA resets for the CPU attempt instead of reusing GPU timings.
+
+Both paths preserve float32 inference without TF32 or reduced-precision/autocast substitutions:
+48 kHz, eight-second windows, one-second hop, independent left/right inference, and the same
+whole-track clipping-safety gain. GPU/CPU results are not promised to be bit-identical.
+Hardware-specific compatibility, speed, and full-window VRAM fit still require native-machine
+evidence; implementation and synthetic tests alone are **not** a hardware-validation claim.
+
+### Add missing music to a pack
+
+1. Open the saved `.cvpack.json` project. If only the export remains, use **File → Import Pack → ZIP**
+   or **Folder**. ZIP media is extracted into a unique durable application-data folder;
+   the original archive is not changed.
+2. Click **Generate backing** (or **Regenerate backing** for a silent MP3), choose the desired mode,
+   select **Generate**, and approve model download/replacement if prompted.
+   The included `dub_video.ogv` retains the original audio in
+   app-generated packs, so there is no need to redownload or transcribe the video.
+3. **Save Project As**, then **Export Pack + ZIP** into a new output directory.
+
+The existing dialogue text, speakers, trigger timestamps and imported prompt media are preserved.
+Do not start a new project or rerun transcription to repair backing. Imported packs recover the
+exported dialogue and recordings, and valid app manifests also restore known unpadded cut boundaries.
+They cannot recover unsaved editor drafts or source information that was never stored in the ZIP.
+
+## Recording playback and video export
+
+Open **Tools > Recordings** to browse recording takes and export them as ordinary videos.
+The first use asks for the Choicer Voicer **game data folder**, normally
+`%APPDATA%\YeahMaybe\ChoicerVoicer\game` on Windows. The application remembers this
+location for all projects and looks for packs in `packs_voice` and takes under
+`recordings\dub_recordings`. Group folders are supported, for example
+`packs_voice\Honkai Star Rail\<pack>` with takes in
+`recordings\dub_recordings\Honkai Star Rail\<pack>\<take>`. Setup is on demand, never a startup prompt. If the saved
+location moves or becomes unavailable, use **Game Location** to locate it again.
+
+The game does not need to be installed: **Open Recording Folder** also accepts an
+individual dated take, a pack's recording folder, or a recordings collection.
+Use **Choose Pack > Folder / ZIP** to supply its original pack. ZIP imports are kept
+in application-local storage; the ZIP is not changed. Refresh the library to discover
+new takes. Selecting a recording does not import it into the segment editor.
+
+Recordings are matched to prompt filenames after removing the game's `_dubrecord_`
+prefix. Playback timestamps come from the original pack's metadata, not numbers in
+filenames or the currently edited project's segment timings. Ambiguous matches require
+choosing a pack. Matching filenames alone cannot prove that an installed pack is the
+exact version used when the recording was made.
+
+Select a take and choose **Play**. Preparing the first preview mixes the recorded WAVs
+on the video's timeline, including overlapping voices, then plays one synchronized
+video/audio file. Space in the recording list or video toggles playback. The seek bar,
+listening volume, and fullscreen controls do not edit the source files. Starting
+recording playback pauses the editor, and starting editor playback pauses the recording.
+**Clip Details** lists the recorded files, speakers, timestamps, durations, and warnings.
+
+The mix uses recorded voices and the pack's separate backing track only; it never adds
+the video's embedded dialogue or substitutes original prompts for missing recordings.
+Without backing, playback is **voices only**. Choose a clean backing file if desired.
+The **Voices** and **Backing** percentages affect both preview and export; **Volume**
+affects listening only. Changes to the mix require preparing a new preview.
+
+**Export Video** saves an MP4 using the source resolution and frame rate. Review warnings
+about missing clips, unknown files, or recordings extending past the video before
+continuing. The video keeps its original length; recorded audio past its end is cut off.
+Software OpenH264 is used when available in the selected FFmpeg; otherwise the app
+warns before using MPEG-4 Part 2/AAC, which is not accepted by every browser or sharing
+service. Recording export does not require adding a GPL encoder to the portable build.
+Exports run in **Tools > Tasks**, can be cancelled, and are staged before replacing an
+existing output after confirmation. Closing the Recordings window hides it and pauses
+playback, but does not cancel a running export. **Open Video** and **Show in Folder** are
+available when export completes. Keep the original pack and recordings unchanged while
+processing; changed inputs require refreshing and preparing again.
+
+## Export checks
+
+Every GUI export performs built-in fail-closed checks for:
+
+- canonical Godot-style metadata values and CRLF line endings;
+- Theora/Vorbis video, 48 kHz mono prompt MP3s, and a 44.1 kHz stereo backing MP3;
+- prompt audibility, decoded duration, and physical head/tail silence;
+- PNG signatures and prompt-image dimensions matching the exported video;
+- exact folder inventory, full FFmpeg decodes, per-file hashes, ZIP inventory, and ZIP CRC;
+- final published copies while rollback backups are still available.
+
+## Collecting logs for support
+
+Logging is automatic; users do not need a console or a debug setting. **Help → Diagnostics → Save Diagnostic
+Bundle** saves a ZIP of recent application, analysis, and native crash logs with version
+information. The same action is available in the YouTube import and analysis windows, including
+while a task is running. Reproduce the issue, save the bundle, and send that ZIP with the approximate
+time of the problem and a description of what the app displayed. If the app crashed, reopen it
+and save the bundle before repeatedly retrying. Nothing is uploaded automatically.
+
+**Help → Diagnostics → Open Diagnostic Logs** or **Open Logs** in the analysis window opens the storage folder.
+On Windows it is normally
+`%LOCALAPPDATA%\ChoicerVoicerCommunity\Choicer Voicer Pack Creator\analysis\logs`.
+It is outside the portable application folder, so logs survive application upgrades. The exact
+analysis log path is also shown in the analysis window and error messages. If the app cannot
+start, collect the files directly from this folder.
+
+`application.log` contains UTC timestamps, application-session and worker-operation IDs,
+thread/process details, application/Python/Qt/downloader versions, startup and UI handoffs,
+YouTube download/merge/caption stages, Whisper download consent, media-tool execution, project saves/recovery, pack
+import/export, update activity, and exceptions with tracebacks. `analysis.log` retains focused
+per-analysis evidence: setup and checksum stages, CPU/memory/disk information,
+model loading, audio-processing progress, subprocess commands,
+Whisper's technical stderr, elapsed-time heartbeats, exit codes (including hexadecimal Windows
+codes), failures, and cancellation/termination. This distinguishes "download finished" from
+"Whisper launched", "processing audio", and "result reached the review window".
+
+Entries are flushed as they are written; canceling or restarting does not erase the logs.
+Application and analysis logs each retain three rotated backups (`.1` through `.3`), with a 2 MiB
+target per file. `crash.log` captures Python stacks on supported fatal native errors and retains
+three previous launches; an external forced termination or power loss cannot produce a crash stack.
+The last progress/heartbeat can still identify where that run stopped. Bundle snapshots include
+at most the last 2 MiB of each known log file and never copy arbitrary files from the log folder.
+Logging/storage failures are reported rather than silently ignored.
+
+Logs and bundles contain no media, model downloads, project files, or normal transcript stdout.
+They contain local file paths and technical errors, which can still reveal filenames or other
+personal information. URL queries/fragments, URL credentials, common credential fields, and the
+current user's home-directory prefix are redacted from structured logs and bundles. Native crash
+files on disk can contain unredacted code paths; the bundle redacts these before sharing.
+**Review the ZIP before sending it.** Logs stay local and are not added to exported game packs.
+
+## MCP integration
+
+See [MCP/README.md](../MCP/README.md) for client configuration, tool usage, privacy information,
+and troubleshooting. The portable package includes this guide at `MCP\README.md`, beside
+`MCP\Choicer Voicer MCP.exe`. MCP setup is not part of the editor's menus.
+
+## Pack format
+
+An exported pack contains:
+
+```text
+My Pack/
+├── _pack_info.ini
+├── _cvpc_metadata.json
+├── icon.png
+├── dub_video.ogv
+├── _backing_track.mp3
+├── 001_Speaker.mp3
+├── 001_Speaker.png
+├── 001_Speaker.txt
+└── ...
+```
+
+Each clip metadata file is a Godot `ConfigFile` section:
+
+```ini
+[data]
+
+caption="The line to perform."
+image="001_Speaker.png"
+dub_timestamps=[12.345]
+dub_characters=["Speaker"]
+```
+
+`dub_timestamps` values are seconds from the start of the video. Newly generated prompts receive physical head/tail silence, and their exported timestamp is moved earlier by the head-padding amount so synchronization remains exact.
+
+### App export manifest
+
+`_cvpc_metadata.json` is a versioned app manifest, separate from the game's INI/TXT
+metadata. It records the exporter name and **app version**, manifest schema version,
+stable pack and segment IDs, a unique export ID and UTC time, and SHA-256 hashes of
+every game file (excluding the manifest itself). Extracted scene packs receive new
+pack IDs and retain their parent pack ID; renaming, saving, cutting, and re-exporting
+the same project retain its identity.
+
+For known cuts, each segment records the exact unpadded In/Out range, actual head/tail
+padding, game trigger timestamp, and exported filenames. Times are relative to the
+exported video, not necessarily the original online video. Unknown imported cuts
+remain explicitly unknown. Verified manifests restore precise ranges on import while
+preserving the existing recordings and their playback alignment. Export padding
+settings and caption language are also retained.
+
+YouTube-derived packs include the original video's public canonical watch URL, with
+tracking, playlist, and seek parameters removed. This URL is included in the shared
+folder and ZIP. Local source paths, machine/user identifiers, analysis drafts, logs,
+and project history are never included. The manifest does not duplicate game captions,
+speakers, titles, authors, or readme text, and is not a substitute for saving the
+editable `.cvpack.json` project.
+
+The manifest schema, **not the exporter app version**, controls how it is read.
+Malformed, unsupported, or stale manifests produce an import warning; the app falls
+back to game metadata without applying the manifest's provenance or original cuts.
+Exports validate the manifest and full inventory before and after publication.
+Ordinary packs without a manifest remain supported. Hashes detect mismatched files,
+not authenticity: anyone can edit a manifest and recompute its hashes.
+
+JSON avoids the `.txt` clip discovery used by our Godot validator and the `.txt`/`.ini`
+discovery in our importer. This is not an in-game compatibility guarantee; actual
+ChoicerVoicer loading must also be checked when qualifying a release.

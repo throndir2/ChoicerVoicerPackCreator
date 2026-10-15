@@ -22,7 +22,7 @@ dry run and add `-Apply` to delete. See [docs/CLEANUP.md](docs/CLEANUP.md) for d
 4. Run `pytest` and `ruff check .` before submitting a change.
 
 For the optional singing-preserving source backend, use Windows x64 CPython 3.11 or 3.12 and
-follow [the CPU setup commands](README.md#optional-singing-preserving-cpu-backend), installing
+follow [the CPU setup commands](docs/DEVELOPMENT.md#optional-singing-preserving-cpu-backend), installing
 `tools\singing-cpu-wheels.txt` with isolated pip, `--no-index --no-deps --require-hashes` before
 `".[dev,singing]"` from public PyPI. Do not substitute PyPI's plain torch wheels or globally
 downgrade NumPy. This backend restriction does not change the core `requires-python >=3.11`.
