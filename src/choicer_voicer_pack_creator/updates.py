@@ -34,6 +34,8 @@ SETUP_MARKER = "setup-install.json"
 # Keep in sync with installer/ChoicerVoicerPackCreator.iss.
 RUNNING_MUTEX = "ChoicerVoicerPackCreatorRunning"
 SETUP_PREFIX = "cvpc-setup-"
+# The release workflow adds this hidden marker to the notes of a required release.
+REQUIRED_UPDATE_MARKER = "<!-- cvpc:required-update -->"
 MAX_ARCHIVE_BYTES = 1024**3
 MAX_EXPANDED_BYTES = 3 * 1024**3
 BUFFER_SIZE = 1024 * 1024
@@ -98,6 +100,8 @@ class Release:
     checksum_url: str
     digest: str | None
     installer: bool = False
+    # A required release must be installed before any newer release.
+    required: bool = False
 
     @property
     def archive_name(self) -> str:
@@ -130,7 +134,16 @@ class PreparedSetup:
 def asset_name(version: str, *, installer: bool = False) -> str:
     if installer:
         return f"Choicer-Voicer-Pack-Creator-{version}-Setup.exe"
+    return f"Choicer-Voicer-Pack-Creator-{version}-Portable-Windows-x64.zip"
+
+
+def legacy_portable_asset_name(version: str) -> str:
+    """The ZIP name that 1.4.0 and older updaters look for; only the bridge release has it."""
     return f"Choicer-Voicer-Pack-Creator-{version}-Windows-x64.zip"
+
+
+def is_required_release(body: object) -> bool:
+    return isinstance(body, str) and REQUIRED_UPDATE_MARKER in body
 
 
 def version_key(value: str) -> tuple[int, int, int, bool, tuple[tuple[bool, int | str], ...]]:
@@ -258,11 +271,16 @@ def find_release(
             candidates.append(Release(
                 version, tag, prerelease, archive["browser_download_url"], size,
                 checksum["browser_download_url"], digest, installer,
+                is_required_release(item.get("body")),
             ))
         if len(data) < 100:
             break
     else:
         raise UpdateError("Too many GitHub release pages; use the releases page to update manually.")
+    # Step through the oldest required release first; otherwise take the newest release.
+    required = [release for release in candidates if release.required]
+    if required:
+        return min(required, key=lambda release: version_key(release.version))
     return max(candidates, key=lambda release: version_key(release.version), default=None)
 
 

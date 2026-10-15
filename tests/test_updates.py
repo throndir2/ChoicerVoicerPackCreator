@@ -43,10 +43,11 @@ def file_contents(root: Path) -> dict[Path, bytes]:
     }
 
 
-def release_json(version: str, *, prerelease: bool = False) -> dict:
-    name = f"Choicer-Voicer-Pack-Creator-{version}-Windows-x64.zip"
+def release_json(version: str, *, prerelease: bool = False, required: bool = False) -> dict:
+    name = updates.asset_name(version)
     return {
         "tag_name": f"v{version}", "draft": False, "prerelease": prerelease,
+        "body": f"{updates.REQUIRED_UPDATE_MARKER}\nRequired." if required else "Notes",
         "assets": [
             {
                 "name": filename, "size": 500,
@@ -787,7 +788,7 @@ def test_installed_copies_find_setup_assets_and_portable_copies_keep_zip(monkeyp
     assert setup.installer and setup.archive_size == 700
     assert setup.archive_url.endswith("/Choicer-Voicer-Pack-Creator-0.7.0-Setup.exe")
     assert portable.version == "0.8.0" and not portable.installer
-    assert portable.archive_url.endswith("-0.8.0-Windows-x64.zip")
+    assert portable.archive_url.endswith("-0.8.0-Portable-Windows-x64.zip")
 
 
 def setup_staging(monkeypatch, tmp_path: Path) -> Path:
@@ -880,3 +881,32 @@ def test_setup_marker_identifies_installed_copies(tmp_path) -> None:
     assert not updates.is_setup_installation(tmp_path)
     (tmp_path / updates.SETUP_MARKER).write_text("{}")
     assert updates.is_setup_installation(tmp_path)
+
+
+def test_required_release_is_installed_before_newer_releases(monkeypatch) -> None:
+    fake_releases(monkeypatch, [
+        release_json("0.9.0"), release_json("0.7.0", required=True),
+        release_json("0.8.0", required=True), release_json("0.6.0"),
+    ])
+    first = updates.find_release("0.5.1")
+    assert (first.version, first.required) == ("0.7.0", True)
+    assert updates.find_release("0.7.0").version == "0.8.0"
+    assert updates.find_release("0.8.0").version == "0.9.0"
+    assert not updates.find_release("0.8.0").required
+
+
+def test_required_prerelease_is_skipped_on_the_stable_channel(monkeypatch) -> None:
+    fake_releases(monkeypatch, [
+        release_json("0.7.0-rc.1", prerelease=True, required=True), release_json("0.6.0"),
+    ])
+    assert updates.find_release("0.5.1", include_prereleases=False).version == "0.6.0"
+    assert updates.find_release("0.5.1").version == "0.7.0-rc.1"
+
+
+def test_portable_asset_name_differs_from_the_legacy_bridge_name() -> None:
+    # Updaters in 1.4.0 and older match only the legacy name, so they stop at the bridge release.
+    assert updates.legacy_portable_asset_name("1.4.1") == (
+        "Choicer-Voicer-Pack-Creator-1.4.1-Windows-x64.zip"
+    )
+    assert updates.asset_name("1.4.2") == "Choicer-Voicer-Pack-Creator-1.4.2-Portable-Windows-x64.zip"
+    assert updates.asset_name("1.4.2") != updates.legacy_portable_asset_name("1.4.2")

@@ -1065,3 +1065,19 @@ def test_failed_background_setup_download_does_not_interrupt(
         and "GitHub download failed" in window.statusBar().currentMessage()
     )
     assert dialogs.calls == []
+
+
+def test_required_portable_update_is_labeled_in_the_prompt(
+    qtbot, monkeypatch, make_window, dialogs, release, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(update_controller, "installation_directory", lambda: tmp_path)
+    monkeypatch.setattr(
+        update_controller, "find_release",
+        lambda **_kwargs: dataclasses.replace(release, required=True),
+    )
+    window = make_window()
+    window.updater.check(manual=True)
+    qtbot.waitUntil(lambda: "Update available" in dialogs.titles)
+
+    assert "This is a required update." in dialogs.calls[0][2]
+    assert window.updater.worker is None
