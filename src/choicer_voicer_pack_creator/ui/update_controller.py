@@ -305,6 +305,10 @@ class UpdateController(QObject):
             f"Version {release.version}{' (prerelease)' if release.prerelease else ''} "
             f"is available on GitHub. You are running {__version__}.\n\n"
         )
+        if release.required:
+            message += (
+                "This is a required update. Install it before newer versions can be installed.\n\n"
+            )
         if target is None:
             message += "Source installations cannot update in place. Open the release page?"
         else:

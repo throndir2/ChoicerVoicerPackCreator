@@ -206,8 +206,16 @@ Keep publishing both assets with their exact names. Installed copies (folders th
 `setup-install.json`) find the newest release with a `-Setup.exe` asset, download and verify it,
 and run it silently with `/WAITPID`, `/UPDATEDIR`, and optionally `/RELAUNCH=1`. The `[Code]`
 section of `installer/ChoicerVoicerPackCreator.iss` handles these parameters; keep them compatible
-across releases. Portable copies, including older releases, still update only with the ZIP.
+across releases. Portable copies update only with the ZIP.
 Keep the installer AppId and the `ChoicerVoicerPackCreatorRunning` mutex name unchanged.
+
+Portable ZIPs are named `Choicer-Voicer-Pack-Creator-<version>-Portable-Windows-x64.zip`. Updaters
+in 1.4.0 and older look only for the old name `...-<version>-Windows-x64.zip`. The workflow uses
+the old name only for the bridge version in `LEGACY_PORTABLE_BRIDGE` (1.4.1), so those copies
+always update to 1.4.1 first. Never publish the old name for another version.
+The workflow input **required_update** adds the hidden `<!-- cvpc:required-update -->` marker to
+the release notes. Updaters from 1.4.1 install the oldest newer release with this marker before
+any newer release. Add or remove the marker by editing the notes of a published release.
 
 The portable build also generates `portable-files.json` after all application files have been
 assembled. Keep this inventory and the exact versioned Windows ZIP/checksum asset names: the

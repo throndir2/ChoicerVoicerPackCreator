@@ -251,7 +251,7 @@ Windows downloads with the same application:
   `%LOCALAPPDATA%\Programs\Choicer Voicer Pack Creator`. Setup adds a Start menu shortcut, an
   optional desktop shortcut, and an entry in **Settings > Apps** to uninstall the editor.
   The installed editor updates itself automatically; see [Application updates](#application-updates).
-- `Choicer-Voicer-Pack-Creator-<version>-Windows-x64.zip`: the portable folder. Extract it and run
+- `Choicer-Voicer-Pack-Creator-<version>-Portable-Windows-x64.zip`: the portable folder. Extract it and run
   the EXE. Portable copies keep their own in-place updater, so older portable copies can still update.
 
 Uninstalling removes the application files only. Projects, media, preferences, logs, and
@@ -310,8 +310,8 @@ non-commercial restrictions; the inference source is Apache-2.0. See About and t
 The finished outputs are:
 
 ```text
-dist/v1.4.0/portable-<build-id>/Choicer Voicer Pack Creator/
-dist/v1.4.0/Choicer-Voicer-Pack-Creator-1.4.0-Windows-x64.zip
+dist/v1.4.1/portable-<build-id>/Choicer Voicer Pack Creator/
+dist/v1.4.1/Choicer-Voicer-Pack-Creator-1.4.1-Portable-Windows-x64.zip
 ```
 
 The script prints the exact generated application-folder path. Each rebuild uses a new path to avoid
@@ -355,8 +355,8 @@ current user, run `winget install --id JRSoftware.InnoSetup -e --scope user`. Th
 `installer\ChoicerVoicerPackCreator.iss` and writes these files beside the ZIP:
 
 ```text
-dist/v1.4.0/Choicer-Voicer-Pack-Creator-1.4.0-Setup.exe
-dist/v1.4.0/Choicer-Voicer-Pack-Creator-1.4.0-Setup.exe.sha256
+dist/v1.4.1/Choicer-Voicer-Pack-Creator-1.4.1-Setup.exe
+dist/v1.4.1/Choicer-Voicer-Pack-Creator-1.4.1-Setup.exe.sha256
 ```
 
 The installer contains the same files as the ZIP, plus a `setup-install.json` marker. The marker
@@ -394,6 +394,13 @@ downloads are reported only in the status bar.
 #### Portable copies (ZIP)
 
 When a newer compatible release is found, you can decline it or download its Windows x64 ZIP.
+Portable updates use the `-Portable-Windows-x64.zip` asset of the release.
+
+**Required update 1.4.1.** Portable copies of 1.4.0 and older always update to 1.4.1 first, also
+when a newer release is available. Release 1.4.1 is the last release that publishes the old ZIP name
+(`-Windows-x64.zip`), which is the only name that these older updaters look for. After a copy runs
+1.4.1, its next update goes to the newest release. A later release can also be a required update.
+The app then labels it "required update" and installs it before any newer release.
 Downloads are cancelable and checked against the release's SHA-256 checksum and GitHub asset
 digest when available. The progress bar covers download, extraction, and new-package verification;
 file-processing steps show the current file, file count, and progress within large files.
@@ -1280,8 +1287,8 @@ with another compatible pair.
 .\Build-Portable.ps1
 ```
 
-The Windows application folder is written below `dist/v1.4.0/portable-<build-id>/`, with a
-shareable `Choicer-Voicer-Pack-Creator-1.4.0-Windows-x64.zip` beside it. The first build downloads
+The Windows application folder is written below `dist/v1.4.1/portable-<build-id>/`, with a
+shareable `Choicer-Voicer-Pack-Creator-1.4.1-Portable-Windows-x64.zip` beside it. The first build downloads
 about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. The stable sharing ZIP is not
 replaced until both the application folder and a clean ZIP extraction pass packaged smoke tests.
 Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or
@@ -1300,7 +1307,10 @@ manually selects **Actions → Create GitHub Release → Run workflow**. It read
 `pyproject.toml`, builds and smoke-tests the portable Windows package, builds the Setup installer,
 creates tag `v<version>`, and publishes a GitHub Release. The release contains the Setup EXE, the
 portable ZIP, and a SHA-256 checksum file for each. Keep both asset names unchanged: installed
-copies update with the Setup EXE, and portable copies, including older ones, update with the ZIP.
+copies update with the Setup EXE, and portable copies update with the `-Portable-Windows-x64.zip`.
+Only release 1.4.1 uses the old `-Windows-x64.zip` name, so that portable copies of 1.4.0 and older
+always update to 1.4.1. Select **Required update** when you run the workflow to make a release
+that all older copies must install before a newer release.
 Running it again without
 bumping the project version fails before the expensive build rather than replacing an existing
 release or tag. Releases are restricted to the canonical `main` branch.

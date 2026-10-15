@@ -21,7 +21,7 @@ from textwrap import dedent
 import deno
 from ffmpeg_bundle import prepare_bundle
 
-from choicer_voicer_pack_creator.updates import write_portable_manifest
+from choicer_voicer_pack_creator.updates import asset_name, write_portable_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 with (ROOT / "pyproject.toml").open("rb") as project_file:
@@ -653,7 +653,7 @@ def build_candidate() -> int:
             return 1
     _audit_cpu_inventory(app_dir)
     write_portable_manifest(app_dir, APP_VERSION)
-    stable_archive = DIST / f"Choicer-Voicer-Pack-Creator-{APP_VERSION}-Windows-x64.zip"
+    stable_archive = DIST / asset_name(APP_VERSION)
     candidate_archive = portable_root / f".{stable_archive.name}.candidate"
     partial_archive = portable_root / f".{stable_archive.name}.partial"
     try:

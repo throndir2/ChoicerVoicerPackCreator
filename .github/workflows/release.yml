@@ -9,6 +9,11 @@ on:
         required: true
         default: false
         type: boolean
+      required_update:
+        description: Required update (older copies must install this release before newer ones)
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -23,6 +28,9 @@ jobs:
     timeout-minutes: 45
     env:
       QT_QPA_PLATFORM: offscreen
+      # The only release that also uses the old ZIP name. Updaters in 1.4.0 and older look only
+      # for that name, so they always update to this version. Never change it to a later version.
+      LEGACY_PORTABLE_BRIDGE: "1.4.1"
     steps:
       - name: Check out source
         uses: actions/checkout@v5
@@ -82,13 +90,20 @@ jobs:
         env:
           APP_VERSION: ${{ steps.release.outputs.version }}
         run: |
-          $zip = "dist/v$env:APP_VERSION/Choicer-Voicer-Pack-Creator-$env:APP_VERSION-Windows-x64.zip"
+          $zip = "dist/v$env:APP_VERSION/Choicer-Voicer-Pack-Creator-$env:APP_VERSION-Portable-Windows-x64.zip"
           if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) {
             throw "Release ZIP was not generated: $zip"
+          }
+          if ($env:APP_VERSION -eq $env:LEGACY_PORTABLE_BRIDGE) {
+            # Updaters in 1.4.0 and older find only this name, so they always update to this release.
+            $legacy = "dist/v$env:APP_VERSION/Choicer-Voicer-Pack-Creator-$env:APP_VERSION-Windows-x64.zip"
+            Move-Item -LiteralPath $zip -Destination $legacy
+            $zip = $legacy
           }
           $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           $filename = [IO.Path]::GetFileName($zip)
           "$hash  $filename" | Out-File -FilePath "$zip.sha256" -Encoding ascii
+          "PORTABLE_ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Create GitHub release and upload assets
         shell: powershell
@@ -97,8 +112,9 @@ jobs:
           APP_VERSION: ${{ steps.release.outputs.version }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_REQUIRED: ${{ inputs.required_update }}
         run: |
-          $zip = "dist/v$env:APP_VERSION/Choicer-Voicer-Pack-Creator-$env:APP_VERSION-Windows-x64.zip"
+          $zip = $env:PORTABLE_ZIP
           $setup = "dist/v$env:APP_VERSION/Choicer-Voicer-Pack-Creator-$env:APP_VERSION-Setup.exe"
           $arguments = @(
             "release", "create", $env:RELEASE_TAG,
@@ -109,6 +125,13 @@ jobs:
             "--title", "Choicer Voicer Pack Creator $env:APP_VERSION",
             "--generate-notes"
           )
+          if ($env:RELEASE_REQUIRED -eq "true") {
+            # The hidden marker makes updaters install this release before any newer release.
+            $notes = Join-Path $env:RUNNER_TEMP "required-update-notes.md"
+            $text = "<!-- cvpc:required-update -->`n**Required update.** Older copies update to this version before they can install a newer version.`n"
+            [IO.File]::WriteAllText($notes, $text, (New-Object Text.UTF8Encoding($false)))
+            $arguments += @("--notes-file", $notes)
+          }
           if ($env:RELEASE_PRERELEASE -eq "true") {
             $arguments += "--prerelease"
           }
