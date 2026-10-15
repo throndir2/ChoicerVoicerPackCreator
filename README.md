@@ -106,7 +106,9 @@ Open **Tools > Recordings** to browse recording takes and export them as ordinar
 The first use asks for the Choicer Voicer **game data folder**, normally
 `%APPDATA%\YeahMaybe\ChoicerVoicer\game` on Windows. The application remembers this
 location for all projects and looks for packs in `packs_voice` and takes under
-`recordings\dub_recordings`. Setup is on demand, never a startup prompt. If the saved
+`recordings\dub_recordings`. Group folders are supported, for example
+`packs_voice\Honkai Star Rail\<pack>` with takes in
+`recordings\dub_recordings\Honkai Star Rail\<pack>\<take>`. Setup is on demand, never a startup prompt. If the saved
 location moves or becomes unavailable, use **Game Location** to locate it again.
 
 The game does not need to be installed: **Open Recording Folder** also accepts an

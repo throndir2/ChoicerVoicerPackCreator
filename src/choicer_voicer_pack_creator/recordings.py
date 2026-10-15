@@ -14,6 +14,8 @@ from choicer_voicer_pack_creator.operations import SourceSnapshot, check_cancell
 from choicer_voicer_pack_creator.pack_io import _WINDOWS_RESERVED_NAME, _safe_pack_reference
 
 _MAX_ENTRIES = 10_000
+# The game mirrors grouped packs (packs_voice\Group\Pack) in dub_recordings\Group\Pack\take.
+_MAX_FOLDER_DEPTH = 8
 _MAX_METADATA_BYTES = 1024 * 1024
 _MAX_LIBRARY_METADATA_BYTES = 32 * 1024 * 1024
 _PREFIX = "_dubrecord_"
@@ -379,8 +381,11 @@ def _find_takes(root: Path, budget: _Budget) -> tuple[TakeInfo, ...]:
         children = tuple(path for path in paths if path not in file_set)
         if files or not children:
             takes.append(_take(folder, files, paths))
-        if children and depth >= 2:
-            raise ValueError(f"Unexpected nested recording folders below {folder}; select a take.")
+        if children and depth >= _MAX_FOLDER_DEPTH:
+            raise ValueError(
+                f"Recording folders are nested more than {_MAX_FOLDER_DEPTH} levels "
+                f"below {root}; select a take."
+            )
         for child in children:
             visit(child, depth + 1)
 
@@ -401,29 +406,50 @@ def match_take(take: TakeInfo, packs: tuple[PackInfo, ...]) -> tuple[PackInfo, .
     )
 
 
+def _find_packs(root: Path, budget: _Budget, warnings: list[str]) -> list[PackInfo]:
+    """A folder without _pack_info.ini that holds subfolders is a pack group."""
+    packs: list[PackInfo] = []
+
+    def visit(paths: tuple[Path, ...], depth: int) -> None:
+        for path in paths:
+            check_cancelled()
+            name = str(path.relative_to(root))
+            report(f"Discovering pack: {name}")
+            try:
+                if _regular_file(path):
+                    warnings.append(f"Unrecognized file in packs_voice: {name}.")
+                    continue
+                if not (path / "_pack_info.ini").exists():
+                    children = _entries(path, budget)
+                    if any(not _regular_file(child) for child in children):
+                        if depth >= _MAX_FOLDER_DEPTH:
+                            raise ValueError(
+                                f"Pack folders are nested more than {_MAX_FOLDER_DEPTH} levels."
+                            )
+                        visit(children, depth + 1)
+                        continue
+                packs.append(_read_pack(path, budget))
+            except DiscoveryLimitError:
+                raise
+            except (OSError, ValueError, UnicodeError) as error:
+                message = f"Cannot read pack {name}: {error}"
+                warnings.append(message)
+                packs.append(PackInfo(path, path.name, None, None, (), (message,), (message,)))
+
+    visit(_entries(root, budget), 0)
+    return packs
+
+
 def scan_library(location: GameLocation) -> RecordingLibrary:
     resolved = resolve_game_location(location.root)
     if resolved != location:
         raise ValueError("Game location paths do not match its known game layout.")
     budget = _Budget()
-    packs = []
+    packs: list[PackInfo] = []
     takes = ()
-    warnings = []
+    warnings: list[str] = []
     if location.packs_path.is_dir():
-        for path in _entries(location.packs_path, budget):
-            check_cancelled()
-            report(f"Discovering pack: {path.name}")
-            try:
-                if _regular_file(path):
-                    warnings.append(f"Unrecognized file in packs_voice: {path.name}.")
-                    continue
-                packs.append(_read_pack(path, budget))
-            except DiscoveryLimitError:
-                raise
-            except (OSError, ValueError, UnicodeError) as error:
-                message = f"Cannot read pack {path.name}: {error}"
-                warnings.append(message)
-                packs.append(PackInfo(path, path.name, None, None, (), (message,), (message,)))
+        packs = _find_packs(location.packs_path, budget, warnings)
     else:
         warnings.append(f"Pack directory does not exist: {location.packs_path}")
     if location.recordings_path.is_dir():

@@ -110,6 +110,25 @@ def test_library_keeps_invalid_packs_unmatched_takes_and_ambiguity_visible(tmp_p
     assert any("no matching pack" in warning for warning in library.warnings)
 
 
+def test_library_discovers_grouped_packs_and_their_mirrored_take_folders(tmp_path):
+    root = tmp_path / "game"
+    pack = make_pack(root / "packs_voice" / "Honkai Star Rail" / "Acheron Ultimate HSR")
+    (root / "packs_voice" / "Honkai Star Rail" / "notes.txt").write_text("group file")
+    take = make_take(
+        root / "recordings" / "dub_recordings" / "Honkai Star Rail" / "Acheron Ultimate HSR"
+        / "2026-10-14 22_00_00",
+    )
+    library = scan_library(resolve_game_location(root))
+    assert [item.path for item in library.packs] == [pack]
+    assert not library.packs[0].errors
+    assert [item.path for item in library.takes] == [take]
+    assert library.takes[0].pack_name == "Acheron Ultimate HSR"
+    assert match_take(library.takes[0], library.packs) == library.packs
+    assert library.warnings == (
+        f"Unrecognized file in packs_voice: {Path('Honkai Star Rail', 'notes.txt')}.",
+    )
+
+
 @pytest.mark.parametrize(
     "value", ["[-0.1]", "[NaN]", "[Infinity]", "[true]", '["1"]', "[]", "1", f"[{10**400}]"],
 )
@@ -167,6 +186,8 @@ def test_missing_recordings_remain_visible(tmp_path):
 def test_discovery_limits_and_cancellation_are_explicit(tmp_path, monkeypatch):
     folder = make_take(tmp_path / "pack" / "take")
     (folder / "nested" / "one" / "two").mkdir(parents=True)
+    assert len(find_takes(folder)) == 2
+    monkeypatch.setattr(recordings, "_MAX_FOLDER_DEPTH", 2)
     with pytest.raises(ValueError, match="nested"):
         find_takes(folder)
     monkeypatch.setattr(recordings, "_MAX_ENTRIES", 1)
