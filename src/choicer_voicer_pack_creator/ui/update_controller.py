@@ -20,14 +20,21 @@ from choicer_voicer_pack_creator.diagnostics import (
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 from choicer_voicer_pack_creator.updates import (
     RELEASES_URL,
+    PreparedSetup,
     PreparedUpdate,
     Release,
     UpdateCancelled,
     UpdateError,
+    discard_setup_updates,
     find_release,
     installation_directory,
+    is_setup_installation,
+    is_setup_result,
+    launch_setup,
     launch_update,
+    prepare_setup_update,
     prepare_update,
+    read_setup_result,
     read_update_result,
 )
 
@@ -43,13 +50,14 @@ class UpdateWorker(JobWorker):
 
     def __init__(
         self, *, include_prereleases: bool, release: Release | None = None,
-        target: Path | None = None,
+        target: Path | None = None, installer: bool = False,
     ) -> None:
         super().__init__()
         self.include_prereleases = include_prereleases
         self.release = release
         self.target = target
-        self.result: Release | PreparedUpdate | None = None
+        self.installer = installer
+        self.result: Release | PreparedUpdate | PreparedSetup | None = None
         self.error = ""
         self.was_cancelled = False
 
@@ -64,11 +72,12 @@ class UpdateWorker(JobWorker):
             if self.release is None:
                 with diagnostic_operation(
                     "update_check", include_prereleases=self.include_prereleases,
-                    current_version=__version__,
+                    current_version=__version__, installer=self.installer,
                 ):
                     self.result = find_release(
                         include_prereleases=self.include_prereleases,
                         cancelled=self.isInterruptionRequested,
+                        **({"installer": True} if self.installer else {}),
                     )
                     diagnostic_event(
                         "update_check_result", available=self.result is not None,
@@ -85,7 +94,8 @@ class UpdateWorker(JobWorker):
                         "update_download_requested", version=self.release.version,
                         archive_bytes=self.release.archive_size,
                     )
-                    self.result = prepare_update(
+                    prepare = prepare_setup_update if self.release.installer else prepare_update
+                    self.result = prepare(
                         self.release, self.target, report, self.isInterruptionRequested
                     )
                     diagnostic_event(
@@ -109,13 +119,16 @@ class UpdateController(QObject):
         self.window = window
         self.worker: UpdateWorker | None = None
         self.progress: QProgressDialog | None = None
-        self.prepared: PreparedUpdate | None = None
-        self.downloaded: PreparedUpdate | None = None
+        self.prepared: PreparedUpdate | PreparedSetup | None = None
+        self.downloaded: PreparedUpdate | PreparedSetup | None = None
+        # A verified installer that runs silently when the editor closes.
+        self.install_on_exit: PreparedSetup | None = None
         self.pending_release: Release | None = None
         self.prompt_active = False
         self.cancel_requested = False
         self.manual = False
         self.shutting_down = False
+        self.download_percent = -1
         self.check_action = menu.addAction("Check for Updates...")
         self.check_action.triggered.connect(lambda: self.check(manual=True))
         menu.addSeparator()
@@ -152,13 +165,22 @@ class UpdateController(QObject):
             return  # Source checkouts offer manual discovery, never self-replacement.
         if result_directory is not None:
             self._show_result(result_directory, target)
+        if is_setup_installation(target):
+            discard_setup_updates(keep=result_directory)
         if self.auto_action.isChecked():
             self.startup_timer.start(3000)
 
     def check(self, *, manual: bool) -> None:
         if (
+            manual and self.install_on_exit is not None and not self.worker
+            and not self.prompt_active and not self.shutting_down
+        ):
+            self.downloaded, self.install_on_exit = self.install_on_exit, None
+            self._ready_to_install()
+            return
+        if (
             self.worker or self.prepared or self.downloaded or self.pending_release
-            or self.prompt_active or self.shutting_down
+            or self.install_on_exit or self.prompt_active or self.shutting_down
         ):
             diagnostic_event("update_check_skipped", manual=manual, reason="busy_or_shutting_down")
             return
@@ -174,7 +196,10 @@ class UpdateController(QObject):
             self.startup_timer.stop()
         self.window.statusBar().clear_issue("update")
         self.window.statusBar().showMessage("Checking GitHub for updates...")
-        self._start_worker(UpdateWorker(include_prereleases=self.prerelease_action.isChecked()))
+        self._start_worker(UpdateWorker(
+            include_prereleases=self.prerelease_action.isChecked(),
+            installer=is_setup_installation(installation_directory()),
+        ))
 
     def _start_worker(self, worker: UpdateWorker) -> None:
         self.cancel_requested = False
@@ -194,6 +219,13 @@ class UpdateController(QObject):
         if self.progress:
             self.progress.setLabelText(message)
             self.progress.setValue(min(99, int(fraction * 100)))
+        elif self.worker is not None and self.worker.release is not None:
+            percent = min(99, int(fraction * 100))
+            if percent != self.download_percent:
+                self.download_percent = percent
+                self.window.statusBar().showMessage(
+                    f"Downloading update {self.worker.release.version}... {percent}%"
+                )
 
     @Slot()
     def _worker_finished(self) -> None:
@@ -219,18 +251,21 @@ class UpdateController(QObject):
             self.progress = None
         worker.deleteLater()
         if canceled:
-            if isinstance(worker.result, PreparedUpdate):
+            if isinstance(worker.result, (PreparedUpdate, PreparedSetup)):
                 self._discard(worker.result.directory)
             self.window.statusBar().showMessage("Update canceled; application files were not changed.")
         elif worker.error:
             self.window.statusBar().set_issue(
                 "update", f"Update check/download failed: {worker.error}",
             )
-            if self.manual or worker.release is not None:
+            # Background installer downloads fail quietly, like automatic checks.
+            if self.manual or (worker.release is not None and not worker.release.installer):
                 self._show_error(worker.error, worker.release)
-        elif isinstance(worker.result, PreparedUpdate):
+        elif isinstance(worker.result, (PreparedUpdate, PreparedSetup)):
             self.downloaded = worker.result
             self._ready_to_install()
+        elif isinstance(worker.result, Release) and worker.result.installer:
+            self._download(worker.result, installation_directory())
         elif isinstance(worker.result, Release):
             self.pending_release = worker.result
             self.check_action.setEnabled(False)
@@ -285,17 +320,28 @@ class UpdateController(QObject):
         if target is None:
             self._open_release_page(release.page_url)
             return
-        self.progress = QProgressDialog("Preparing update...", "Cancel", 0, 100, self.window)
-        self.progress.setWindowTitle("Preparing application update")
-        self.progress.setWindowModality(Qt.WindowModality.NonModal)
-        self.progress.setAutoClose(False)
-        self.progress.setAutoReset(False)
-        self.progress.setValue(0)
+        self._download(release, target)
+
+    def _download(self, release: Release, target: Path | None) -> None:
+        diagnostic_event(
+            "update_download_started", version=release.version, installer=release.installer,
+            manual=self.manual,
+        )
+        self.download_percent = -1
+        if self.manual or not release.installer:
+            self.progress = QProgressDialog("Preparing update...", "Cancel", 0, 100, self.window)
+            self.progress.setWindowTitle("Preparing application update")
+            self.progress.setWindowModality(Qt.WindowModality.NonModal)
+            self.progress.setAutoClose(False)
+            self.progress.setAutoReset(False)
+            self.progress.setValue(0)
+            self.progress.canceled.connect(self._cancel_worker)
+            self.progress.show()
+        else:
+            self.window.statusBar().showMessage(f"Downloading update {release.version}...")
         worker = UpdateWorker(
             include_prereleases=self.prerelease_action.isChecked(), release=release, target=target
         )
-        self.progress.canceled.connect(self._cancel_worker)
-        self.progress.show()
         self._start_worker(worker)
 
     def _ready_to_install(self) -> None:
@@ -309,9 +355,12 @@ class UpdateController(QObject):
         ):
             QTimer.singleShot(1000, self._ready_to_install)
             return
+        setup = isinstance(prepared, PreparedSetup)
+        text = f"Version {prepared.version} is downloaded and verified. Restart and update now?"
+        if setup:
+            text += "\n\nIf you choose No, the update installs when you close the editor."
         answer = QMessageBox.question(
-            self.window, "Update ready",
-            f"Version {prepared.version} is downloaded and verified. Restart and update now?",
+            self.window, "Update ready", text,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -327,11 +376,22 @@ class UpdateController(QObject):
             if self.prepared is None:
                 return  # A launched helper owns the staging folder, including on startup failure.
         self.prepared = None
+        if setup:
+            self.install_on_exit = prepared
+            self.window.statusBar().showMessage(
+                f"Version {prepared.version} installs when you close the editor."
+            )
+            return
         self._discard(prepared.directory)
         self.window.statusBar().showMessage("Update postponed; the installed application is unchanged.")
 
     def cancel_close_update(self) -> None:
-        if self.prepared is not None:
+        if isinstance(self.prepared, PreparedSetup):
+            self.install_on_exit, self.prepared = self.prepared, None
+            self.window.statusBar().showMessage(
+                f"Version {self.install_on_exit.version} installs when you close the editor."
+            )
+        elif self.prepared is not None:
             prepared, self.prepared = self.prepared, None
             self._discard(prepared.directory)
             self.window.statusBar().showMessage(
@@ -365,11 +425,29 @@ class UpdateController(QObject):
                     target=prepared.target, version=prepared.version,
                     project_path=self.window.project_path,
                 ):
-                    launch_update(prepared, self.window.project_path)
+                    if isinstance(prepared, PreparedSetup):
+                        launch_setup(prepared, self.window.project_path, relaunch=True)
+                    else:
+                        launch_update(prepared, self.window.project_path)
             except (OSError, ValueError, UpdateError) as error:
                 diagnostic_exception("update_handoff_failed_in_controller", error)
+                if isinstance(prepared, PreparedSetup):
+                    self.install_on_exit = prepared
                 self._show_error(str(error))
                 return False
+        if isinstance(self.downloaded, PreparedSetup) and self.install_on_exit is None:
+            self.install_on_exit, self.downloaded = self.downloaded, None
+        if self.install_on_exit:
+            pending, self.install_on_exit = self.install_on_exit, None
+            try:
+                with diagnostic_operation(
+                    "update_install_on_exit", directory=pending.directory,
+                    target=pending.target, version=pending.version,
+                ):
+                    launch_setup(pending, None, relaunch=False)
+            except (OSError, ValueError, UpdateError) as error:
+                # Never keep the user from exiting; the next startup removes the download.
+                diagnostic_exception("update_install_on_exit_failed", error)
         if self.downloaded:
             self._discard(self.downloaded.directory)
             self.downloaded = None
@@ -396,8 +474,12 @@ class UpdateController(QObject):
 
     def _show_result(self, directory: Path, target: Path) -> None:
         diagnostic_event("update_result_requested", directory=directory, target=target)
+        setup = is_setup_result(directory)
         try:
-            success, message = read_update_result(directory, target)
+            if setup:
+                success, message = read_setup_result(directory, target)
+            else:
+                success, message = read_update_result(directory, target)
         except (OSError, ValueError, UpdateError) as error:
             diagnostic_exception("update_result_read_failed", error, directory=directory, target=target)
             QMessageBox.warning(self.window, "Could not read update result", str(error))
@@ -409,6 +491,15 @@ class UpdateController(QObject):
             self.window.statusBar().clear_issue("update-result")
             self.window.statusBar().showMessage(message)
             QTimer.singleShot(1500, lambda: self._discard(directory, retries=10))
+        elif setup:
+            # Keep only the Setup log; the next startup removes the folder.
+            for installer in directory.glob("*.exe"):
+                try:
+                    installer.unlink(missing_ok=True)
+                except OSError as error:
+                    diagnostic_exception("update_result_cleanup_failed", error, path=installer)
+            self.window.statusBar().set_issue("update-result", message)
+            QMessageBox.warning(self.window, "Application update failed", message)
         else:
             self.window.statusBar().set_issue("update-result", message)
             QMessageBox.warning(

@@ -77,8 +77,9 @@ A visual desktop editor for creating and modifying dub packs for *The Choicer Vo
 - Validates metadata, references, inventory, PNG signatures, timestamps, codecs, complete media decoding, and ZIP CRC before publishing.
 - Lets an MCP-compatible assistant work with a live visible editor, or an explicitly headless
 	project, using local stdio tools for media review, editing, saving, and validated export.
-- Checks public GitHub releases and offers verified, in-place Windows updates without replacing
-  projects, media, or unrelated files.
+- Installs per user with a Windows Setup program that updates itself automatically from public
+  GitHub releases. The portable ZIP is still published and keeps its verified, in-place updates
+  without replacing projects, media, or unrelated files.
 
 ## Undo and redo
 
@@ -240,6 +241,22 @@ source-video audio before cutting.
 - Source development and tests require FFmpeg/FFprobe on `PATH`, built with `libtheora`,
 	`libvorbis`, and `libmp3lame`.
 
+## Install on Windows
+
+Each [GitHub release](https://github.com/throndir2/ChoicerVoicerPackCreator/releases) has two
+Windows downloads with the same application:
+
+- `Choicer-Voicer-Pack-Creator-<version>-Setup.exe` (recommended). Run it to install the editor for
+  the current Windows user. It does not need administrator access. The default folder is
+  `%LOCALAPPDATA%\Programs\Choicer Voicer Pack Creator`. Setup adds a Start menu shortcut, an
+  optional desktop shortcut, and an entry in **Settings > Apps** to uninstall the editor.
+  The installed editor updates itself automatically; see [Application updates](#application-updates).
+- `Choicer-Voicer-Pack-Creator-<version>-Windows-x64.zip`: the portable folder. Extract it and run
+  the EXE. Portable copies keep their own in-place updater, so older portable copies can still update.
+
+Uninstalling removes the application files only. Projects, media, preferences, logs, and
+downloaded components stay in their own folders.
+
 ## Build a portable Windows package locally
 
 On a Windows x86-64 computer, double-click `Build-Portable.cmd`. From PowerShell, the equivalent is:
@@ -293,15 +310,16 @@ non-commercial restrictions; the inference source is Apache-2.0. See About and t
 The finished outputs are:
 
 ```text
-dist/v1.3.9/portable-<build-id>/Choicer Voicer Pack Creator/
-dist/v1.3.9/Choicer-Voicer-Pack-Creator-1.3.9-Windows-x64.zip
+dist/v1.4.0/portable-<build-id>/Choicer Voicer Pack Creator/
+dist/v1.4.0/Choicer-Voicer-Pack-Creator-1.4.0-Windows-x64.zip
 ```
 
 The script prints the exact generated application-folder path. Each rebuild uses a new path to avoid
 a Windows executable/DLL cache issue that can affect tools replaced repeatedly at the same location;
 older `portable-*` generation folders can be deleted when no copy of the app is running.
 
-This is a **portable application folder**, not an installer. To use or share it:
+This is a **portable application folder**, not an installer. To build the Setup installer from it,
+see [Build the Setup installer](#build-the-setup-installer). To use or share the portable folder:
 
 1. Extract the complete ZIP; do not run the executable from inside the ZIP viewer.
 2. Keep the extracted directory together, including its `MCP`, `bin`, and `_internal`
@@ -324,14 +342,56 @@ Community builds are not currently code-signed, so Windows SmartScreen may show 
 warning. Verify the ZIP's SHA-256 printed by the build script and use only a package from a trusted
 source.
 
+### Build the Setup installer
+
+After `Build-Portable.ps1` succeeds, build the Setup installer from the same validated folder:
+
+```powershell
+.\Build-Installer.ps1
+```
+
+The build computer needs [Inno Setup 6](https://jrsoftware.org/isinfo.php). To install it for the
+current user, run `winget install --id JRSoftware.InnoSetup -e --scope user`. The script compiles
+`installer\ChoicerVoicerPackCreator.iss` and writes these files beside the ZIP:
+
+```text
+dist/v1.4.0/Choicer-Voicer-Pack-Creator-1.4.0-Setup.exe
+dist/v1.4.0/Choicer-Voicer-Pack-Creator-1.4.0-Setup.exe.sha256
+```
+
+The installer contains the same files as the ZIP, plus a `setup-install.json` marker. The marker
+tells the editor to update itself with the Setup installer instead of the portable updater.
+
 ### Application updates
 
-Portable Windows builds check the public
+Installed and portable Windows builds check the public
 [GitHub releases](https://github.com/throndir2/ChoicerVoicerPackCreator/releases) in the background
 on startup. **Prereleases are included by default**, alongside stable releases.
 The **Help → Updates** submenu provides **Check for Updates**, **Check for Updates on Startup**, and
 **Include Prereleases**. An offline or rate-limited automatic check reports its failure in the
 status bar without interrupting your work. Checks contact GitHub, not your media or project files.
+
+#### Installed copies (Setup)
+
+An installed editor updates automatically:
+
+1. On startup, it finds the newest release that has a Setup installer.
+2. It downloads that `Setup.exe` in the background and shows the progress in the status bar.
+   The download must match the release's SHA-256 checksum and the GitHub asset digest.
+3. When the download is verified, the editor asks to restart. Choose **Yes** to close the editor,
+   install the update silently, and start the new version. The usual Save / Discard / Cancel
+   decisions protect every unsaved project first.
+4. If you choose **No**, the update installs silently when you close the editor.
+
+The installer waits for the editor to exit before it changes files. It replaces the whole
+`_internal` runtime folder, so files from older versions do not remain, and it restores the old
+runtime folder if the installation fails. After a restart, the status bar shows the new version.
+If the update did not install, a message gives the path of the Setup log. Downloads are kept in
+`%TEMP%\ChoicerVoicerPackCreator-updates` and removed at the next startup.
+A manual **Check for Updates** shows a progress dialog that you can cancel. Failed automatic
+downloads are reported only in the status bar.
+
+#### Portable copies (ZIP)
 
 When a newer compatible release is found, you can decline it or download its Windows x64 ZIP.
 Downloads are cancelable and checked against the release's SHA-256 checksum and GitHub asset
@@ -1190,7 +1250,7 @@ Godot and Docker are only required for these independent release gates, not norm
 	multimedia preview, background workers, and custom waveform/timeline rendering.
 - **FFmpeg performs media work.** It probes source files, generates waveform samples, extracts and
 	pads prompt audio, captures stills, and writes the Theora/Vorbis video required by the game.
-	Windows builds bundle a pinned FFmpeg 9.0.1 x86-64 LGPL shared distribution, so users do not
+	Windows builds bundle a pinned FFmpeg 9.0.2 x86-64 LGPL shared distribution, so users do not
 	need to install it.
 - **Godot is only an independent test oracle.** The Choicer Voicer is made with Godot and consumes
 	pack metadata through Godot's `ConfigFile` parser. Release tests therefore ask the real parser to
@@ -1220,8 +1280,8 @@ with another compatible pair.
 .\Build-Portable.ps1
 ```
 
-The Windows application folder is written below `dist/v1.3.9/portable-<build-id>/`, with a
-shareable `Choicer-Voicer-Pack-Creator-1.3.9-Windows-x64.zip` beside it. The first build downloads
+The Windows application folder is written below `dist/v1.4.0/portable-<build-id>/`, with a
+shareable `Choicer-Voicer-Pack-Creator-1.4.0-Windows-x64.zip` beside it. The first build downloads
 about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. The stable sharing ZIP is not
 replaced until both the application folder and a clean ZIP extraction pass packaged smoke tests.
 Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or
@@ -1237,8 +1297,11 @@ start an Actions runner. Tests and validation are run locally during development
 
 The only GitHub Actions workflow is **Create GitHub Release**, and it runs solely when a maintainer
 manually selects **Actions → Create GitHub Release → Run workflow**. It reads the version from
-`pyproject.toml`, builds and smoke-tests the portable Windows package, creates tag `v<version>`, and
-publishes a GitHub Release containing the ZIP and its SHA-256 checksum. Running it again without
+`pyproject.toml`, builds and smoke-tests the portable Windows package, builds the Setup installer,
+creates tag `v<version>`, and publishes a GitHub Release. The release contains the Setup EXE, the
+portable ZIP, and a SHA-256 checksum file for each. Keep both asset names unchanged: installed
+copies update with the Setup EXE, and portable copies, including older ones, update with the ZIP.
+Running it again without
 bumping the project version fails before the expensive build rather than replacing an existing
 release or tag. Releases are restricted to the canonical `main` branch.
 
