@@ -29,6 +29,11 @@ API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases"
 APP_NAME = "Choicer Voicer Pack Creator"
 EXECUTABLE = f"{APP_NAME}.exe"
 MANIFEST = "portable-files.json"
+# Written only by the Setup installer; portable folders never contain it.
+SETUP_MARKER = "setup-install.json"
+# Keep in sync with installer/ChoicerVoicerPackCreator.iss.
+RUNNING_MUTEX = "ChoicerVoicerPackCreatorRunning"
+SETUP_PREFIX = "cvpc-setup-"
 MAX_ARCHIVE_BYTES = 1024**3
 MAX_EXPANDED_BYTES = 3 * 1024**3
 BUFFER_SIZE = 1024 * 1024
@@ -92,10 +97,11 @@ class Release:
     archive_size: int
     checksum_url: str
     digest: str | None
+    installer: bool = False
 
     @property
     def archive_name(self) -> str:
-        return f"Choicer-Voicer-Pack-Creator-{self.version}-Windows-x64.zip"
+        return asset_name(self.version, installer=self.installer)
 
     @property
     def page_url(self) -> str:
@@ -111,6 +117,20 @@ class PreparedUpdate:
     @property
     def staged(self) -> Path:
         return self.directory / "application"
+
+
+@dataclass(frozen=True)
+class PreparedSetup:
+    directory: Path
+    target: Path
+    version: str
+    installer: Path
+
+
+def asset_name(version: str, *, installer: bool = False) -> str:
+    if installer:
+        return f"Choicer-Voicer-Pack-Creator-{version}-Setup.exe"
+    return f"Choicer-Voicer-Pack-Creator-{version}-Windows-x64.zip"
 
 
 def version_key(value: str) -> tuple[int, int, int, bool, tuple[tuple[bool, int | str], ...]]:
@@ -187,6 +207,7 @@ def find_release(
     *,
     include_prereleases: bool = True,
     cancelled: Cancelled = lambda: False,
+    installer: bool = False,
 ) -> Release | None:
     current = version_key(current_version)
     candidates: list[Release] = []
@@ -209,7 +230,7 @@ def find_release(
             if not newer or (prerelease and not include_prereleases):
                 continue
             version = tag.removeprefix("v")
-            name = f"Choicer-Voicer-Pack-Creator-{version}-Windows-x64.zip"
+            name = asset_name(version, installer=installer)
             assets = item.get("assets", [])
             if not isinstance(assets, list):
                 raise UpdateError("GitHub returned invalid release assets.")
@@ -219,7 +240,7 @@ def find_release(
                 and asset.get("name") in (name, name + ".sha256")
             }
             if len(matching) != 2:
-                continue  # A release may still be uploading its portable assets.
+                continue  # A release may still be uploading its assets.
             archive = matching[name]
             checksum = matching[name + ".sha256"]
             size = archive.get("size")
@@ -236,7 +257,7 @@ def find_release(
                 raise UpdateError("GitHub returned an invalid archive digest.")
             candidates.append(Release(
                 version, tag, prerelease, archive["browser_download_url"], size,
-                checksum["browser_download_url"], digest,
+                checksum["browser_download_url"], digest, installer,
             ))
         if len(data) < 100:
             break
@@ -339,6 +360,26 @@ def installation_directory() -> Path | None:
     return application_directory()
 
 
+def is_setup_installation(target: Path | None) -> bool:
+    return target is not None and (target / SETUP_MARKER).is_file()
+
+
+_running_mutex: int | None = None
+
+
+def hold_running_mutex() -> None:
+    """Let the Setup installer detect a running editor; Windows releases it at process exit."""
+    global _running_mutex
+    if sys.platform != "win32" or not getattr(sys, "frozen", False) or _running_mutex:
+        return
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    _running_mutex = kernel32.CreateMutexW(None, False, RUNNING_MUTEX)
+
+
 def verify_installation(
     target: Path, version: str, cancelled: Cancelled = lambda: False,
     *, progress: Progress | None = None, message: str = "Verifying application files",
@@ -420,6 +461,38 @@ def _extract(
             file_progress.finish()
 
 
+def _download_verified(
+    release: Release, archive: Path, progress: Progress, cancelled: Cancelled, scale: float,
+) -> None:
+    progress("Fetching update checksum...", 0.0)
+    checksum_text = _read(release.checksum_url, 1024, cancelled).decode("ascii").strip()
+    match = re.fullmatch(
+        r"([0-9a-fA-F]{64}) [ *]" + re.escape(release.archive_name), checksum_text
+    )
+    if not match:
+        raise UpdateError("The release checksum file is invalid.")
+    expected_hash = match[1].lower()
+    if release.digest is not None and release.digest != f"sha256:{expected_hash}":
+        raise UpdateError("The release checksum does not match GitHub's archive digest.")
+    digest = hashlib.sha256()
+    downloaded = 0
+    deadline = time.monotonic() + 1800
+    progress("Downloading update...", 0.0)
+    with _open(release.archive_url) as response, archive.open("xb") as output:
+        while chunk := response.read(BUFFER_SIZE):
+            _check_cancel(cancelled)
+            downloaded += len(chunk)
+            if downloaded > release.archive_size or time.monotonic() > deadline:
+                raise UpdateError("The update download exceeded its size or time limit.")
+            output.write(chunk)
+            digest.update(chunk)
+            progress("Downloading update...", scale * (downloaded / release.archive_size))
+        output.flush()
+        os.fsync(output.fileno())
+    if downloaded != release.archive_size or digest.hexdigest() != expected_hash:
+        raise UpdateError("The update archive failed size/SHA-256 verification.")
+
+
 def prepare_update(
     release: Release,
     target: Path,
@@ -439,34 +512,8 @@ def prepare_update(
     directory = Path(tempfile.mkdtemp(prefix=".cvpc-update-", dir=target.parent))
     prepared = PreparedUpdate(directory, target, release.version)
     try:
-        progress("Fetching update checksum...", 0.0)
-        checksum_text = _read(release.checksum_url, 1024, cancelled).decode("ascii").strip()
-        match = re.fullmatch(
-            r"([0-9a-fA-F]{64}) [ *]" + re.escape(release.archive_name), checksum_text
-        )
-        if not match:
-            raise UpdateError("The release checksum file is invalid.")
-        expected_hash = match[1].lower()
-        if release.digest is not None and release.digest != f"sha256:{expected_hash}":
-            raise UpdateError("The release checksum does not match GitHub's archive digest.")
         archive = directory / "release.zip"
-        digest = hashlib.sha256()
-        downloaded = 0
-        deadline = time.monotonic() + 1800
-        progress("Downloading update...", 0.0)
-        with _open(release.archive_url) as response, archive.open("xb") as output:
-            while chunk := response.read(BUFFER_SIZE):
-                _check_cancel(cancelled)
-                downloaded += len(chunk)
-                if downloaded > release.archive_size or time.monotonic() > deadline:
-                    raise UpdateError("The update download exceeded its size or time limit.")
-                output.write(chunk)
-                digest.update(chunk)
-                progress("Downloading update...", 0.7 * (downloaded / release.archive_size))
-            output.flush()
-            os.fsync(output.fileno())
-        if downloaded != release.archive_size or digest.hexdigest() != expected_hash:
-            raise UpdateError("The update archive failed size/SHA-256 verification.")
+        _download_verified(release, archive, progress, cancelled, 0.7)
         progress("Extracting update files...", 0.7)
         _extract(
             archive, prepared.staged, cancelled,
@@ -693,3 +740,95 @@ def read_update_result(directory: Path, target: Path) -> tuple[bool, str]:
     ):
         raise UpdateError("Invalid update result.")
     return result["success"], result["message"]
+
+
+def setup_staging_root() -> Path:
+    return Path(tempfile.gettempdir()) / "ChoicerVoicerPackCreator-updates"
+
+
+def prepare_setup_update(
+    release: Release,
+    target: Path,
+    progress: Progress,
+    cancelled: Cancelled,
+    current_version: str = __version__,
+) -> PreparedSetup:
+    if not release.installer:
+        raise UpdateError("The selected release is not a Setup installer.")
+    if version_key(release.version) <= version_key(current_version):
+        raise UpdateError("The selected release is not newer than the installed application.")
+    _check_cancel(cancelled)
+    root = setup_staging_root()
+    root.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(root).free < release.archive_size * 2:
+        raise UpdateError("Not enough free disk space to download the update.")
+    directory = Path(tempfile.mkdtemp(prefix=SETUP_PREFIX, dir=root))
+    prepared = PreparedSetup(directory, target, release.version, directory / release.archive_name)
+    try:
+        _download_verified(release, prepared.installer, progress, cancelled, 1.0)
+        _check_cancel(cancelled)
+        plan = {
+            "kind": "setup", "target": str(target), "version": release.version,
+            "previous_version": current_version,
+        }
+        (directory / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+        progress("Update ready to install.", 1.0)
+        return prepared
+    except (OSError, ValueError, UpdateError, http.client.HTTPException):
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+
+
+def launch_setup(prepared: PreparedSetup, project: Path | None, *, relaunch: bool) -> None:
+    """Start the verified installer; it waits for this process to exit before installing."""
+    arguments = [
+        str(prepared.installer), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
+        "/CLOSEAPPLICATIONS", f"/DIR={prepared.target}",
+        f"/LOG={prepared.directory / 'setup.log'}", f"/WAITPID={os.getpid()}",
+        f"/UPDATEDIR={prepared.directory}",
+    ]
+    if relaunch:
+        arguments.append("/RELAUNCH=1")
+        if project is not None:
+            arguments.append(f"/PROJECT={project}")
+    subprocess.Popen(
+        arguments, cwd=prepared.directory, env=_independent_environment(),
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+
+
+def is_setup_result(directory: Path) -> bool:
+    return directory.name.startswith(SETUP_PREFIX)
+
+
+def read_setup_result(
+    directory: Path, target: Path, current_version: str = __version__,
+) -> tuple[bool, str]:
+    if (
+        directory.parent != setup_staging_root()
+        or not re.fullmatch(re.escape(SETUP_PREFIX) + r"[a-z0-9_]+", directory.name)
+    ):
+        raise UpdateError("Invalid update result directory.")
+    plan = json.loads(_safe_path(directory, "plan.json").read_text(encoding="utf-8"))
+    if (
+        not isinstance(plan, dict) or plan.get("kind") != "setup"
+        or not isinstance(plan.get("target"), str) or not isinstance(plan.get("version"), str)
+        or Path(plan["target"]).absolute() != target.absolute()
+    ):
+        raise UpdateError("The update result belongs to another application folder.")
+    if plan["version"] == current_version:
+        return True, f"Updated to {current_version}."
+    return False, (
+        f"Version {plan['version']} was not installed. Version {current_version} is still "
+        f"installed.\n\nSetup log:\n{directory / 'setup.log'}"
+    )
+
+
+def discard_setup_updates(keep: Path | None = None) -> None:
+    """Remove old installer downloads; a running editor means no Setup handoff is pending."""
+    root = setup_staging_root()
+    if not root.is_dir():
+        return
+    for path in root.iterdir():
+        if path.is_dir() and path.name.startswith(SETUP_PREFIX) and path != keep:
+            shutil.rmtree(path, ignore_errors=True)

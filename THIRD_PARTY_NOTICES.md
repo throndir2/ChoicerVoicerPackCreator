@@ -10,20 +10,20 @@ The Buy Me a Coffee name and artwork belong to their respective owner.
 
 ## FFmpeg
 
-Windows application bundles include an unmodified **FFmpeg 9.0.1 LGPL shared build** supplied by the [BtbN FFmpeg-Builds project](https://github.com/BtbN/FFmpeg-Builds). FFmpeg is a separate command-line program invoked by Choicer Voicer Pack Creator; the application does not link to FFmpeg libraries.
+Windows application bundles include an unmodified **FFmpeg 9.0.2 LGPL shared build** supplied by the [BtbN FFmpeg-Builds project](https://github.com/BtbN/FFmpeg-Builds). FFmpeg is a separate command-line program invoked by Choicer Voicer Pack Creator; the application does not link to FFmpeg libraries.
 
 FFmpeg is licensed under the **GNU Lesser General Public License, version 3 or later** in the bundled configuration. The exact license text from the upstream binary archive is included in each Windows bundle at `licenses/FFmpeg-LGPL-3.0.txt`.
 
 Bundled binary provenance:
 
-- Version: `n9.0.1-11-ge47273f4d9-20260901`
+- Version: `n9.0.2-17-g2a571b6068-20260930`
 - Variant: Windows x86-64, LGPL, shared libraries
-- Upstream release: `autobuild-2026-09-01-13-13`
-- Binary archive SHA-256: `562ea50b4f2d213e3883a8fbef581ca2ccf6c7ab647c0e0b93d55294c5a0ae7a`
-- FFmpeg source revision: [`e47273f4d9227152dcbf543cebaf9e2430ddbcc4`](https://github.com/FFmpeg/FFmpeg/tree/e47273f4d9227152dcbf543cebaf9e2430ddbcc4)
-- Build recipe revision: [`8267213e26c1031621e6e1210fe3aa4867214f6a`](https://github.com/BtbN/FFmpeg-Builds/tree/8267213e26c1031621e6e1210fe3aa4867214f6a)
-- Exact FFmpeg source archive: <https://github.com/FFmpeg/FFmpeg/archive/e47273f4d9227152dcbf543cebaf9e2430ddbcc4.tar.gz>
-- Exact build-recipe archive: <https://github.com/BtbN/FFmpeg-Builds/archive/8267213e26c1031621e6e1210fe3aa4867214f6a.tar.gz>
+- Upstream release: `autobuild-2026-09-30-13-08`
+- Binary archive SHA-256: `7157177b8a6cb2174c1650ba8c71b363f2c78cba5330f88c4c02cf5b2b880646`
+- FFmpeg source revision: [`2a571b606854520cf89804d8030c8b328e621689`](https://github.com/FFmpeg/FFmpeg/tree/2a571b606854520cf89804d8030c8b328e621689)
+- Build recipe revision: [`6c9aec5fc9a72ec3abedd1fa84db141fa18cf52b`](https://github.com/BtbN/FFmpeg-Builds/tree/6c9aec5fc9a72ec3abedd1fa84db141fa18cf52b)
+- Exact FFmpeg source archive: <https://github.com/FFmpeg/FFmpeg/archive/2a571b606854520cf89804d8030c8b328e621689.tar.gz>
+- Exact build-recipe archive: <https://github.com/BtbN/FFmpeg-Builds/archive/6c9aec5fc9a72ec3abedd1fa84db141fa18cf52b.tar.gz>
 
 The build recipe records the configure command and exact source recipes for FFmpeg's enabled dependencies. Users may replace the files in the application's `bin` directory with another compatible `ffmpeg.exe`/`ffprobe.exe` pair. The application requires `libtheora`, `libvorbis`, and `libmp3lame` encoders and checks them at startup.
 

@@ -7,7 +7,7 @@ on:
       prerelease:
         description: Mark the GitHub release as a prerelease
         required: true
-        default: true
+        default: false
         type: boolean
 
 permissions:
@@ -20,7 +20,7 @@ concurrency:
 jobs:
   build-and-release:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       QT_QPA_PLATFORM: offscreen
     steps:
@@ -73,6 +73,10 @@ jobs:
         shell: powershell
         run: .\Build-Portable.ps1
 
+      - name: Build Setup installer
+        shell: powershell
+        run: .\Build-Installer.ps1
+
       - name: Create checksum file
         shell: powershell
         env:
@@ -86,7 +90,7 @@ jobs:
           $filename = [IO.Path]::GetFileName($zip)
           "$hash  $filename" | Out-File -FilePath "$zip.sha256" -Encoding ascii
 
-      - name: Create GitHub release and upload ZIP
+      - name: Create GitHub release and upload assets
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
@@ -95,8 +99,10 @@ jobs:
           RELEASE_PRERELEASE: ${{ inputs.prerelease }}
         run: |
           $zip = "dist/v$env:APP_VERSION/Choicer-Voicer-Pack-Creator-$env:APP_VERSION-Windows-x64.zip"
+          $setup = "dist/v$env:APP_VERSION/Choicer-Voicer-Pack-Creator-$env:APP_VERSION-Setup.exe"
           $arguments = @(
             "release", "create", $env:RELEASE_TAG,
+            $setup, "$setup.sha256",
             $zip, "$zip.sha256",
             "--repo", $env:GITHUB_REPOSITORY,
             "--target", $env:GITHUB_SHA,

@@ -198,8 +198,16 @@ license/provenance files. Do not substitute a GPL, nonfree, floating, or uncheck
 
 Pushes and pull requests do not run GitHub Actions. Complete all checks locally. After bumping and
 committing the release version, a maintainer can manually run **Create GitHub Release** from the
-Actions page. That release-only workflow builds the validated portable ZIP and attaches it, together
-with a SHA-256 checksum, to a new versioned GitHub Release.
+Actions page. That release-only workflow builds the validated portable ZIP and the Setup installer
+(`Build-Installer.ps1`, Inno Setup 6) and attaches both, each with a SHA-256 checksum, to a new
+versioned GitHub Release.
+
+Keep publishing both assets with their exact names. Installed copies (folders that contain
+`setup-install.json`) find the newest release with a `-Setup.exe` asset, download and verify it,
+and run it silently with `/WAITPID`, `/UPDATEDIR`, and optionally `/RELAUNCH=1`. The `[Code]`
+section of `installer/ChoicerVoicerPackCreator.iss` handles these parameters; keep them compatible
+across releases. Portable copies, including older releases, still update only with the ZIP.
+Keep the installer AppId and the `ChoicerVoicerPackCreatorRunning` mutex name unchanged.
 
 The portable build also generates `portable-files.json` after all application files have been
 assembled. Keep this inventory and the exact versioned Windows ZIP/checksum asset names: the

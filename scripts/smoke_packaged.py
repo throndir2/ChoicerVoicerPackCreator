@@ -666,7 +666,7 @@ def main() -> int:
             "Packaged application did not select its bundled FFmpeg pair: "
             f"{selected_ffmpeg}, {selected_ffprobe}"
         )
-    if "n9.0.1-11-ge47273f4d9-20260901" not in report["version"]:
+    if "n9.0.2-17-g2a571b6068-20260930" not in report["version"]:
         raise RuntimeError(f"Unexpected bundled FFmpeg version: {report['version']}")
     analysis_manifest = Path(report["analysis_manifest"]).resolve()
     expected_manifest = (

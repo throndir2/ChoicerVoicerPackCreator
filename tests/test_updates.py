@@ -82,11 +82,14 @@ def archive_bytes(root: Path, extra: dict[str, bytes] | None = None) -> bytes:
     return output.getvalue()
 
 
-def setup_download(monkeypatch, payload: bytes, *, checksum: str | None = None) -> updates.Release:
+def setup_download(
+    monkeypatch, payload: bytes, *, checksum: str | None = None, installer: bool = False,
+) -> updates.Release:
     digest = hashlib.sha256(payload).hexdigest()
     release = updates.Release(
         "0.6.0", "v0.6.0", True, f"{updates.RELEASES_URL}/download/v0.6.0/package.zip",
         len(payload), f"{updates.RELEASES_URL}/download/v0.6.0/package.zip.sha256", f"sha256:{digest}",
+        installer,
     )
     monkeypatch.setattr(
         updates, "_read",
@@ -759,3 +762,121 @@ def test_helper_does_not_restart_incompletely_restored_application(tmp_path, mon
     assert "recovery is required" in messages[0][1]
     result = json.loads((prepared.directory / "result.json").read_text())
     assert result["success"] is False
+
+
+def installer_release_json(version: str) -> dict:
+    data = release_json(version)
+    name = updates.asset_name(version, installer=True)
+    data["assets"] += [
+        {
+            "name": filename, "size": 700,
+            "browser_download_url": f"{updates.RELEASES_URL}/download/v{version}/{filename}",
+        }
+        for filename in (name, name + ".sha256")
+    ]
+    return data
+
+
+def test_installed_copies_find_setup_assets_and_portable_copies_keep_zip(monkeypatch) -> None:
+    fake_releases(monkeypatch, [installer_release_json("0.7.0"), release_json("0.8.0")])
+
+    setup = updates.find_release("0.5.1", installer=True)
+    portable = updates.find_release("0.5.1")
+
+    assert setup.version == "0.7.0"  # 0.8.0 has no Setup asset yet.
+    assert setup.installer and setup.archive_size == 700
+    assert setup.archive_url.endswith("/Choicer-Voicer-Pack-Creator-0.7.0-Setup.exe")
+    assert portable.version == "0.8.0" and not portable.installer
+    assert portable.archive_url.endswith("-0.8.0-Windows-x64.zip")
+
+
+def setup_staging(monkeypatch, tmp_path: Path) -> Path:
+    root = tmp_path / "updates"
+    monkeypatch.setattr(updates, "setup_staging_root", lambda: root)
+    return root
+
+
+def test_setup_download_is_verified_and_planned(tmp_path, monkeypatch) -> None:
+    root = setup_staging(monkeypatch, tmp_path)
+    release = setup_download(monkeypatch, b"setup payload", installer=True)
+    target = tmp_path / "Installed app"
+
+    prepared = updates.prepare_setup_update(
+        release, target, lambda *_args: None, lambda: False, "0.5.1"
+    )
+
+    assert prepared.directory.parent == root
+    assert prepared.installer.read_bytes() == b"setup payload"
+    assert prepared.installer.name == "Choicer-Voicer-Pack-Creator-0.6.0-Setup.exe"
+    plan = json.loads((prepared.directory / "plan.json").read_text(encoding="utf-8"))
+    assert plan == {
+        "kind": "setup", "target": str(target), "version": "0.6.0", "previous_version": "0.5.1",
+    }
+
+
+def test_setup_download_with_bad_checksum_leaves_nothing(tmp_path, monkeypatch) -> None:
+    root = setup_staging(monkeypatch, tmp_path)
+    release = setup_download(monkeypatch, b"setup payload", checksum="0" * 64, installer=True)
+    with pytest.raises(updates.UpdateError):
+        updates.prepare_setup_update(release, tmp_path, lambda *_args: None, lambda: False, "0.5.1")
+    assert list(root.iterdir()) == []
+
+
+@pytest.mark.parametrize("relaunch", [False, True])
+def test_setup_handoff_runs_silently_and_waits_for_the_editor(
+    tmp_path, monkeypatch, relaunch,
+) -> None:
+    launches = []
+    monkeypatch.setattr(updates.subprocess, "Popen", lambda *a, **k: launches.append((a, k)))
+    directory = tmp_path / "cvpc-setup-abc"
+    prepared = updates.PreparedSetup(
+        directory, tmp_path / "My App", "0.6.0", directory / "Setup.exe"
+    )
+
+    updates.launch_setup(prepared, tmp_path / "a b.cvpack.json", relaunch=relaunch)
+
+    (arguments,), options = launches[0]
+    assert arguments[0] == str(prepared.installer)
+    assert {"/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"} <= set(arguments)
+    assert f"/DIR={tmp_path / 'My App'}" in arguments
+    assert f"/WAITPID={os.getpid()}" in arguments
+    assert f"/UPDATEDIR={directory}" in arguments
+    assert ("/RELAUNCH=1" in arguments) is relaunch
+    assert (f"/PROJECT={tmp_path / 'a b.cvpack.json'}" in arguments) is relaunch
+    assert options["env"]["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+
+
+@pytest.mark.parametrize(("installed", "success"), [("0.6.0", True), ("0.5.1", False)])
+def test_setup_result_compares_the_running_version(tmp_path, monkeypatch, installed, success):
+    root = setup_staging(monkeypatch, tmp_path)
+    directory = root / "cvpc-setup-abc_1"
+    directory.mkdir(parents=True)
+    target = tmp_path / "app"
+    (directory / "plan.json").write_text(json.dumps({
+        "kind": "setup", "target": str(target), "version": "0.6.0", "previous_version": "0.5.1",
+    }))
+
+    ok, message = updates.read_setup_result(directory, target, installed)
+
+    assert ok is success
+    assert (message == "Updated to 0.6.0.") is success
+    assert ("setup.log" in message) is not success
+    with pytest.raises(updates.UpdateError):
+        updates.read_setup_result(directory, tmp_path / "other", installed)
+    with pytest.raises(updates.UpdateError):
+        updates.read_setup_result(tmp_path / "cvpc-setup-abc_1", target, installed)
+
+
+def test_stale_setup_downloads_are_removed_except_the_result(tmp_path, monkeypatch) -> None:
+    root = setup_staging(monkeypatch, tmp_path)
+    for name in ("cvpc-setup-old", "cvpc-setup-result", "unrelated"):
+        (root / name).mkdir(parents=True)
+    updates.discard_setup_updates(keep=root / "cvpc-setup-result")
+    assert sorted(path.name for path in root.iterdir()) == ["cvpc-setup-result", "unrelated"]
+
+
+def test_setup_marker_identifies_installed_copies(tmp_path) -> None:
+    assert not updates.is_setup_installation(None)
+    assert not updates.is_setup_installation(tmp_path)
+    (tmp_path / updates.SETUP_MARKER).write_text("{}")
+    assert updates.is_setup_installation(tmp_path)

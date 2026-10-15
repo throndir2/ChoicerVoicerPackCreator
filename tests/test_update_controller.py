@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import http.client
 import json
 import sys
@@ -28,6 +29,8 @@ from choicer_voicer_pack_creator.ui import update_controller
 from choicer_voicer_pack_creator.ui.main_window import MainWindow
 from choicer_voicer_pack_creator.ui.update_controller import UpdateWorker
 from choicer_voicer_pack_creator.updates import (
+    SETUP_MARKER,
+    PreparedSetup,
     PreparedUpdate,
     Release,
     UpdateCancelled,
@@ -69,6 +72,8 @@ def no_external_updates(monkeypatch):
     monkeypatch.setattr(update_controller, "find_release", forbidden)
     monkeypatch.setattr(update_controller, "prepare_update", forbidden)
     monkeypatch.setattr(update_controller, "launch_update", forbidden)
+    monkeypatch.setattr(update_controller, "prepare_setup_update", forbidden)
+    monkeypatch.setattr(update_controller, "launch_setup", forbidden)
     monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(forbidden))
 
 
@@ -126,6 +131,7 @@ def make_window(qtbot, tmp_path: Path, dialogs):
             qtbot.waitUntil(lambda updater=updater: updater.worker is None)
         updater.prepared = None
         updater.downloaded = None
+        updater.install_on_exit = None
         window._export_worker = None
         window._commit_editors()
         window.dirty = False
@@ -979,3 +985,83 @@ def test_failed_update_result_retains_payload_and_rollback_backups(
     assert (prepared.staged / "payload.txt").is_file()
     assert window.close()
     assert prepared.directory.is_dir()
+
+
+@pytest.mark.parametrize("restart_now", [False, True], ids=["install-on-exit", "restart-now"])
+def test_installed_copy_downloads_setup_automatically_and_installs_it(
+    qtbot, monkeypatch, make_window, dialogs, release, tmp_path: Path, restart_now
+) -> None:
+    target = tmp_path / "installed"
+    target.mkdir()
+    (target / SETUP_MARKER).write_text("{}", encoding="utf-8")
+    setup_release = dataclasses.replace(release, installer=True)
+    directory = tmp_path / "cvpc-setup-test"
+    directory.mkdir()
+    prepared_setup = PreparedSetup(
+        directory, target, setup_release.version, directory / setup_release.archive_name
+    )
+    checks = []
+    launches = []
+    monkeypatch.setattr(update_controller, "installation_directory", lambda: target)
+
+    def find(**kwargs):
+        checks.append(kwargs)
+        return setup_release
+
+    def prepare(found, found_target, progress, cancelled):
+        assert found is setup_release and found_target == target and not cancelled()
+        progress("Downloading update...", 0.5)
+        return prepared_setup
+
+    monkeypatch.setattr(update_controller, "find_release", find)
+    monkeypatch.setattr(update_controller, "prepare_setup_update", prepare)
+    monkeypatch.setattr(
+        update_controller, "launch_setup",
+        lambda prepared, project, *, relaunch: launches.append((prepared, project, relaunch)),
+    )
+    if restart_now:
+        dialogs.answers["Update ready"] = QMessageBox.StandardButton.Yes
+    window = make_window()
+
+    window.updater.check(manual=False)
+    qtbot.waitUntil(lambda: "Update ready" in dialogs.titles)
+
+    assert checks[0]["installer"] is True
+    assert dialogs.titles == ["Update ready"]  # No question before the download.
+    assert "installs when you close the editor" in dialogs.calls[0][2]
+    assert window.updater.progress is None
+    assert directory.exists()
+    if restart_now:
+        qtbot.waitUntil(lambda: bool(launches))
+        assert launches == [(prepared_setup, None, True)]
+        return
+    assert window.updater.install_on_exit is prepared_setup
+    assert "installs when you close the editor" in window.statusBar().currentMessage()
+    window.updater.check(manual=False)
+    assert window.updater.worker is None
+    assert window.updater.install_on_close()
+    assert launches == [(prepared_setup, None, False)]
+    assert window.updater.install_on_exit is None
+
+
+def test_failed_background_setup_download_does_not_interrupt(
+    qtbot, monkeypatch, make_window, dialogs, release, tmp_path: Path
+) -> None:
+    (tmp_path / SETUP_MARKER).write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(update_controller, "installation_directory", lambda: tmp_path)
+    monkeypatch.setattr(
+        update_controller, "find_release",
+        lambda **_kwargs: dataclasses.replace(release, installer=True),
+    )
+
+    def fail(*_args):
+        raise UpdateError("GitHub download failed")
+
+    monkeypatch.setattr(update_controller, "prepare_setup_update", fail)
+    window = make_window()
+    window.updater.check(manual=False)
+    qtbot.waitUntil(
+        lambda: window.updater.worker is None
+        and "GitHub download failed" in window.statusBar().currentMessage()
+    )
+    assert dialogs.calls == []

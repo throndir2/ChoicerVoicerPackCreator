@@ -33,6 +33,7 @@ from choicer_voicer_pack_creator.diagnostics import (
     diagnostic_exception,
 )
 from choicer_voicer_pack_creator.single_instance import SingleInstance, SingleInstanceError
+from choicer_voicer_pack_creator.updates import hold_running_mutex
 
 if TYPE_CHECKING:
     from choicer_voicer_pack_creator.ui.main_window import MainWindow
@@ -131,6 +132,7 @@ def run_editor(
         print(f"Invalid editor arguments: {error}", file=sys.stderr)
         return 2
     arguments, smoke_test = options.arguments, options.smoke_test
+    hold_running_mutex()
     QCoreApplication.setOrganizationName("ChoicerVoicerCommunity")
     QCoreApplication.setApplicationName("Choicer Voicer Pack Creator")
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeMenuBar, False)

@@ -10,7 +10,7 @@ All sizes were measured in the main checkout on 2026-10-09. At that time the che
 
 | Path | Made by | Measured size | Can I remove it? |
 | --- | --- | --- | --- |
-| `dist\v<version>\` | `Build-Portable.ps1` and `scripts\build.py`: portable application folders (`portable-*`), candidate and promoted ZIPs, and build manifests | 4.6 GB for 9 versions; 0.4 to 1.3 GB for each version | Yes. GitHub Releases keep the published ZIPs. Keep the current version only if you must share or test that local ZIP. |
+| `dist\v<version>\` | `Build-Portable.ps1` and `scripts\build.py`: portable application folders (`portable-*`), candidate and promoted ZIPs, and build manifests. `Build-Installer.ps1`: the Setup EXE (about 0.5 GB) | 4.6 GB for 9 versions; 0.4 to 1.3 GB for each version | Yes. GitHub Releases keep the published ZIPs and Setup EXEs. Keep the current version only if you must share or test that local ZIP. |
 | `dist\` other folders | Earlier packaging experiments and runtime checks | 0.1 GB each | Yes. |
 | `build\` | PyInstaller work folders (`pyinstaller-v<version>`), FFmpeg staging, smoke-test scratch folders, task-owned build environments (`build\environments\<task>`), and agent screenshots and notes | 1.8 GB | Yes. The next build makes the files again. |
 | `.cache\ffmpeg\` | `scripts\ffmpeg_bundle.py`: the downloaded LGPL FFmpeg archive | 0.3 GB | Yes. The next build downloads and verifies it again. |

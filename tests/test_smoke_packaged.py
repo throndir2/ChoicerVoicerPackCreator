@@ -275,7 +275,7 @@ def test_main_checks_editor_youtube_mcp_both_separation_entrypoints_and_optional
     report = {
         "ffmpeg": str(application / "bin" / "ffmpeg.exe"),
         "ffprobe": str(application / "bin" / "ffprobe.exe"),
-        "version": "n9.0.1-11-ge47273f4d9-20260901",
+        "version": "n9.0.2-17-g2a571b6068-20260930",
         "analysis_manifest": str(resources / "whisper-analysis-windows-x64.json"),
         "analysis_manifest_present": True,
         "analysis_licenses_present": True,
