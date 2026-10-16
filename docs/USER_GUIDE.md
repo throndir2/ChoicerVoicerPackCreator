@@ -162,6 +162,8 @@ as these builds are not code-signed.
 - Validates metadata, references, inventory, PNG signatures, timestamps, codecs, complete media decoding, and ZIP CRC before publishing.
 - Lets an MCP-compatible assistant work with a live visible editor, or an explicitly headless
 	project, using local stdio tools for media review, editing, saving, and validated export.
+	Headless tools cover the full pipeline: YouTube import, caption/Whisper drafts, merge and
+	split review, Whisper cross-checks of each cut, speaker matching, and backing separation.
 - Installs per user with a Windows Setup program that updates itself automatically from public
   GitHub releases. The portable ZIP is still published and keeps its verified, in-place updates
   without replacing projects, media, or unrelated files.

@@ -316,10 +316,12 @@ def test_source_replacement_is_probed_and_invalid_paths_are_atomic(automation, t
     assert updated["project"]["video_path"] == str(replacement)
     assert updated["project"]["video_duration"] == 10
     assert not updated["project"]["preserve_source_video"]
+    assert before["project"]["source_caption_count"] == 1
+    assert before["project"]["has_analysis_review"]
     assert not updated["project"]["source_url"]
     assert not updated["project"]["caption_language"]
-    assert not updated["project"]["source_captions"]
-    assert updated["project"]["analysis_review"] is None
+    assert updated["project"]["source_caption_count"] == 0
+    assert not updated["project"]["has_analysis_review"]
 
 
 def test_metadata_edits_preserve_imported_caption_evidence(automation, tmp_path):

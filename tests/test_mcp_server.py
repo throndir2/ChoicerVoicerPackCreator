@@ -29,7 +29,7 @@ def test_tool_schemas_errors_and_headless_state(tmp_path):
     async def exercise():
         async with create_connected_server_and_client_session(server) as client:
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-            assert len(tools) == 26
+            assert len(tools) == 35
             assert tools["get_project"].annotations.readOnlyHint
             for name in ("analyze_video", "start_analysis"):
                 assert tools[name].inputSchema["properties"]["align_captions"]["default"] is False
