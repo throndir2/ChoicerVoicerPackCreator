@@ -449,6 +449,7 @@ class TimelineWidget(QWidget):
             return
         if self._drag_kind == "box":
             self._update_box(event.position())
+            self._update_auto_scroll(event.position().x())
             event.accept()
             return
         if self._drag_kind:
@@ -774,7 +775,10 @@ class TimelineWidget(QWidget):
             self._auto_scroll_timer.stop()
             return
         # Re-apply the drag at the same cursor position so the edit follows the scrolled view.
-        self._update_drag(self._auto_scroll_x)
+        if self._drag_kind == "box":
+            self._apply_box_selection()
+        else:
+            self._update_drag(self._auto_scroll_x)
         self.update()
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802

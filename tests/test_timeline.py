@@ -1050,3 +1050,29 @@ def test_escape_cancels_box_and_restores_selection(box_timeline, qtbot):
     qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 7.5, 170))
     assert selections == []
     assert others == []
+
+
+def test_box_drag_auto_scrolls_and_selects_offscreen_blocks(qtbot):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 220)
+    timeline.set_duration(100)
+    near, far = Segment(5, 6), Segment(40, 41)
+    timeline.set_segments([near, far])
+    timeline.set_zoom(5, anchor_time=0)
+    timeline.show()
+    marks = (timeline.mark_in, timeline.mark_out)
+    selections = []
+    timeline.selection_changed.connect(selections.append)
+    lane_y = round(timeline._segment_rect(near).center().y())
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 4, 210))
+    qtbot.mouseMove(timeline, QPoint(1050, lane_y))
+    assert timeline._auto_scroll_timer.isActive()
+    for _ in range(40):
+        timeline._auto_scroll_step()
+    assert timeline.offset > 25
+    assert timeline.selected_ids == {near.id, far.id}
+    qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=QPoint(1050, lane_y))
+    assert not timeline._auto_scroll_timer.isActive()
+    assert selections == [[near.id, far.id]]
+    assert (timeline.mark_in, timeline.mark_out) == marks
