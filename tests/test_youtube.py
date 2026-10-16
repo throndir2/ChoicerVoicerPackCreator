@@ -232,7 +232,7 @@ def test_download_warns_when_only_other_caption_languages_are_available(tmp_path
     assert result.language == "en"
     assert result.captions == []
     assert result.video_path.is_file()
-    assert any("language (en)" in warning and "Local Whisper" in warning for warning in result.warnings)
+    assert any("language (en)" in warning and "Local transcription" in warning for warning in result.warnings)
 
 
 def test_repeat_download_requires_a_choice_and_preserves_existing_files(
@@ -479,7 +479,7 @@ def test_reuse_honors_new_caption_language_and_keeps_whisper_fallback(tmp_path, 
     assert result.video_path == first.video_path
     assert result.language == "ja"
     assert result.captions == []
-    assert any("Local Whisper" in note for note in result.warnings)
+    assert any("Local transcription" in note for note in result.warnings)
     existing.snapshot.verify()
 
 
@@ -712,7 +712,7 @@ def test_missing_captions_falls_back_explicitly_to_whisper(tmp_path: Path, downl
     downloader.no_captions = True
     result = run_download(tmp_path)
     assert not result.captions
-    assert "Local Whisper" in result.warnings[0]
+    assert "Local transcription" in result.warnings[0]
 
 
 def test_download_failure_cleans_partial_files(tmp_path: Path, downloader) -> None:
@@ -818,7 +818,7 @@ def test_caption_stalls_remain_optional_after_bounded_ipv4_retry(
     result = run_download(tmp_path)
     assert result.video_path.is_file()
     assert not result.captions
-    assert any("Whisper can draft" in note for note in result.warnings)
+    assert any("local transcription can draft" in note for note in result.warnings)
 
 
 @pytest.mark.parametrize("stage", ["metadata", "captions", "media", "probe"])

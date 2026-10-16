@@ -74,11 +74,12 @@ download (`allow_download=true`) and only import media the user may use.
 4. Fix the draft: `merge_segments(groups=[{segment_ids, caption?}])` joins rows and
    can set the corrected sentence; `split_segment(segment_id, at, first_caption,
    second_caption)` divides a row; `edit_segments` retimes, rewrites, or deletes.
-5. `transcribe_segments(allow_download=true)` runs local Whisper on each exported prompt
+5. `transcribe_segments(allow_download=true)` runs local transcription (Parakeet by
+   default) on each exported prompt
    (with padding) and compares it with the caption. `caption_mismatch` means the text is
    probably wrong; `start/end_may_be_clipped` means the cut loses words;
    `extra_speech_at_start/end` means the cut includes a neighbor's words. Retime with
-   `edit_segments`, then check again. Whisper is also evidence, not the truth.
+   `edit_segments`, then check again. The recognized text is also evidence, not the truth.
 6. Name one clear line (about 2 s or more) per character with `edit_segments`, then call
    `match_speakers`. It returns `suggested_match` rows for unnamed lines and
    `possible_misattribution` rows where a named or automatic line sounds more like another
@@ -107,7 +108,8 @@ download (`allow_download=true`) and only import media the user may use.
   exact duration and `recording_padding`; replacing audio or regenerating from video
   clears that padding.
 - Optionally call `analyze_video` for deterministic activity suggestions.
-  Whisper transcription is off by default and requires explicit
+  Local transcription (`use_whisper`; `model` defaults to `parakeet`, with Whisper
+  `base`/`tiny` for languages Parakeet does not support) is off by default and requires explicit
   `allow_download=true`, even when cached components may only need repair.
   `language` accepts `auto` or a two-/three-letter lowercase code such as `en`.
 - For a project with original YouTube captions, `analyze_video` or `start_analysis`
@@ -246,7 +248,7 @@ Exports are staged, validated, and published transactionally.
 to its model provider.** Captions, project metadata, paths, and other tool results
 can also leave your machine through that client. Local stdio is not a promise of
 local-only AI processing. Check your client's data policy and approve sensitive
-media before requesting previews. Optional local Whisper analysis itself does
+media before requesting previews. Optional local transcription itself does
 not upload source audio or transcripts.
 
 Use media you have permission to process and redistribute. Credit the authors

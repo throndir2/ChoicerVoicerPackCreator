@@ -9,6 +9,24 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+@pytest.fixture(autouse=True)
+def whisper_base_dialog_default(monkeypatch):
+    """Keep the analysis dialog's Whisper tests on Whisper Base; Parakeet tests override this."""
+    import sys
+
+    dialog = sys.modules.get("choicer_voicer_pack_creator.ui.analysis_dialog")
+    if dialog is None:
+        return
+    from dataclasses import replace
+
+    from choicer_voicer_pack_creator import analysis
+
+    monkeypatch.setattr(
+        dialog, "detect_hardware",
+        lambda: replace(analysis.detect_hardware(), recommended_model="base"),
+    )
+
+
 @pytest.fixture
 def inline_youtube_worker(monkeypatch):
     from choicer_voicer_pack_creator import youtube

@@ -879,12 +879,12 @@ def download_youtube(
             except YouTubeError as error:
                 diagnostic_exception("youtube_caption_download_failed", error)
                 diagnostic_event("youtube_caption_fallback", reason="download_failed")
-                notes.append(f"Captions could not be downloaded; Whisper can draft them: {error}")
+                notes.append(f"Captions could not be downloaded; local transcription can draft them: {error}")
         else:
             diagnostic_event("youtube_caption_fallback", reason="no_usable_track")
             notes.append(
                 "No usable creator or automatic captions were available for the chosen "
-                f"language ({language}). Local Whisper will draft captions instead."
+                f"language ({language}). Local transcription will draft captions instead."
             )
         _check_cancel(cancelled)
         if existing is not None and not overwrite:
@@ -930,11 +930,11 @@ def download_youtube(
                 diagnostic_event("youtube_caption_data_parsed", caption_count=len(captions))
                 if not captions:
                     diagnostic_event("youtube_caption_fallback", reason="no_usable_timed_text")
-                    notes.append("The caption track had no usable timed text; Whisper will draft it.")
+                    notes.append("The caption track had no usable timed text; local transcription will draft it.")
             except (KeyError, TypeError, ValueError) as error:
                 diagnostic_exception("youtube_caption_parse_failed", error)
                 diagnostic_event("youtube_caption_fallback", reason="invalid_caption_data")
-                notes.append(f"Caption data was invalid; Whisper will draft captions instead: {error}")
+                notes.append(f"Caption data was invalid; local transcription will draft captions instead: {error}")
         progress("Publishing downloaded video...", None)
         _check_cancel(cancelled)
         folder = existing.folder if existing else (

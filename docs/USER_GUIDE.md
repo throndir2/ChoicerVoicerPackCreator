@@ -97,7 +97,7 @@ as these builds are not code-signed.
 
 - Creates a new project from MP4, MKV, MOV, WebM, OGV, or AVI video.
 - Keeps multiple projects in independent tabs, with an optional separate **Tasks** window.
-- Downloads a single YouTube video from its URL and offers YouTube and local Whisper transcripts
+- Downloads a single YouTube video from its URL and offers YouTube and local speech-model transcripts
   side by side, each with its own text and timings.
 - Plays the source video inside the editor. Press **Space** in the video preview, timeline,
   or segment list to play/pause; spaces still work normally when editing text.
@@ -148,7 +148,7 @@ as these builds are not code-signed.
 	Prompt audio from the source video is regenerated on export, not while dragging.
 - Highlights substantial, non-identical segment overlaps for deterministic human review.
 - Offers a one-time initial scan that proposes editable ranges from deterministic audio activity.
-- Optionally downloads a pinned local Whisper CPU runtime/model to draft captions and timestamps;
+- Optionally downloads a pinned local Parakeet (or, for other languages, Whisper) model to draft captions and timestamps;
 	source audio and transcripts are not uploaded.
 - Assigns one or more speakers and an exact performance line to every segment.
 - Duplicates a segment at the same timestamp for independently recorded simultaneous speakers.
@@ -372,39 +372,47 @@ Select a single row again to edit or preview an individual segment and resume pl
 
 The nonmodal analysis window opens after **File → New → From Video** and can be reopened with **Project →
 Analyze Video & Suggest Segments** (`Ctrl+Shift+R`). New local-video and YouTube imports both start
-Whisper automatically, subject to download consent, while reopening existing drafts does not rerun it.
+local transcription automatically, subject to download consent, while reopening existing drafts does not rerun it.
 Backing generation, waveform extraction, caption refinement, and transcription are independent tasks;
 waiting for one does not block editing another project. The window also offers a dependency-free activity
 scan with Balanced, Sensitive, and Conservative modes. This scan measures deterministic audio
 energy and suggests possible regions; music, effects, and silence changes can still be false
 positives.
 
-Local transcription is optional. On first use, the app asks before downloading:
+Local transcription is optional. The default model is NVIDIA **Parakeet TDT 0.6B v3**, the same
+speech model that AudioTranscriber uses. It is more accurate and much faster on the CPU than
+Whisper, and it detects which of its 25 European languages is spoken. On first use, the app asks
+before it downloads the pinned int8 model (about 465 MiB) and unpacks it (about 640 MiB on disk).
+The app splits long audio at quiet points into chunks of at most 30 seconds and runs the model in
+a separate worker process.
+
+For other languages, such as Japanese, Chinese, or Korean, choose a Whisper model in
+**Transcription model (next scan)**. When you select a language that Parakeet does not support,
+the app selects Whisper Base for you. On first use of Whisper, the app asks before downloading:
 
 - an official, pinned whisper.cpp 1.9.3 Windows x64 CPU runtime (about 8 MiB); and
 - either the multilingual Tiny model (about 74 MiB) or Base model (about 141 MiB).
 
-The app recommends Base when at least 2 GiB of physical memory is currently available and Tiny on
-more constrained systems. The
-CPU runtime automatically selects an optimized instruction-set backend and does not require CUDA.
+The app recommends Parakeet when at least 2 GiB of physical memory is currently available and
+Whisper Tiny on more constrained systems. Both runtimes use the CPU and do not require CUDA.
 Every download uses an immutable upstream revision and is checked for exact size and SHA-256 before
 use. Components are cached in the current user's local application-data directory, while temporary
 analysis audio and transcript JSON are deleted after each scan.
 
 Results list editable In/Out values and draft captions. Double-click a line or use **Play Selected
-Whisper Line** (or **Play Selected Range** for an activity-only scan) to audition it. Uncheck unwanted
-lines, correct text, then use the highlighted **Use Whisper Transcript** action. **Rerun Whisper**
+Transcript Line** (or **Play Selected Range** for an activity-only scan) to audition it. Uncheck unwanted
+lines, correct text, then use the highlighted **Use Local Transcript** action. **Transcribe Again**
 is a separate, secondary action. Existing drafts stay editable during a rerun; if they change
 before it finishes, the new candidate requires an explicit replacement decision. Existing segments
 are never replaced. Suggested segments initially have no speaker. Name a reviewed dialogue segment
 to start optional background matching, or assign every speaker manually.
-Whisper is probabilistic and can mishear names, stylized vocalizations, non-English speech, music,
+Speech models are probabilistic and can mishear names, stylized vocalizations, non-English speech, music,
 or overlapping speakers, so every result remains review evidence rather than authoritative data.
 One language selection applies to an entire scan; use Auto-detect for primarily single-language
 sources, or rerun selected-language passes when a video deliberately mixes languages. Long videos
 also receive conservative free-disk and memory checks before analysis begins.
 
-New Whisper and YouTube drafts include **up to 0.15 seconds of source audio before**
+New local transcript and YouTube drafts include **up to 0.15 seconds of source audio before**
 and **0.25 seconds after** each range. These are real audio handles, not inserted silence, so
 slightly early consonants and trailing syllables can survive extraction. Short gaps are shared
 at their midpoint to avoid introducing overlaps; touching ranges have no room for extra audio,
@@ -422,9 +430,9 @@ that silence cannot recover speech already cut out of the source.
 
 Model download is setup, not transcription completion. The window identifies download,
 checksum verification, model loading, and audio processing as separate steps. During transcription
-it shows Whisper's reported percentage of audio processed and elapsed time; model loading and
-the first audio block show an elapsed-time status until Whisper reports measurable progress.
-The scan button says **Whisper Running** while busy and is not highlighted. **Cancel Scan** remains
+it shows the percentage of audio processed. Whisper also shows the elapsed time; its model loading and
+first audio block show an elapsed-time status until Whisper reports measurable progress.
+The scan button says **Transcribing...** while busy and is not highlighted. **Cancel Scan** remains
 available. Runtime startup and transcription have generous time limits so a stalled process reports
 an error rather than waiting indefinitely, without removing saved drafts.
 
@@ -471,20 +479,20 @@ Select another language or type a code such as `pt-BR` to use that language's ca
 available. **Original language (auto)** is an opt-in choice that uses YouTube's language metadata
 where available. YouTube-generated translations are excluded, but creator-uploaded tracks can
 themselves be translations. If the chosen language has no usable captions, the import reports
-that and falls back to local Whisper. Caption delivery can fail independently of the video download.
+that and falls back to local transcription. Caption delivery can fail independently of the video download.
 
 The **YouTube** panel stays empty until a local audio-only refinement pass finishes on a
 background task, then selects the processed draft for review and use. Unprocessed YouTube
 captions are never displayed or offered for import. Refinement requires no model download;
 original caption evidence stays in the project for regeneration, not as another transcript choice.
 Whisper starts independently, asking permission first if its runtime/model must be downloaded.
-Its result appears alongside YouTube in the **Whisper Transcript**
+Its result appears alongside YouTube in the **Local Transcript**
 panel without changing the selected draft. Each transcript keeps its own row count, text, and
 In/Out boundaries: a longer Whisper passage is not
 forced onto shorter YouTube captions or flagged as a conflict. You can edit, preview, and uncheck
 rows in each draft independently.
 The playback button names the chosen source: **Play Selected YouTube Line** or
-**Play Selected Whisper Line**.
+**Play Selected Transcript Line**.
 
 To adjust pause-aware segmentation, use the **YouTube** panel and click
 **Refine YouTube Again...**. Refinement and Whisper have separate task entries and cancellation. Refinement
@@ -532,24 +540,24 @@ drafts retain corrected boundaries, review notes, confidence, and checked states
 boundaries to recover clipped words; increasing export padding alone cannot fix an early
 ending or late start.
 
-Click **Use YouTube Transcript** or **Use Whisper Transcript** directly below the
+Click **Use YouTube Transcript** or **Use Local Transcript** directly below the
 draft you want. Both buttons remain visible; you do not need to select that source first.
 Each button is enabled when its draft is ready and at least one row is checked.
 Click a row in a draft or its **Select** control to choose it for playback and the Enter-key
-Use action; merely finishing a background Whisper run does not select it.
+Use action; merely finishing a background transcription run does not select it.
 The checked rows from that source become editable project segments with that source's timings
 and no assigned speakers. Other sources are not mixed in. Playback also uses the chosen draft's
 own edited In/Out range. Choosing an available draft does not cancel another running task.
 Existing project segments are never
 silently replaced; adding another set requires confirmation.
 
-If captions are unavailable, the same automatic Whisper pass drafts suggestions from the audio.
-Declining Whisper setup or a failed/canceled/empty Whisper scan leaves downloaded media and all
-existing drafts intact. **Whisper model (next scan)** and **Spoken language (next scan)** affect
+If captions are unavailable, the same automatic transcription pass drafts suggestions from the audio.
+Declining model setup or a failed/canceled/empty transcription scan leaves downloaded media and all
+existing drafts intact. **Transcription model (next scan)** and **Spoken language (next scan)** affect
 only a new run; they do not select or change an existing transcript. The current local draft
 shows the model and detected language from its last successful nonempty scan, also after
 saving and reopening the project. Drafts without model information say **model not recorded**.
-If a larger model fails due to memory limits, click **Use Whisper Transcript** below the
+If a larger model fails due to memory limits, click **Use Local Transcript** below the
 retained draft to use it without rerunning.
 If all rows are unchecked, check at least one before using the transcript.
 If automatic refinement fails, is canceled, or returns no rows, no original rows are shown as a

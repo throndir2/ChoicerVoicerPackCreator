@@ -29,9 +29,33 @@ The build recipe records the configure command and exact source recipes for FFmp
 
 FFmpeg is a trademark of Fabrice Bellard. Choicer Voicer Pack Creator is not affiliated with the FFmpeg project or BtbN.
 
+## Local Parakeet transcription
+
+The **Analyze Video** feature transcribes speech locally with NVIDIA **Parakeet TDT 0.6B v3**
+through **sherpa-onnx 1.13.8** (Apache-2.0), the same model and runtime that AudioTranscriber
+uses. The `sherpa-onnx` and `sherpa-onnx-core` wheels are bundled in the portable application;
+`sherpa-onnx-core` includes its own ONNX Runtime DLL (MIT). Their package metadata and license
+notices are retained under `licenses/python/`. Inference runs in an isolated worker process.
+
+The model is **not included in the application ZIP**. After the user's permission, the app
+downloads the int8 ONNX export published by the sherpa-onnx project and stores it in the current
+user's local application-data directory, with a `NOTICE.txt` beside the files.
+
+- Model: [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3),
+  licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+- int8 ONNX export: `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2` from
+  <https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models>
+- Archive size and SHA-256: 487,170,055 bytes,
+  `5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf`
+- Pinned file sizes and hashes: `src/choicer_voicer_pack_creator/parakeet.py`
+
+Parakeet supports 25 European languages. For other languages, the app keeps the optional
+whisper.cpp models below.
+
 ## Optional whisper.cpp analysis
 
-The optional **Analyze Video** feature can download an unmodified CPU build of
+For languages that Parakeet does not support, the optional **Analyze Video** feature can download
+an unmodified CPU build of
 [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and a converted OpenAI Whisper model into
 the current user's local application-data directory. These files are not included in the base
 application ZIP. YouTube import starts local transcription automatically, but downloading missing

@@ -566,7 +566,7 @@ class PackAutomation:
     ) -> dict[str, Any]:
         if (use_whisper or align_captions) and not allow_download:
             raise ValueError(
-                "Whisper or caption alignment may download or repair pinned components. "
+                "Transcription or caption alignment may download or repair pinned components. "
                 "Obtain permission, then set "
                 "allow_download=true. Activity-only scanning never downloads anything."
             )
@@ -767,7 +767,7 @@ class PackAutomation:
             )
         if source != "captions" and not allow_download:
             raise ValueError(
-                "Whisper and caption alignment may download or repair pinned components. "
+                "Transcription and caption alignment may download or repair pinned components. "
                 "Obtain permission, then set allow_download=true."
             )
         if source != "whisper" and not project.source_captions:
@@ -908,9 +908,17 @@ class PackAutomation:
     ) -> dict[str, Any]:
         if not allow_download:
             raise ValueError(
-                "Whisper may download or repair pinned components. Obtain permission, then set "
+                "Transcription may download or repair pinned components. Obtain permission, then set "
                 "allow_download=true."
             )
+        if model == "parakeet":
+            from choicer_voicer_pack_creator.parakeet import MODEL_NAME, supports_language
+
+            if not supports_language(language):
+                raise ValueError(
+                    f"{MODEL_NAME} supports 25 European languages. "
+                    "Choose model='base' or 'tiny' (Whisper) for this spoken language."
+                )
         snapshot = self.access.snapshot()
         project = snapshot.project
         if segment_ids:
@@ -967,11 +975,23 @@ class PackAutomation:
                     spans.append((cursor / rate, (cursor + len(frames) // 2) / rate))
                     output.writeframes(silence)
                     cursor += len(frames) // 2 + len(silence) // 2
-            manager = WhisperManager(self.data_root)
-            manager.transcribe(
-                combined, folder, model, language, detect_hardware(), progress, cancelled,
-            )
-            heard = heard_text(folder / f"{WHISPER_TRANSCRIPT_NAME}.json", spans)
+            if model == "parakeet":
+                from choicer_voicer_pack_creator.parakeet import ParakeetManager
+
+                parakeet = ParakeetManager(self.data_root)
+                lines, _duration = parakeet.transcribe_lines(
+                    combined, parakeet.ensure_model(progress, cancelled), detect_hardware(),
+                    progress, cancelled,
+                )
+                heard = heard_lines(
+                    [(line.start, line.end, line.text) for line in lines], spans,
+                )
+            else:
+                manager = WhisperManager(self.data_root)
+                manager.transcribe(
+                    combined, folder, model, language, detect_hardware(), progress, cancelled,
+                )
+                heard = heard_text(folder / f"{WHISPER_TRANSCRIPT_NAME}.json", spans)
         results = []
         for (segment, *_), text in zip(ranges, heard, strict=True):
             comparison = compare_transcript(segment.caption, text)
@@ -988,7 +1008,7 @@ class PackAutomation:
             "skipped": skipped,
             "flagged": sum(bool(item["flags"]) for item in results),
             "note": (
-                "Heard text is local Whisper recognition of each exported prompt (with padding). "
+                "Heard text is local speech recognition of each exported prompt (with padding). "
                 "Low similarity or clipped flags are evidence for review, not the correct line."
             ),
         }
@@ -1161,9 +1181,29 @@ class PackAutomation:
         return described
 
 
+def _nearest_span(spans: list[tuple[float, float]], starts: list[float], middle: float) -> int:
+    import bisect
+
+    index = max(0, bisect.bisect_right(starts, middle) - 1)
+    if index + 1 < len(spans) and middle - spans[index][1] > spans[index + 1][0] - middle:
+        index += 1
+    return index
+
+
+def heard_lines(
+    lines: list[tuple[float, float, str]], spans: list[tuple[float, float]],
+) -> list[str]:
+    """Assign timed transcript lines in a concatenated recording back to the source pieces."""
+    pieces: list[list[str]] = [[] for _ in spans]
+    starts = [start for start, _ in spans]
+    for start, end, text in lines:
+        if spans and text.strip():
+            pieces[_nearest_span(spans, starts, (start + end) / 2)].append(text.strip())
+    return [" ".join(" ".join(piece).split()) for piece in pieces]
+
+
 def heard_text(transcript: Path, spans: list[tuple[float, float]]) -> list[str]:
     """Assign Whisper tokens in a concatenated recording back to the source pieces."""
-    import bisect
     import re
 
     value = json.loads(transcript.read_text(encoding="utf-8-sig"))
@@ -1185,13 +1225,8 @@ def heard_text(transcript: Path, spans: list[tuple[float, float]]) -> list[str]:
                 middle = (float(offsets["from"]) + float(offsets["to"])) / 2000
             except (KeyError, TypeError, ValueError):
                 continue
-            index = max(0, bisect.bisect_right(starts, middle) - 1)
-            if index + 1 < len(spans) and (
-                middle - spans[index][1] > spans[index + 1][0] - middle
-            ):
-                index += 1
             if spans:
-                pieces[index].append(text)
+                pieces[_nearest_span(spans, starts, middle)].append(text)
     return [
         " ".join(re.sub(r"\[[^\]]*\]|\([A-Z ]+\)", " ", "".join(piece)).split())
         for piece in pieces

@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from choicer_voicer_pack_creator.analysis import (
+    TRANSCRIPT_SOURCES,
     AnalysisCancelled,
     AnalysisResult,
     AnalysisSuggestion,
@@ -53,6 +54,7 @@ from choicer_voicer_pack_creator.diagnostics import (
 )
 from choicer_voicer_pack_creator.media import MediaTools
 from choicer_voicer_pack_creator.models import AnalysisDraftRow, AnalysisReview, SourceCaption
+from choicer_voicer_pack_creator.parakeet import ParakeetManager, supports_language
 from choicer_voicer_pack_creator.ui.job_worker import JobWorker
 
 
@@ -398,7 +400,7 @@ class AnalysisDialog(QDialog):
         if not self.source_choice:
             options.addRow("Activity scan", self.sensitivity_combo)
 
-        self.whisper_check = QCheckBox("Run local Whisper transcription")
+        self.whisper_check = QCheckBox("Run local transcription")
         self.whisper_check.setChecked(self.source_choice or self.local_source == "Whisper")
         self.whisper_check.setVisible(not self.source_choice)
         self.whisper_check.toggled.connect(self._whisper_toggled)
@@ -406,17 +408,22 @@ class AnalysisDialog(QDialog):
             options.addRow("Transcription", self.whisper_check)
 
         self.model_combo = QComboBox()
-        self.model_combo.addItem("Tiny multilingual · ~74 MiB · fastest", "tiny")
-        self.model_combo.addItem("Base multilingual · ~141 MiB · better accuracy", "base")
+        self.model_combo.addItem(
+            "Parakeet TDT v3 · ~465 MiB · most accurate, 25 European languages", "parakeet",
+        )
+        self.model_combo.addItem("Whisper Base multilingual · ~141 MiB · other languages", "base")
+        self.model_combo.addItem("Whisper Tiny multilingual · ~74 MiB · fastest", "tiny")
         recommended_index = self.model_combo.findData(self.hardware.recommended_model)
         self.model_combo.setCurrentIndex(max(0, recommended_index))
         self.model_combo.currentIndexChanged.connect(
             lambda _index: self._whisper_toggled(self.whisper_check.isChecked())
         )
         self.model_combo.setToolTip(
-            "Model for the next scan only. Changing it does not change or select the current draft."
+            "Model for the next scan only. Changing it does not change or select the current draft. "
+            "Parakeet detects which of its 25 European languages is spoken; "
+            "use Whisper for other languages."
         )
-        options.addRow("Whisper model (next scan)", self.model_combo)
+        options.addRow("Transcription model (next scan)", self.model_combo)
 
         self.language_combo = QComboBox()
         for label, code in (
@@ -442,6 +449,8 @@ class AnalysisDialog(QDialog):
         self.language_combo.setToolTip(
             "Language for the next scan only. The current draft keeps its text and timings."
         )
+        self.language_combo.currentIndexChanged.connect(self._language_changed)
+        self._language_changed()
         options.addRow("Spoken language (next scan)", self.language_combo)
 
         hardware_label = QLabel(self.hardware.description)
@@ -494,7 +503,7 @@ class AnalysisDialog(QDialog):
             self.refined_table.setColumnHidden(5, True)
             self.local_table.setColumnHidden(4, True)
         self.refined_radio = QRadioButton("Select YouTube transcript")
-        self.local_radio = QRadioButton("Select Whisper transcript")
+        self.local_radio = QRadioButton("Select local transcript")
         self.source_group = QButtonGroup(self)
         for radio in (self.refined_radio, self.local_radio):
             radio.setToolTip(
@@ -514,12 +523,12 @@ class AnalysisDialog(QDialog):
             if self.source_captions else
             "No original YouTube caption evidence is available. Reimport the video to retrieve it."
         )
-        self.local_status = QLabel("Whisper has not run yet.")
+        self.local_status = QLabel("Local transcription has not run yet.")
         self.local_draft_label = QLabel()
         self.local_draft_label.setWordWrap(True)
         self.refined_panel = QGroupBox("YouTube", self)
         self.local_panel = QGroupBox(
-            "Whisper Transcript" if self.local_source == "Whisper" else "Detected Audio Ranges",
+            "Local Transcript" if self.local_source == "Whisper" else "Detected Audio Ranges",
             self,
         )
         self.pause_spin = QDoubleSpinBox()
@@ -548,7 +557,7 @@ class AnalysisDialog(QDialog):
             "Higher-accuracy local word alignment using an optional ~1.5 GB model. "
             "Keeps YouTube's text, corrects neighboring cuts together, and checks the proposed "
             "audio ranges. Uncertain rows remain available but unchecked for review. "
-            "Does not change existing project segments or the Whisper draft."
+            "Does not change existing project segments or the local transcript draft."
         )
         if self.source_choice:
             splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -592,7 +601,7 @@ class AnalysisDialog(QDialog):
         controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         controls.button(QDialogButtonBox.StandardButton.Close).setText("Keep Drafts && Close")
         self.scan_button = QPushButton(
-            "Run Whisper" if self.source_choice else "Scan Video"
+            "Transcribe" if self.source_choice else "Scan Video"
         )
         self.scan_button.setAutoDefault(False)
         self.scan_button.clicked.connect(self.start_scan)
@@ -606,7 +615,7 @@ class AnalysisDialog(QDialog):
         self.preview_button.clicked.connect(self.preview_current_row)
         controls.addButton(self.preview_button, QDialogButtonBox.ButtonRole.ActionRole)
         self.refined_add_button = QPushButton("Use YouTube Transcript", self.refined_panel)
-        self.local_add_button = QPushButton("Use Whisper Transcript", self.local_panel)
+        self.local_add_button = QPushButton("Use Local Transcript", self.local_panel)
         for button, radio, panel in (
             (self.refined_add_button, self.refined_radio, self.refined_panel),
             (self.local_add_button, self.local_radio, self.local_panel),
@@ -638,7 +647,7 @@ class AnalysisDialog(QDialog):
         if review:
             self._populate_rows(self.local_table, review.local_rows)
             self._populate_rows(self.refined_table, review.refined_rows)
-            self.local_status.setText(f"Saved {self.local_source} draft: {len(review.local_rows)} rows.")
+            self.local_status.setText(f"Saved {self._local_label} draft: {len(review.local_rows)} rows.")
             if review.refined_rows:
                 self.refined_status.setText(
                     f"Saved YouTube draft: {len(review.refined_rows)} rows. "
@@ -697,6 +706,11 @@ class AnalysisDialog(QDialog):
             return "refined"
         return "local"
 
+    @property
+    def _local_label(self) -> str:
+        # "Whisper" is the stored key for any model transcript, including Parakeet.
+        return "transcript" if self.local_source == "Whisper" else self.local_source
+
     def _create_table(self) -> QTableWidget:
         table = QTableWidget(0, 6, self)
         table.setItemDelegate(DraftDelegate(table))
@@ -715,7 +729,7 @@ class AnalysisDialog(QDialog):
             "Automatic transcripts can mishear names, stylized speech, music, and overlapping voices."
         )
         table.horizontalHeaderItem(5).setToolTip(
-            "Whisper token scores are not accuracy guarantees."
+            "Model token scores are not accuracy guarantees."
         )
         table.setAlternatingRowColors(True)
         table.verticalHeader().hide()
@@ -783,7 +797,7 @@ class AnalysisDialog(QDialog):
                     radio.setChecked(True)
                     break
         self.local_radio.setText(
-            "Select Whisper transcript" if self.local_source == "Whisper" else "Select detected ranges"
+            "Select local transcript" if self.local_source == "Whisper" else "Select detected ranges"
         )
         if self.local_table.rowCount():
             details = ""
@@ -793,7 +807,7 @@ class AnalysisDialog(QDialog):
                     details += f"; detected {self.local_detected_language}"
                 details += ")"
             self.local_draft_label.setText(
-                f"Current draft: {self.local_table.rowCount()} {self.local_source} rows{details}."
+                f"Current draft: {self.local_table.rowCount()} {self._local_label} rows{details}."
             )
         else:
             self.local_draft_label.setText("No current local draft is available.")
@@ -819,10 +833,12 @@ class AnalysisDialog(QDialog):
             "refined": "YouTube", "local": self.local_source,
         }[self.selected_source]
         self.local_add_button.setText(
-            "Use Whisper Transcript" if self.local_source == "Whisper" else "Use Detected Ranges"
+            "Use Local Transcript" if self.local_source == "Whisper" else "Use Detected Ranges"
         )
         if source in {"YouTube", "Whisper"}:
-            self.preview_button.setText(f"Play Selected {source} Line")
+            self.preview_button.setText(
+                f"Play Selected {'Transcript' if source == 'Whisper' else source} Line"
+            )
         else:
             self.preview_button.setText("Play Selected Range")
         self.preview_button.setToolTip(
@@ -834,13 +850,13 @@ class AnalysisDialog(QDialog):
         if self.worker is not None:
             self.scan_button.setText(
                 "Refining YouTube..." if self.worker.source_captions is not None else
-                "Whisper Running..." if self.worker.use_whisper else "Scanning Audio..."
+                "Transcribing..." if self.worker.use_whisper else "Scanning Audio..."
             )
             self.scan_button.setEnabled(False)
         else:
             rerun = bool(self.local_table.rowCount())
             self.scan_button.setText(
-                ("Rerun Whisper..." if rerun else "Run Whisper")
+                ("Transcribe Again..." if rerun else "Transcribe")
                 if whisper else ("Rescan Audio..." if rerun else "Scan Audio")
             )
             self.scan_button.setEnabled(not self._close_after_cancel)
@@ -870,6 +886,14 @@ class AnalysisDialog(QDialog):
             "Generate a new local draft. To import an existing result, use its highlighted Use button."
         )
 
+    def _language_changed(self, _index: int = 0) -> None:
+        language = str(self.language_combo.currentData())
+        if self.model_combo.currentData() == "parakeet" and not supports_language(language):
+            with QSignalBlocker(self.model_combo):
+                self.model_combo.setCurrentIndex(self.model_combo.findData("base"))
+            if hasattr(self, "setup_label"):
+                self._whisper_toggled(self.whisper_check.isChecked())
+
     def _whisper_toggled(self, checked: bool) -> None:
         self.model_combo.setEnabled(checked)
         self.language_combo.setEnabled(checked)
@@ -881,6 +905,17 @@ class AnalysisDialog(QDialog):
             )
             return
         model_key = str(self.model_combo.currentData())
+        if model_key == "parakeet":
+            try:
+                installed = ParakeetManager(self.data_root).installed
+            except Exception as error:
+                diagnostic_exception("parakeet_installation_status_failed", error)
+                installed = False
+            self.setup_label.setText(
+                "Model installed. Audio and transcripts stay local." if installed else
+                "First use: ~465 MiB Parakeet model download. Audio and transcripts stay local."
+            )
+            return
         size = 141 if model_key == "base" else 74
         try:
             manager = WhisperManager(self.data_root)
@@ -942,22 +977,54 @@ class AnalysisDialog(QDialog):
             if accepted and not self._close_after_cancel:
                 self._start_worker(use_whisper=use_whisper, model_key=model_key, language=language)
             else:
-                self.progress_label.setText(f"Whisper not started. {self._recovery_hint()}")
+                self.progress_label.setText(f"Transcription not started. {self._recovery_hint()}")
                 report_processing(self, "analysis", "cancelled", "Transcription paused; existing drafts kept.")
 
-        if use_whisper:
+        if use_whisper and model_key == "parakeet":
+            parakeet = ParakeetManager(self.data_root)
+            diagnostic_event("parakeet_setup_checked", model_missing=not parakeet.installed)
+            if not parakeet.installed:
+                download_mib = parakeet.download_bytes / 1024**2
+
+                def parakeet_consent(accepted: bool) -> None:
+                    diagnostic_event("parakeet_download_consent", accepted=accepted)
+                    start(accepted)
+
+                coordinator = getattr(_workspace_for(self), "setup_consent", None)
+                if coordinator is not None:
+                    self._consent_callback = parakeet_consent
+                    report_processing(
+                        self, "analysis", "consent", "Waiting for Parakeet download permission.",
+                    )
+                    coordinator.request(
+                        self.project_id,
+                        {parakeet.component_key: f"Parakeet TDT v3 model (~{download_mib:.0f} MiB)"},
+                        parakeet_consent, _current_dialog_request(self),
+                    )
+                else:
+                    show_message(
+                        self, "question",
+                        "Download local transcription components?",
+                        f"This one-time setup will download approximately {download_mib:.0f} MiB: "
+                        "the checksum-verified NVIDIA Parakeet TDT v3 speech model (CC BY 4.0). "
+                        "It is stored only for your Windows user and can be deleted later from "
+                        "local application data. Continue?",
+                        parakeet_consent, QMessageBox.StandardButton.Yes,
+                    )
+                return
+        elif use_whisper:
             try:
                 manager = WhisperManager(self.data_root)
             except Exception as error:
                 diagnostic_exception("whisper_setup_unavailable", error)
                 hint = self._recovery_hint()
-                self.progress_label.setText(f"Whisper not started. {hint}")
+                self.progress_label.setText(f"Transcription not started. {hint}")
                 self._pending_scan = False
                 self._update_scan_button()
                 report_processing(self, "analysis", "failed", f"Whisper setup is unavailable: {error}")
                 if not self.background or self.isVisible():
                     show_message(
-                        self, "critical", "Whisper setup is unavailable", f"{error}\n\n{hint}"
+                        self, "critical", "Transcription setup is unavailable", f"{error}\n\n{hint}"
                     )
                 return
             model_missing = not manager.model_path(model_key).is_file()
@@ -1051,7 +1118,7 @@ class AnalysisDialog(QDialog):
                 self, "question",
                 "Replace YouTube draft?",
                 "A successful refinement will replace only the YouTube draft and its edits, "
-                "using the original imported captions. Your Whisper draft will not change. "
+                "using the original imported captions. Your local transcript draft will not change. "
                 "Edits made while refining are kept until you apply the new result. "
                 "A failed or canceled scan keeps all drafts. Continue?",
                 start,
@@ -1150,7 +1217,7 @@ class AnalysisDialog(QDialog):
             show_message(
                 self, "question", "Replace YouTube draft with aligned timings?",
                 "A successful alignment will replace only the YouTube draft, using the original "
-                "imported caption text. Existing project segments and the Whisper draft stay "
+                "imported caption text. Existing project segments and the local transcript draft stay "
                 "unchanged. Edits made while waiting or processing are kept until you apply the "
                 "new result. Failed or canceled work keeps all drafts. Continue?",
                 authorize,
@@ -1172,7 +1239,7 @@ class AnalysisDialog(QDialog):
         target_status.setText(
             "Aligning and checking YouTube word timings..." if align_captions else
             "Measuring audio pauses for YouTube captions..." if refine else
-            "Whisper is running..." if use_whisper else "Scanning audio activity..."
+            "Transcription is running..." if use_whisper else "Scanning audio activity..."
         )
         self._update_selection_controls()
         if not refine or self.job_manager is None:
@@ -1206,7 +1273,7 @@ class AnalysisDialog(QDialog):
                 "refinement" if refine else "analysis",
                 "Align YouTube word timings" if align_captions else
                 "Refine YouTube captions" if refine else
-                "Whisper transcription" if use_whisper else "Scan audio",
+                "Local transcription" if use_whisper else "Scan audio",
                 resource_class="cpu", read_paths=(self.video,),
                 resource_keys=("whisper-inference",) if use_whisper or align_captions else (),
                 source_snapshot=self.source_snapshot,
@@ -1283,7 +1350,7 @@ class AnalysisDialog(QDialog):
         self._commit_draft_editors()
         revision = None if apply else self._run_revisions.pop(refine, None)
         has_rows = bool(value.refined_captions) if refine else any(
-            item.source == "Whisper" or not self.source_choice for item in value.suggestions
+            item.source in TRANSCRIPT_SOURCES or not self.source_choice for item in value.suggestions
         )
         if has_rows and revision is not None and revision != self._draft_revisions[refine]:
             self._pending_results[refine] = value
@@ -1345,7 +1412,7 @@ class AnalysisDialog(QDialog):
             self.review_changed.emit(self.review_state())
             return
         suggestions = [
-            item for item in value.suggestions if item.source == "Whisper"
+            item for item in value.suggestions if item.source in TRANSCRIPT_SOURCES
         ] if self.source_choice else value.suggestions
         if not suggestions:
             self._empty_result()
@@ -1355,10 +1422,10 @@ class AnalysisDialog(QDialog):
         self.local_model_name = value.model_name or ""
         self.local_detected_language = value.detected_language or ""
         self.local_panel.setTitle(
-            "Whisper Transcript" if value.model_name else "Detected Audio Ranges"
+            "Local Transcript" if value.model_name else "Detected Audio Ranges"
         )
         self._populate(suggestions)
-        self.local_status.setText(f"{len(suggestions)} {self.local_source} rows.")
+        self.local_status.setText(f"{len(suggestions)} {self._local_label} rows.")
         language = f" · detected {value.detected_language}" if value.detected_language else ""
         self.progress_label.setText(
             f"Review {len(suggestions)} local suggestion(s) · "
@@ -1387,6 +1454,8 @@ class AnalysisDialog(QDialog):
     def _recovery_hint(self, *, refine: bool = False) -> str:
         table = self.refined_table if refine else self.local_table
         source = "YouTube" if refine else self.local_source
+        if source == "Whisper":
+            source = "Local"
         if table.rowCount():
             action = f"Use {source} Transcript" if source != "Audio activity" else "Use Detected Ranges"
             return (
