@@ -118,7 +118,9 @@ You can edit from the first second. All the slow work runs in the background, so
 ### 🤖 Works with AI assistants
 
 Connect an AI assistant that supports the Model Context Protocol (MCP), an open standard for AI
-tools. The assistant can review media, edit lines, and export packs with you. This is optional.
+tools. The assistant can review media, edit lines, and export packs with you. It can also make a
+complete pack with no window: import from YouTube, draft lines, fix split or badly cut lines,
+check speakers, and make the backing track. This is optional.
 See the [AI assistant guide](https://github.com/throndir2/ChoicerVoicerPackCreator/blob/main/MCP/README.md).
 
 ### 🔒 Private by design
@@ -137,6 +139,9 @@ See the [AI assistant guide](https://github.com/throndir2/ChoicerVoicerPackCreat
 5. Check the lines and the speakers, then click **Export**.
 6. Copy the exported pack folder into the game's `packs_voice` folder. This is normally
    `%APPDATA%\YeahMaybe\ChoicerVoicer\game\packs_voice`.
+
+**Do not want to install?** Download the file that ends in `-Portable-Windows-x64.zip` instead.
+Extract all of its files, then run `Choicer Voicer Pack Creator.exe`.
 
 The [user guide](https://github.com/throndir2/ChoicerVoicerPackCreator/blob/main/docs/USER_GUIDE.md)
 explains every feature in detail.

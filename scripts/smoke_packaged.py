@@ -57,6 +57,15 @@ REQUIRED_MCP_TOOLS = {
     "export_pack",
     "validate_pack",
     "show_in_editor",
+    "import_youtube",
+    "get_source_captions",
+    "draft_segments",
+    "review_segments",
+    "merge_segments",
+    "split_segment",
+    "transcribe_segments",
+    "match_speakers",
+    "generate_backing_track",
 }
 SINGING_VERSIONS = {
     "torch": "2.8.0+cpu", "torchaudio": "2.8.0+cpu",

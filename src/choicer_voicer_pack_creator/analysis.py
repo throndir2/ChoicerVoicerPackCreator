@@ -55,6 +55,7 @@ ProgressCallback = Callable[[str, float | None], None]
 CancelCallback = Callable[[], bool]
 BUFFER_SIZE = 1024 * 1024
 DIAGNOSTIC_HEARTBEAT_SECONDS = 5.0
+WHISPER_TRANSCRIPT_NAME = "whisper-transcript"
 ALLOWED_DOWNLOAD_HOSTS = {
     "github.com",
     "release-assets.githubusercontent.com",
@@ -822,7 +823,7 @@ class WhisperManager:
         with wave.open(str(wav_path), "rb") as audio_source:
             audio_duration = audio_source.getnframes() / max(1, audio_source.getframerate())
         output_directory.mkdir(parents=True, exist_ok=True)
-        output_base = output_directory / "whisper-transcript"
+        output_base = output_directory / WHISPER_TRANSCRIPT_NAME
         model_name = self.models[model_key]["name"]
         progress(f"Loading {model_name} on CPU; transcription starts after model loading...", None)
         command = [

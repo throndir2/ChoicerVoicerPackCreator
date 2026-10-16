@@ -169,6 +169,14 @@ reference for argument names, limits, and defaults. `get_help` returns the app v
 | `validate_project` | Report problems that must be resolved before export. |
 | `export_pack` | Revision-check the saved project, then transactionally publish its validated folder and ZIP. |
 | `validate_pack` | Validate an existing folder and, optionally, its ZIP. |
+| `import_youtube` | Download a public YouTube video and its captions into a new document. |
+| `get_source_captions` | Read the imported captions, paginated (`get_project` reports only their count). |
+| `draft_segments` | Make draft segments from captions (no download), aligned captions, or local Whisper. |
+| `review_segments` | Hints: merge candidates for split sentences, bad timing, overlaps, duplicates, missing speakers. |
+| `merge_segments` / `split_segment` | Join split rows into one line (optionally with a corrected caption), or divide a row. |
+| `transcribe_segments` | Recognize each exported prompt with local Whisper and flag wrong captions and clipped cuts. |
+| `match_speakers` | Compare voices with named references; suggest names and flag likely wrong speakers. |
+| `generate_backing_track` | Separate the source into a voice-free backing track and select it. |
 | `show_in_editor` | Live mode only: select a segment and/or seek for human review. |
 | `start_export` / `start_analysis` | Live mode: submit snapshot processing and return a task record immediately. |
 | `list_jobs` / `get_job` / `cancel_job` | Live mode: inspect shared Tasks and request cooperative cancellation. |
@@ -372,7 +380,7 @@ real author credits, and timings you have reviewed.
    In live mode, committed names can trigger background matching of blank segments, subject to
    the editor's nonmodal model-download consent. Manual edits win over stale background results.
    These completions change the document revision; read it again before the next edit/save.
-   Headless metadata edits do not launch automatic matching or download speaker models.
+   Headless metadata edits do not launch automatic matching; call `match_speakers` instead.
 5. Review frames and prompt audio with the user, and correct boundaries, captions, and speakers.
    Use `show_in_editor` for review in live mode. Only request previews after considering the
    disclosure below.
@@ -447,12 +455,48 @@ absolute local paths and the supported project/segment fields. External segment 
 timestamps. Source media and imported packs are not mutated. Preserve imported prompt recordings
 unless explicitly choosing source-video regeneration.
 
-The editor supports **YouTube import and local backing-track separation**, but these MCP tools
-do **not** expose those workflows yet. Use the editor for those operations, then save and open
-the project through MCP, or reference prepared local media/backing assets. `new_project` takes
-a local video path; it does not download a video or automatically generate a backing track.
-The MCP tools also do not provide OCR or wiki/dialogue lookup. Without a selected backing track,
-MCP export generates silence rather than using the original voices as backing audio.
+`import_youtube` downloads a public video and its captions into a new document, and
+`generate_backing_track` makes a local voice-free backing track. `new_project` takes a local
+video path and does not generate a backing track. The MCP tools do not provide OCR or
+wiki/dialogue lookup. Without a selected backing track, MCP export generates silence rather
+than using the original voices as backing audio.
+
+### Example: make a complete pack headless
+
+An assistant can make a pack with no window, from a YouTube link to an exported ZIP. Every
+tool below also works in live mode. Get the user's permission before each download
+(`allow_download=true`), and only import media that the user may use.
+
+1. `import_youtube` with `url`, an absolute `destination_folder`, and `authors`. It creates a
+   new document with the video and its captions. `if_exists` selects `reuse` or `overwrite`
+   when the same video is already in that folder.
+2. `draft_segments` with `source: "captions"` makes one draft segment per caption row, refined
+   with measured audio pauses. It needs no download. Use `"aligned_captions"` for the
+   high-accuracy timing model, or `"whisper"` for a video without captions. Fully bracketed
+   sound captions such as `[Music]` are skipped by default.
+3. `review_segments` returns `merge_candidates` and per-segment `issues`. YouTube captions often
+   split one sentence over several rows; a candidate groups rows when a row has no
+   sentence-ending punctuation or the next row starts in lowercase, the gap is small, and the
+   speakers agree. Issues include `range_may_cut_speech`, `range_may_include_silence`,
+   `too_short`, `too_long`, `overlaps_next`, `duplicate_of_next`, `repeats_words_into_next`,
+   `nonverbal_caption`, `missing_speaker`, and `automatic_speaker`. These are hints: the
+   assistant reads the text and decides.
+4. `merge_segments` takes `groups: [{segment_ids, caption?, characters?}]`. Use `caption` to
+   give the joined sentence correct punctuation and casing. `split_segment` divides one row at
+   a source timestamp. `edit_segments` retimes, rewrites, or deletes rows.
+5. `transcribe_segments` runs local Whisper on each exported prompt, with padding, and compares
+   the result with the caption. `caption_mismatch` shows probably wrong text.
+   `start_may_be_clipped` / `end_may_be_clipped` show a cut that loses words.
+   `extra_speech_at_start` / `extra_speech_at_end` show a cut that includes a neighbor's words.
+   Retime with `edit_segments` and check again. Whisper is also evidence, not the truth.
+6. Name one clear line (about 2 seconds or more) for each character with `edit_segments`, then
+   call `match_speakers`. It returns `suggested_match` rows for unnamed lines and
+   `possible_misattribution` rows where a named or automatic line sounds more like another
+   character (leave-one-out voice similarity). `apply: true` fills only unnamed lines and marks
+   them automatic. Correct names with `edit_segments`.
+7. `generate_backing_track` separates the source and selects the result. `mode: "keep_singing"`
+   keeps sung vocals; its model is CC BY-NC 4.0 (non-commercial).
+8. `validate_project`, `save_project`, then `export_pack`.
 
 ## Privacy and untrusted content
 

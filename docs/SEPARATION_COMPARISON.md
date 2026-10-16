@@ -62,8 +62,8 @@ weights are included in this repository or its application build.
 ## Prepare the common input
 
 Use authorized local media. Do not commit videos, audio excerpts, weights, credentials,
-environments, or results. The app's current MCP API does not expose YouTube downloading;
-the editor's importer or its underlying yt-dlp technology can download public videos.
+environments, or results. The MCP `import_youtube` tool, the editor's importer, or its underlying
+yt-dlp technology can download public videos.
 
 For the requested [Genshin short](https://www.youtube.com/watch?v=tN5JACOEJFM),
 the listening interval is **01:09-01:40**. Prepare 01:04-01:45 as model input, retaining

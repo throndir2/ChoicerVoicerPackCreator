@@ -18,6 +18,7 @@ from pydantic import Field
 from choicer_voicer_pack_creator import __version__
 from choicer_voicer_pack_creator.automation import (
     HeadlessProjectAccess,
+    MergeGroup,
     PackAutomation,
     ProjectPatch,
     Seconds,
@@ -44,11 +45,32 @@ INSTRUCTIONS = (
     " In live mode prefer start_export/start_analysis and inspect get_job: queued is NOT success. "
     "Cancel with cancel_job and wait for terminal cleanup. Semantic tools/get_frame do not prove UI "
     "behavior; opt-in UI tools inspect the actual application window, not the desktop."
+    " Headless pipeline: import_youtube or new_project -> draft_segments -> review_segments "
+    "(merge_segments/split_segment/edit_segments) -> transcribe_segments to check captions and cuts "
+    "-> name reference speakers -> match_speakers -> generate_backing_track -> validate/save/export."
 )
 
 
 def help_text() -> str:
     return (Path(__file__).parent / "resources" / "mcp-help.md").read_text(encoding="utf-8")
+
+
+def isolate_protocol_stdio() -> None:
+    """Keep the protocol pipes private and point the process standard handles at NUL.
+
+    On Windows a spawned worker that touches a pipe while this process has a pending
+    synchronous read on it blocks until the client writes again, so workers stalled.
+    """
+    if os.name != "nt" or sys.stdin is None or sys.stdout is None:
+        return
+    sys.stdout.flush()
+    protocol_in, protocol_out = os.dup(0), os.dup(1)
+    null = os.open(os.devnull, os.O_RDWR)
+    os.dup2(null, 0)
+    os.dup2(null, 1)
+    os.close(null)
+    sys.stdin = open(protocol_in, encoding="utf-8", errors="replace")  # noqa: SIM115
+    sys.stdout = open(protocol_out, "w", encoding="utf-8", newline="")  # noqa: SIM115
 
 
 def create_server(
@@ -193,6 +215,198 @@ def create_server(
     async def validate_project(project_id: str | None = None) -> dict[str, Any]:
         """Check export readiness and return exact overlap warnings; does not judge dialogue accuracy."""
         return await invoke("Validate project", automation.validate_project, project_id=project_id)
+
+    def reporter(ctx: Context) -> Callable[[str, float | None], None]:
+        step = 0
+
+        def progress(message: str, _fraction: float | None) -> None:
+            nonlocal step
+            step += 1
+            from_thread.run(ctx.report_progress, step, None, message)
+
+        return progress
+
+    def never_cancelled() -> bool:
+        return False
+
+    downloads = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True)
+
+    @server.tool(annotations=downloads)
+    async def import_youtube(
+        url: str,
+        destination_folder: str,
+        ctx: Context,
+        title: str | None = None,
+        authors: list[str] | None = None,
+        caption_language: Annotated[
+            str, Field(pattern=r"^(auto|[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*)$")
+        ] = "en",
+        if_exists: Literal["error", "reuse", "overwrite"] = "error",
+    ) -> dict[str, Any]:
+        """Download a public YouTube video and its captions into a NEW document (works headless).
+
+        destination_folder is an absolute local folder; a YouTube-<id> subfolder is created.
+        Omitted title uses the video title; omitted authors uses the OS user name. Captions are
+        stored as source captions (read them with get_source_captions); call draft_segments next.
+        Only import media the user has permission to use. This can take minutes.
+        """
+        return await invoke(
+            "Import YouTube", automation.import_youtube, url, destination_folder, title, authors,
+            caption_language, if_exists, reporter(ctx), never_cancelled,
+        )
+
+    @server.tool(annotations=read_only)
+    async def get_source_captions(
+        offset: Annotated[int, Field(ge=0)] = 0,
+        limit: Annotated[int, Field(ge=1, le=500)] = 200,
+        include_fragments: bool = False,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Read paginated original imported captions (get_project only reports their count)."""
+        return await invoke(
+            "Read captions", automation.get_source_captions, offset, limit, include_fragments,
+            project_id=project_id,
+        )
+
+    @server.tool(annotations=downloads)
+    async def draft_segments(
+        expected_revision: str,
+        ctx: Context,
+        source: Literal["captions", "aligned_captions", "whisper"] = "captions",
+        replace_existing: bool = False,
+        allow_download: bool = False,
+        model: Literal["tiny", "base"] = "base",
+        language: Annotated[str, Field(pattern=r"^(auto|[a-z]{2,3})$")] = "auto",
+        sensitivity: Literal["balanced", "sensitive", "conservative"] = "balanced",
+        skip_nonverbal: bool = True,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create draft segments (caption text, no speakers) from captions or local Whisper.
+
+        captions: imported YouTube captions refined with measured audio pauses; no download.
+        aligned_captions: optional high-accuracy timing model (~1.5 GB); needs allow_download=true;
+        timing_review_reasons lists rows needing manual review. whisper: local transcription for
+        videos without captions; needs allow_download=true. Refuses to replace existing segments
+        unless replace_existing=true. Drafts are evidence: run review_segments next.
+        """
+        return await invoke(
+            "Draft segments", automation.draft_segments, expected_revision, source,
+            replace_existing, allow_download, model, language, sensitivity, skip_nonverbal,
+            reporter(ctx), never_cancelled, project_id=project_id,
+        )
+
+    @server.tool(annotations=read_only)
+    async def review_segments(
+        offset: Annotated[int, Field(ge=0)] = 0,
+        limit: Annotated[int, Field(ge=1, le=500)] = 200,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Deterministic review hints: merge candidates for sentences split across captions,
+        suspicious timing (range_may_cut_speech, range_may_include_silence, too_short/long),
+        overlaps, duplicated/rolling caption text, nonverbal rows and missing/automatic speakers.
+
+        Hints are evidence. Decide with your own reading of the text, then use merge_segments,
+        split_segment, edit_segments or delete_ids. Paginated over segment indexes.
+        """
+        return await invoke(
+            "Review segments", automation.review_segments, offset, limit, project_id=project_id,
+        )
+
+    @server.tool(annotations=edit)
+    async def merge_segments(
+        expected_revision: str,
+        groups: Annotated[list[MergeGroup], Field(min_length=1, max_length=200)],
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically merge groups of source-video segments into one segment per group.
+
+        Each merged segment spans the first start to the last end, joins captions with spaces
+        and unions speakers. Optional caption/characters override the joined values (use this
+        to fix punctuation/casing of a joined sentence). Returns merged_ids and warnings.
+        """
+        return await invoke(
+            "Merge segments", automation.merge_segments, groups, expected_revision,
+            project_id=project_id,
+        )
+
+    @server.tool(annotations=edit)
+    async def split_segment(
+        expected_revision: str,
+        segment_id: str,
+        at: Seconds,
+        first_caption: str,
+        second_caption: str,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Split one source-video segment at a source timestamp into two captioned segments."""
+        return await invoke(
+            "Split segment", automation.split_segment, segment_id, at, first_caption,
+            second_caption, expected_revision, project_id=project_id,
+        )
+
+    @server.tool(annotations=downloads)
+    async def transcribe_segments(
+        ctx: Context,
+        segment_ids: Annotated[list[str], Field(max_length=500)] | None = None,
+        allow_download: bool = False,
+        model: Literal["tiny", "base"] = "base",
+        language: Annotated[str, Field(pattern=r"^(auto|[a-z]{2,3})$")] = "auto",
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Independently recognize each segment's exported prompt audio with local Whisper.
+
+        Returns heard text, word similarity to the caption, and flags: caption_mismatch,
+        start/end_may_be_clipped, extra_speech_at_start/end, no_speech_recognized. Use it to
+        catch wrong captions and badly cut clips. Omit segment_ids for all (max 900 s of audio
+        per call). Needs allow_download=true. Audio stays local; nothing is changed.
+        """
+        return await invoke(
+            "Transcribe segments", automation.transcribe_segments, segment_ids, allow_download,
+            model, language, reporter(ctx), never_cancelled, project_id=project_id,
+        )
+
+    @server.tool(annotations=downloads)
+    async def match_speakers(
+        expected_revision: str,
+        ctx: Context,
+        allow_download: bool = False,
+        apply: bool = False,
+        include_all: bool = False,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Compare local voice fingerprints with manually named reference segments.
+
+        Name at least one clear line per character first. Returns suggested_match rows for
+        unnamed segments and possible_misattribution rows where a named or automatic segment
+        sounds more like another character. apply=true fills only unnamed segments (marked
+        automatic). The ~26 MB speaker model needs allow_download=true when missing.
+        """
+        return await invoke(
+            "Match speakers", automation.match_speakers, expected_revision, allow_download,
+            apply, include_all, reporter(ctx), never_cancelled, project_id=project_id,
+        )
+
+    @server.tool(annotations=downloads)
+    async def generate_backing_track(
+        expected_revision: str,
+        ctx: Context,
+        mode: Literal["remove_all_vocals", "keep_singing"] = "remove_all_vocals",
+        allow_download: bool = False,
+        allow_runtime_download: bool = False,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Separate the source locally into a voice-free backing track and select it.
+
+        remove_all_vocals uses HTDemucs. keep_singing uses BandIt (CC BY-NC 4.0 model,
+        non-commercial) and keeps sung vocals. Model downloads need allow_download=true; the
+        optional several-GB NVIDIA runtime needs allow_runtime_download=true (CPU otherwise).
+        This can take many minutes.
+        """
+        return await invoke(
+            "Generate backing", automation.generate_backing_track, expected_revision, mode,
+            allow_download, allow_runtime_download, reporter(ctx), never_cancelled,
+            project_id=project_id,
+        )
 
     def require_jobs() -> LiveJobs:
         if jobs is None:
@@ -448,7 +662,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     automation = PackAutomation(
         HeadlessProjectAccess(), data_root.resolve() / "analysis"
     )
-    create_server(automation).run(transport="stdio")
+    server = create_server(automation)
+    isolate_protocol_stdio()
+    server.run(transport="stdio")
     return 0
 
 
