@@ -348,6 +348,53 @@ def test_generation_publishes_only_verified_unique_durable_assets(manager, monke
     assert not list((manager.data_root / "separation-jobs").iterdir())
 
 
+def test_generation_tolerates_windows_status_sharing_violations(
+    manager, monkeypatch, source_video,
+):
+    _mock_preparation(manager, monkeypatch)
+    real_read_text = Path.read_text
+    denials = {"remaining": 3}
+
+    def read_text(path, *args, **kwargs):
+        if path.name == "status.json" and denials["remaining"]:
+            denials["remaining"] -= 1
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(separation.time, "sleep", lambda _seconds: None)
+
+    def run(command, _description, _cancelled, *, tick):
+        _write_successful_result(command)
+        tick(0)
+
+    monkeypatch.setattr(separation, "_run_cancellable", run)
+    path = manager.generate(None, source_video, progress=lambda *_: None, cancelled=lambda: False)
+    separation.validate_audio(path, 83, lambda: False)
+    assert denials["remaining"] == 0
+
+
+def test_generation_reports_persistent_status_permission_errors(
+    manager, monkeypatch, source_video,
+):
+    _mock_preparation(manager, monkeypatch)
+    real_read_text = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if path.name == "status.json":
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(separation.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        separation, "_run_cancellable",
+        lambda command, *_args, tick: _write_successful_result(command),
+    )
+    with pytest.raises(SeparationError, match="Permission denied"):
+        manager.generate(None, source_video, progress=lambda *_: None, cancelled=lambda: False)
+
+
 def test_worker_status_preserves_estimate_and_clears_it_for_verification(
     manager, monkeypatch, source_video,
 ):

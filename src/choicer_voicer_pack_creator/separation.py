@@ -542,11 +542,24 @@ class SeparationManager:
             }
             last_status: dict[str, Any] | None = None
 
-            def poll_status(_elapsed: float) -> None:
+            def poll_status(_elapsed: float, *, final: bool = False) -> None:
                 nonlocal last_status
                 if not status_path.is_file():
                     return
-                status = json.loads(status_path.read_text(encoding="utf-8"))
+                attempts = 80 if final else 1
+                for attempt in range(attempts):
+                    try:
+                        text = status_path.read_text(encoding="utf-8")
+                        break
+                    except PermissionError:
+                        # Windows denies opens while the worker atomically replaces the
+                        # status or a scanner holds it; a later progress tick will see it.
+                        if not final:
+                            return
+                        if attempt == attempts - 1:
+                            raise
+                        time.sleep(0.025)
+                status = json.loads(text)
                 if not isinstance(status, dict) or status.get("job_id") != job_id:
                     raise SeparationError("The separation worker returned an unrelated job status")
                 if status != last_status:
@@ -596,7 +609,7 @@ class SeparationManager:
                 except AnalysisCancelled:
                     raise
                 except AnalysisError as error:
-                    poll_status(0)
+                    poll_status(0, final=True)
                     check_cancel(cancelled)
                     if (
                         self.mode == KEEP_SINGING and cuda_runtime is not None and attempt == 1
@@ -619,7 +632,7 @@ class SeparationManager:
                         continue
                     detail = (last_status or {}).get("message", str(error))
                     raise SeparationError(f"Local backing-track separation failed: {detail}") from error
-                poll_status(0)
+                poll_status(0, final=True)
                 break
             check_cancel(cancelled)
             if not last_status or last_status.get("state") != "succeeded":
