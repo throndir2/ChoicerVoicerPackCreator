@@ -16,7 +16,7 @@ from choicer_voicer_pack_creator.automation import (
     require_revision,
     save_snapshot,
 )
-from choicer_voicer_pack_creator.mcp_server import create_server
+from choicer_voicer_pack_creator.mcp_server import create_server, isolate_protocol_stdio
 from choicer_voicer_pack_creator.project_io import ProjectStore
 from choicer_voicer_pack_creator.project_session import canonical_project_path
 from choicer_voicer_pack_creator.ui.main_window import MainWindow
@@ -293,6 +293,7 @@ def start_live_server(window: MainWindow, *, ui_test_hooks: bool = False) -> Edi
             bridge.disconnected.emit()
 
     # Qt owns the main thread; the SDK owns its own asyncio loop and stdio reader.
+    isolate_protocol_stdio()
     thread = threading.Thread(target=run, name="choicer-voicer-mcp", daemon=True)
     thread.start()
     window.statusBar().showMessage("Live MCP control enabled. The connected client can edit this project.")

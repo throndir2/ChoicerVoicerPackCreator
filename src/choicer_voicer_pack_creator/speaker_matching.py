@@ -101,6 +101,24 @@ class SpeakerResult:
 
 
 @dataclass(frozen=True, slots=True)
+class SpeakerEvidence:
+    """Leave-one-out similarity of one clip to each referenced character, best first."""
+
+    segment_id: str
+    scores: tuple[tuple[str, float], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SpeakerEvidenceResult:
+    matches: tuple[SpeakerMatch, ...]
+    evidence: tuple[SpeakerEvidence, ...]
+    sources: SourceSnapshot
+    examined: int
+    cached: int
+    skip_reasons: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class SpeakerPreparationResult:
     """Per-clip counts: prepared includes usable cache hits; cached includes cached skips."""
 
@@ -191,6 +209,40 @@ def choose_matches(
             continue
         matches.append(SpeakerMatch(clip.segment_id, character, score))
     return tuple(matches)
+
+
+def speaker_evidence(
+    clips: tuple[SpeakerClip, ...], signatures: dict[str, Any],
+) -> tuple[SpeakerEvidence, ...]:
+    """Score every clip against reference prototypes that exclude the clip itself."""
+    import numpy as np
+
+    references: dict[str, list[tuple[str, Any]]] = {}
+    for clip in clips:
+        check_cancelled()
+        if len(clip.characters) == 1 and clip.segment_id in signatures:
+            references.setdefault(clip.characters[0], []).append(
+                (clip.segment_id, normalized_embedding(signatures[clip.segment_id])),
+            )
+    result = []
+    for clip in clips:
+        check_cancelled()
+        if clip.segment_id not in signatures:
+            continue
+        target = normalized_embedding(signatures[clip.segment_id])
+        scores = []
+        for character, seeds in references.items():
+            others = [vector for segment_id, vector in seeds if segment_id != clip.segment_id]
+            if not others:
+                continue
+            mean = np.mean(others, axis=0)
+            if float(np.linalg.norm(mean)) < 1e-8:
+                continue
+            score = float(np.clip(np.dot(target, normalized_embedding(mean)), -1, 1))
+            scores.append((character, round(score, 3)))
+        scores.sort(key=lambda item: item[1], reverse=True)
+        result.append(SpeakerEvidence(clip.segment_id, tuple(scores)))
+    return tuple(result)
 
 
 class SpeakerMatchingManager:
@@ -340,6 +392,27 @@ class SpeakerMatchingManager:
                 media, pending, records, sources, allow_download, progress, cancelled,
             )
             return self._score(clips, keys, records, sources, cached, reasons, progress)
+
+    def evidence(
+        self, media: MediaTools, clips: tuple[SpeakerClip, ...], *,
+        allow_download: bool, progress: ProgressCallback, cancelled: CancelCallback,
+    ) -> SpeakerEvidenceResult:
+        """Prepare all eligible clips, then return matches and per-clip similarity evidence."""
+        with self._source_scope(clips, progress, cancelled) as sources:
+            eligible, reasons = self._eligible_clips(clips, matching=True)
+            keys, records, pending, cached = self._load_records(eligible, sources)
+            self._prepare_records(
+                media, pending, records, sources, allow_download, progress, cancelled,
+            )
+            signatures = self._signatures(eligible, keys, records, reasons, progress)
+            matches = choose_matches(eligible, signatures)
+            evidence = speaker_evidence(eligible, signatures)
+            check_cancelled()
+            sources.verify()
+            progress(f"Voice evidence ready for {len(evidence)} clip(s).", 1.0)
+            return SpeakerEvidenceResult(
+                matches, evidence, sources, len(signatures), cached, tuple(reasons),
+            )
 
     def prepare(
         self, media: MediaTools, clips: tuple[SpeakerClip, ...], *,
