@@ -138,6 +138,9 @@ See the [AI assistant guide](https://github.com/throndir2/ChoicerVoicerPackCreat
 6. Copy the exported pack folder into the game's `packs_voice` folder. This is normally
    `%APPDATA%\YeahMaybe\ChoicerVoicer\game\packs_voice`.
 
+**Do not want to install?** Download the file that ends in `-Portable-Windows-x64.zip` instead.
+Extract all of its files, then run `Choicer Voicer Pack Creator.exe`.
+
 The [user guide](https://github.com/throndir2/ChoicerVoicerPackCreator/blob/main/docs/USER_GUIDE.md)
 explains every feature in detail.
 
