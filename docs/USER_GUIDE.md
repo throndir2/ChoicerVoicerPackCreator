@@ -111,7 +111,9 @@ as these builds are not code-signed.
 - Automatically selects and scrolls to each active segment during video playback, keeping the
   Selected Segment editor in sync without interrupting playback. Gaps keep the current selection;
   overlapping lines follow the most recently started segment. Paused editing and single-segment
-  previews keep their selection.
+  previews keep their selection. While the cursor is in the **Speaker(s)** or **Line** field, playback
+  does not change the selected segment, so your text stays in place. Click outside the field to
+  resume following.
 - Extracts and displays a high-detail, zoomable waveform for precise timing.
 - Marks precise In/Out points in seconds.
 - Cuts unwanted video from the beginning, end, or middle via **Project > Cut Out Video Range**.
