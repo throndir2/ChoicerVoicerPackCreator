@@ -748,6 +748,8 @@ class ProjectEditor(QWidget):
         self.segment_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.segment_table.setToolTip(
             "Ctrl-click individual segments or Shift-click a range. "
+            "Drag the selected segments up or down to move them to that place in the timeline; "
+            "the list scrolls when you drag near its top or bottom edge. "
             "Right-click a segment for actions on it or the selected group."
         )
         self.segment_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -762,6 +764,7 @@ class ProjectEditor(QWidget):
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.segment_table.itemSelectionChanged.connect(self._table_selection_changed)
         self.segment_table.segment_context_menu_requested.connect(self._show_segment_context_menu)
+        self.segment_table.segments_move_requested.connect(self.move_segments)
         self.segment_table.cellClicked.connect(
             lambda _row, _column: self.select_segment(self.selected_segment_id)
         )
@@ -2016,6 +2019,36 @@ class ProjectEditor(QWidget):
         self.statusBar().showMessage(
             "Segment deleted." if len(segments) == 1 else f"Deleted {len(segments)} segments."
         )
+
+    def move_segments(self, identifiers: list[str], row: int) -> bool:
+        """Move segments in time to the list row boundary where they were dropped."""
+        if not self.editor_splitter.isEnabled() or self.session.loading:
+            self.statusBar().showMessage("Wait for the project to finish loading.", 5000)
+            return False
+        self._commit_editors()
+        try:
+            moved = self.project.move_segments(identifiers, row)
+        except ValueError as error:
+            QMessageBox.information(self, "Cannot move segments", str(error))
+            return False
+        if not moved:
+            return False
+        count = len(identifiers)
+        self._set_dirty(True, history_label="Move segment" if count == 1 else "Move segments")
+        self._refresh_table("")
+        self._select_segments(list(identifiers), cue=False)
+        segments = [item for item in self.project.segments if item.id in set(identifiers)]
+        if count == 1:
+            self._show_selected_segment(segments[0])
+        first = self._row_for_segment(segments[0].id)
+        if first >= 0:
+            self.segment_table.scrollToItem(self.segment_table.item(first, 0))
+        span = f"{format_time(segments[0].start)}–{format_time(max(item.end for item in segments))}"
+        self.statusBar().showMessage(
+            (f"Moved the segment to {span}." if count == 1 else f"Moved {count} segments to {span}.")
+            + " Source-video prompts use the new range on the next export."
+        )
+        return True
 
     def preview_segment(self) -> None:
         self.workspace.pause_other_previews(self)
@@ -3318,6 +3351,7 @@ class ProjectEditor(QWidget):
         self.session.loading = loading
         if loading:
             self._segment_context_menu.hide()
+            self.segment_table.cancel_row_move()
             self.project_checks.changed(force=True)
             self.statusBar().set_activity("loading", message)
         else:
