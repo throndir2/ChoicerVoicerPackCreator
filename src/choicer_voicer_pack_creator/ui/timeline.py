@@ -86,6 +86,10 @@ class TimelineWidget(QWidget):
         self._drag_previous_mark_end = 0.0
         self._drag_previous_mark_segment_id = ""
         self._pan_press_position = QPointF()
+        self._box_press_position = QPointF()
+        self._box_current = QPointF()
+        self._box_initial: list[str] = []
+        self._box_additive = False
         self._suppress_mouse_context_menu = False
         self._segment_lanes: dict[str, int] = {}
         self._auto_scroll_x = 0.0
@@ -203,6 +207,7 @@ class TimelineWidget(QWidget):
         self._paint_waveform(painter)
         self._paint_marks(painter)
         self._paint_segments(painter)
+        self._paint_box(painter)
         self._paint_playhead(painter)
 
     def _paint_ruler(self, painter: QPainter) -> None:
@@ -298,6 +303,15 @@ class TimelineWidget(QWidget):
             label = f"{index + 1}  {segment.primary_character}  ·  {segment.caption}"
             painter.drawText(rect.adjusted(5, 2, -5, -2), Qt.AlignmentFlag.AlignVCenter, label)
 
+    def _paint_box(self, painter: QPainter) -> None:
+        if self._drag_kind != "box" or not self._drag_active:
+            return
+        box = self._box_rect()
+        painter.fillRect(box, QColor(72, 219, 231, 40))
+        painter.setPen(QPen(QColor("#48dbe7"), 1, Qt.PenStyle.DashLine))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(box)
+
     def _paint_playhead(self, painter: QPainter) -> None:
         x = self._time_to_x(self.playhead)
         if 0 <= x <= self.width():
@@ -373,7 +387,15 @@ class TimelineWidget(QWidget):
                 self.segment_selected.emit(segment.id)
                 return
 
-        if 25 <= event.position().y() <= self._waveform_bottom() + 1:
+        additive = bool(event.modifiers() & (
+            Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier
+        ))
+        y = event.position().y()
+        if y > self._waveform_bottom() + 1 or (additive and y >= 25):
+            self._start_box(event.position(), additive=additive)
+            event.accept()
+            return
+        if 25 <= y <= self._waveform_bottom() + 1:
             x1 = self._time_to_x(self.mark_in)
             x2 = self._time_to_x(self.mark_out)
             segment_id = self.mark_segment_id if self._segment(self.mark_segment_id) else ""
@@ -425,6 +447,11 @@ class TimelineWidget(QWidget):
             self._update_pan(event.position())
             event.accept()
             return
+        if self._drag_kind == "box":
+            self._update_box(event.position())
+            self._update_auto_scroll(event.position().x())
+            event.accept()
+            return
         if self._drag_kind:
             if not self._drag_active:
                 distance = abs(event.position().x() - self._drag_press_x)
@@ -465,7 +492,8 @@ class TimelineWidget(QWidget):
                     event.globalPosition().toPoint(),
                     f"{segment.primary_character}\n{segment.start:.3f}–{segment.end:.3f}s\n"
                     f"Click to cue the start; drag the center to move; drag an edge to trim.\n"
-                    "Shift/Ctrl-click to add or remove a selection; right-click for segment actions.\n"
+                    "Shift/Ctrl-click to add or remove a selection; drag across empty space "
+                    "below the waveform to box-select; right-click for segment actions.\n"
                     "Right-drag to pan without moving the playhead or editing segments.\n"
                     f"{segment.caption}",
                     self,
@@ -488,7 +516,13 @@ class TimelineWidget(QWidget):
             return
         if event.button() != Qt.MouseButton.LeftButton or not self._drag_kind:
             return
-        if self._drag_kind == "playhead":
+        if self._drag_kind == "box":
+            self._update_box(event.position())
+            if self._drag_active:
+                self.selection_changed.emit(self._selected_in_order())
+            else:
+                self.seek_requested.emit(self._drag_anchor_time)
+        elif self._drag_kind == "playhead":
             self._update_drag(event.position().x())
         elif self._drag_active:
             self._update_drag(event.position().x())
@@ -516,6 +550,8 @@ class TimelineWidget(QWidget):
                 self.update()
             elif self._drag_kind == "playhead":
                 self._seek_playhead(self._drag_original_start)
+            elif self._drag_kind == "box":
+                self.set_selection(self._box_initial)
             elif self._drag_active:
                 if self._drag_kind == "mark-new":
                     self._apply_drag_range(
@@ -575,6 +611,10 @@ class TimelineWidget(QWidget):
         if self._drag_active:
             return
         self._drag_active = True
+        if self._drag_kind == "box":
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            QToolTip.hideText()
+            return
         if self._drag_kind in {"playhead", "pan"}:
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             QToolTip.hideText()
@@ -655,11 +695,53 @@ class TimelineWidget(QWidget):
             return segment.start, segment.end
         return self.mark_in, self.mark_out
 
+    def _start_box(self, position: QPointF, *, additive: bool) -> None:
+        self._prepare_drag("box", "", 0.0, 0.0, position.x())
+        self._box_press_position = QPointF(position)
+        self._box_current = QPointF(position)
+        self._box_initial = self._selected_in_order()
+        self._box_additive = additive
+
+    def _update_box(self, position: QPointF) -> None:
+        if not self._drag_active:
+            distance = (position - self._box_press_position).manhattanLength()
+            if distance < QApplication.startDragDistance():
+                return
+            self._activate_drag()
+        self._box_current = QPointF(
+            max(0.0, min(float(self.width()), position.x())),
+            max(0.0, min(float(self.height()), position.y())),
+        )
+        self._apply_box_selection()
+
+    def _box_rect(self) -> QRectF:
+        anchor = QPointF(self._time_to_x(self._drag_anchor_time), self._box_press_position.y())
+        return QRectF(anchor, self._box_current).normalized()
+
+    def _apply_box_selection(self) -> None:
+        box = self._box_rect()
+        hits = {
+            segment.id for segment in self.segments
+            if (rect := self._segment_rect(segment)).left() <= box.right()
+            and rect.right() >= box.left()
+            and rect.top() <= box.bottom()
+            and rect.bottom() >= box.top()
+        }
+        if self._box_additive:
+            hits.update(self._box_initial)
+        self.set_selection(list(hits))
+
+    def _selected_in_order(self) -> list[str]:
+        return [segment.id for segment in self.segments if segment.id in self.selected_ids]
+
     def _clear_drag(self) -> None:
         self._auto_scroll_timer.stop()
         self._drag_id = ""
         self._drag_kind = ""
         self._drag_active = False
+        self._box_initial = []
+        self._box_additive = False
+        self.update()
 
     def _auto_scroll_step_pixels(self, x: float) -> float:
         """Signed scroll speed in pixels per tick; faster the further past an edge."""
@@ -693,7 +775,10 @@ class TimelineWidget(QWidget):
             self._auto_scroll_timer.stop()
             return
         # Re-apply the drag at the same cursor position so the edit follows the scrolled view.
-        self._update_drag(self._auto_scroll_x)
+        if self._drag_kind == "box":
+            self._apply_box_selection()
+        else:
+            self._update_drag(self._auto_scroll_x)
         self.update()
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
@@ -703,4 +788,6 @@ class TimelineWidget(QWidget):
         anchor = self._x_to_time(event.position().x())
         factor = 1.25 if event.angleDelta().y() > 0 else 0.8
         self.set_zoom(self.zoom * factor, anchor)
+        if self._drag_kind == "box" and self._drag_active:
+            self._apply_box_selection()
         event.accept()

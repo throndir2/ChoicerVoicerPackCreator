@@ -121,7 +121,12 @@ as these builds are not code-signed.
   from the same video without changing the original project.
 - Adds, previews, splits, combines, duplicates, deletes, and re-times segments.
 - Shift-click or Ctrl-click segment blocks below the waveform to add/remove individual
-  selections. In the segment list, Shift-click selects a range and Ctrl-click toggles a row.
+  selections. Drag across empty space below the waveform to draw a selection box: every
+  segment block that the box touches is selected, and the box replaces the old selection.
+  Hold Shift or Ctrl while you drag (from empty lane or waveform space) to add the boxed
+  segments to the current selection. Press **Esc** during the drag to cancel it. A click
+  without a drag still seeks. In the segment list, Shift-click selects a range and Ctrl-click
+  toggles a row.
   Both views highlight the same selection. Right-click either view's segment for **Merge
   Selected Segments**, **Duplicate**, or **Delete**; a single segment also offers **Play**
   and **Split at Playhead**. Right-click keeps an existing group selected and does not seek.
@@ -365,7 +370,8 @@ Timing, split, and segment playback buttons require a single selected segment.
 ### Combine segments
 
 In the **Segments** list, use **Ctrl-click** to select individual rows or **Shift-click** to select
-a range, then click **Combine** (or **Segments > Combine Selected Segments**, `Ctrl+Shift+M`).
+a range. On the timeline, Shift/Ctrl-click segment blocks or drag a selection box across empty
+space below the waveform. Then click **Combine** (or **Segments > Combine Selected Segments**, `Ctrl+Shift+M`).
 The selected segments become one segment from the earliest In to the latest Out, including any
 gaps. Their nonempty lines are joined with spaces in timeline order, and their speakers are
 combined without duplicates. Unselected segments are left unchanged.

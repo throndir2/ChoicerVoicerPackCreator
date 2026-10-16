@@ -338,3 +338,21 @@ def test_right_click_does_not_move_playhead_before_split(window, qtbot, monkeypa
     assert [(item.start, item.end) for item in window.project.segments] == [
         (1, 2), (3, 3.5), (3.5, 4), (5, 6),
     ]
+
+
+def test_box_selection_drives_group_actions(window, qtbot):
+    first, middle, last = window.project.segments
+    timeline = window.timeline
+    lane_y = round(timeline._segment_rect(first).center().y())
+    start = QPoint(round(timeline._time_to_x(2.5)), timeline.height() - 3)
+    end = QPoint(round(timeline._time_to_x(5.5)), lane_y)
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, pos=start)
+    qtbot.mouseMove(timeline, end)
+    qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=end)
+    assert set(window._selected_table_ids()) == {middle.id, last.id}
+    assert window.timeline.selected_ids == {middle.id, last.id}
+    assert window.action_combine.isEnabled()
+    assert window.action_duplicate.text() == "Duplicate 2 Segments"
+    window.action_duplicate.trigger()
+    assert len(window.project.segments) == 5
+    assert len(window._selected_table_ids()) == 2

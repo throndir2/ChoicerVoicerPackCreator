@@ -938,3 +938,141 @@ def test_all_selected_blocks_are_highlighted_and_removed_ids_are_cleared(qtbot):
     timeline.set_segments([segments[1]])
     assert timeline.selected_ids == set()
     assert timeline.selected_id == ""
+@pytest.fixture
+def box_timeline(qtbot):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 220)
+    timeline.set_duration(10)
+    segments = [Segment(1, 2), Segment(3, 4), Segment(5, 6), Segment(7, 8)]
+    timeline.set_segments(segments)
+    timeline.show()
+    return timeline, segments
+
+
+def _box_drag(qtbot, timeline, start, end, modifier=Qt.KeyboardModifier.NoModifier):
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, modifier, pos=start)
+    qtbot.mouseMove(timeline, end)
+    qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, modifier, pos=end)
+
+
+def _record_box_signals(timeline):
+    selections, others = [], []
+    timeline.selection_changed.connect(selections.append)
+    for signal in (
+        timeline.seek_requested, timeline.segment_selected, timeline.range_edit_started,
+        timeline.range_changed, timeline.range_edit_finished, timeline.boundary_changed,
+    ):
+        signal.connect(lambda *values: others.append(values))
+    return selections, others
+
+
+def test_box_drag_from_empty_lane_selects_touched_blocks(box_timeline, qtbot):
+    timeline, segments = box_timeline
+    lane_y = round(timeline._segment_rect(segments[0]).center().y())
+    selections, others = _record_box_signals(timeline)
+    marks = (timeline.mark_in, timeline.mark_out)
+    unselected = _render(timeline)
+    start = _point(timeline, 2.5, 210)
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, pos=start)
+    qtbot.mouseMove(timeline, _point(timeline, 5.5, lane_y))
+    assert timeline.selected_ids == {segments[1].id, segments[2].id}
+    assert selections == []
+    assert _render(timeline).pixelColor(_point(timeline, 4.5, 205)) != unselected.pixelColor(
+        _point(timeline, 4.5, 205)
+    )
+    qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 5.5, lane_y))
+    assert selections == [[segments[1].id, segments[2].id]]
+    assert others == []
+    assert not timeline._drag_kind
+    assert (timeline.mark_in, timeline.mark_out) == marks
+    assert [(item.start, item.end) for item in segments] == [(1, 2), (3, 4), (5, 6), (7, 8)]
+
+
+def test_horizontal_box_drag_inside_a_lane_selects_blocks(box_timeline, qtbot):
+    timeline, segments = box_timeline
+    lane_y = round(timeline._segment_rect(segments[0]).center().y())
+    selections, _ = _record_box_signals(timeline)
+    _box_drag(qtbot, timeline, _point(timeline, 2.5, lane_y), _point(timeline, 7.5, lane_y))
+    assert selections == [[segment.id for segment in segments[1:]]]
+
+
+def test_box_release_without_move_event_still_selects(box_timeline, qtbot):
+    timeline, segments = box_timeline
+    selections, others = _record_box_signals(timeline)
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 0.5, 210))
+    qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 3.5, 170))
+    assert selections == [[segments[0].id, segments[1].id]]
+    assert others == []
+
+
+def test_box_replaces_and_modifier_box_adds_to_selection(box_timeline, qtbot):
+    timeline, segments = box_timeline
+    timeline.set_selection([segments[0].id])
+    selections, _ = _record_box_signals(timeline)
+    _box_drag(qtbot, timeline, _point(timeline, 4.5, 210), _point(timeline, 5.5, 170))
+    assert selections[-1] == [segments[2].id]
+    _box_drag(
+        qtbot, timeline, _point(timeline, 6.5, 210), _point(timeline, 7.5, 170),
+        Qt.KeyboardModifier.ShiftModifier,
+    )
+    assert selections[-1] == [segments[2].id, segments[3].id]
+    _box_drag(
+        qtbot, timeline, _point(timeline, 0.2, 90), _point(timeline, 1.5, 170),
+        Qt.KeyboardModifier.ControlModifier,
+    )
+    assert selections[-1] == [segments[0].id, segments[2].id, segments[3].id]
+    _box_drag(qtbot, timeline, _point(timeline, 8.5, 210), _point(timeline, 9.5, 170))
+    assert selections[-1] == []
+    assert timeline.selected_ids == set()
+
+
+def test_plain_waveform_drag_still_marks_range_without_selecting(box_timeline, qtbot):
+    timeline, segments = box_timeline
+    timeline.set_selection([segments[0].id])
+    selections, _ = _record_box_signals(timeline)
+    _box_drag(qtbot, timeline, _point(timeline, 4.5, 90), _point(timeline, 6.5, 200))
+    assert selections == []
+    assert timeline.selected_ids == {segments[0].id}
+    assert (timeline.mark_in, timeline.mark_out) == pytest.approx((4.5, 6.5), abs=0.02)
+
+
+def test_escape_cancels_box_and_restores_selection(box_timeline, qtbot):
+    timeline, segments = box_timeline
+    timeline.set_selection([segments[0].id])
+    selections, others = _record_box_signals(timeline)
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 2.5, 210))
+    qtbot.mouseMove(timeline, _point(timeline, 7.5, 170))
+    assert timeline.selected_ids == {segment.id for segment in segments[1:]}
+    qtbot.keyClick(timeline, Qt.Key.Key_Escape)
+    assert timeline.selected_ids == {segments[0].id}
+    assert not timeline._drag_kind
+    qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 7.5, 170))
+    assert selections == []
+    assert others == []
+
+
+def test_box_drag_auto_scrolls_and_selects_offscreen_blocks(qtbot):
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 220)
+    timeline.set_duration(100)
+    near, far = Segment(5, 6), Segment(40, 41)
+    timeline.set_segments([near, far])
+    timeline.set_zoom(5, anchor_time=0)
+    timeline.show()
+    marks = (timeline.mark_in, timeline.mark_out)
+    selections = []
+    timeline.selection_changed.connect(selections.append)
+    lane_y = round(timeline._segment_rect(near).center().y())
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 4, 210))
+    qtbot.mouseMove(timeline, QPoint(1050, lane_y))
+    assert timeline._auto_scroll_timer.isActive()
+    for _ in range(40):
+        timeline._auto_scroll_step()
+    assert timeline.offset > 25
+    assert timeline.selected_ids == {near.id, far.id}
+    qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=QPoint(1050, lane_y))
+    assert not timeline._auto_scroll_timer.isActive()
+    assert selections == [[near.id, far.id]]
+    assert (timeline.mark_in, timeline.mark_out) == marks

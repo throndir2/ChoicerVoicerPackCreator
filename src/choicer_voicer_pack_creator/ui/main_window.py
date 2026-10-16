@@ -590,6 +590,8 @@ class ProjectEditor(QWidget):
         self.timeline.setToolTip(
             "Drag the white playback line or its top arrow to scrub.\n"
             "Shift/Ctrl-click segment blocks to add or remove individual selections. "
+            "Drag across empty space below the waveform to box-select segments; "
+            "Shift/Ctrl-drag from empty waveform or lane space to add them to the selection. "
             "Right-click a segment for actions on it or the selected group.\n"
             "Drag a segment block or its highlighted waveform range to move it; "
             "drag its edges or IN/OUT handles to trim. These edits update the segment directly.\n"
