@@ -171,10 +171,10 @@ reference for argument names, limits, and defaults. `get_help` returns the app v
 | `validate_pack` | Validate an existing folder and, optionally, its ZIP. |
 | `import_youtube` | Download a public YouTube video and its captions into a new document. |
 | `get_source_captions` | Read the imported captions, paginated (`get_project` reports only their count). |
-| `draft_segments` | Make draft segments from captions (no download), aligned captions, or local Whisper. |
+| `draft_segments` | Make draft segments from captions (no download), aligned captions, or local transcription. |
 | `review_segments` | Hints: merge candidates for split sentences, bad timing, overlaps, duplicates, missing speakers. |
 | `merge_segments` / `split_segment` | Join split rows into one line (optionally with a corrected caption), or divide a row. |
-| `transcribe_segments` | Recognize each exported prompt with local Whisper and flag wrong captions and clipped cuts. |
+| `transcribe_segments` | Recognize each exported prompt with local transcription and flag wrong captions and clipped cuts. |
 | `match_speakers` | Compare voices with named references; suggest names and flag likely wrong speakers. |
 | `generate_backing_track` | Separate the source into a voice-free backing track and select it. |
 | `show_in_editor` | Live mode only: select a segment and/or seek for human review. |
@@ -472,7 +472,8 @@ tool below also works in live mode. Get the user's permission before each downlo
    when the same video is already in that folder.
 2. `draft_segments` with `source: "captions"` makes one draft segment per caption row, refined
    with measured audio pauses. It needs no download. Use `"aligned_captions"` for the
-   high-accuracy timing model, or `"whisper"` for a video without captions. Fully bracketed
+   high-accuracy timing model, or `"whisper"` (local transcription; `model` defaults to
+   `"parakeet"`) for a video without captions. Fully bracketed
    sound captions such as `[Music]` are skipped by default.
 3. `review_segments` returns `merge_candidates` and per-segment `issues`. YouTube captions often
    split one sentence over several rows; a candidate groups rows when a row has no
@@ -484,11 +485,12 @@ tool below also works in live mode. Get the user's permission before each downlo
 4. `merge_segments` takes `groups: [{segment_ids, caption?, characters?}]`. Use `caption` to
    give the joined sentence correct punctuation and casing. `split_segment` divides one row at
    a source timestamp. `edit_segments` retimes, rewrites, or deletes rows.
-5. `transcribe_segments` runs local Whisper on each exported prompt, with padding, and compares
+5. `transcribe_segments` runs local transcription (Parakeet by default) on each exported prompt,
+   with padding, and compares
    the result with the caption. `caption_mismatch` shows probably wrong text.
    `start_may_be_clipped` / `end_may_be_clipped` show a cut that loses words.
    `extra_speech_at_start` / `extra_speech_at_end` show a cut that includes a neighbor's words.
-   Retime with `edit_segments` and check again. Whisper is also evidence, not the truth.
+   Retime with `edit_segments` and check again. The recognized text is also evidence, not the truth.
 6. Name one clear line (about 2 seconds or more) for each character with `edit_segments`, then
    call `match_speakers`. It returns `suggested_match` rows for unnamed lines and
    `possible_misattribution` rows where a named or automatic line sounds more like another

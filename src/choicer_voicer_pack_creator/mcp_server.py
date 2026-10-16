@@ -275,18 +275,19 @@ def create_server(
         source: Literal["captions", "aligned_captions", "whisper"] = "captions",
         replace_existing: bool = False,
         allow_download: bool = False,
-        model: Literal["tiny", "base"] = "base",
+        model: Literal["parakeet", "base", "tiny"] = "parakeet",
         language: Annotated[str, Field(pattern=r"^(auto|[a-z]{2,3})$")] = "auto",
         sensitivity: Literal["balanced", "sensitive", "conservative"] = "balanced",
         skip_nonverbal: bool = True,
         project_id: str | None = None,
     ) -> dict[str, Any]:
-        """Create draft segments (caption text, no speakers) from captions or local Whisper.
+        """Create draft segments (caption text, no speakers) from captions or local transcription.
 
         captions: imported YouTube captions refined with measured audio pauses; no download.
         aligned_captions: optional high-accuracy timing model (~1.5 GB); needs allow_download=true;
         timing_review_reasons lists rows needing manual review. whisper: local transcription for
-        videos without captions; needs allow_download=true. Refuses to replace existing segments
+        videos without captions (model parakeet, or Whisper base/tiny for languages Parakeet does
+        not support); needs allow_download=true. Refuses to replace existing segments
         unless replace_existing=true. Drafts are evidence: run review_segments next.
         """
         return await invoke(
@@ -349,11 +350,11 @@ def create_server(
         ctx: Context,
         segment_ids: Annotated[list[str], Field(max_length=500)] | None = None,
         allow_download: bool = False,
-        model: Literal["tiny", "base"] = "base",
+        model: Literal["parakeet", "base", "tiny"] = "parakeet",
         language: Annotated[str, Field(pattern=r"^(auto|[a-z]{2,3})$")] = "auto",
         project_id: str | None = None,
     ) -> dict[str, Any]:
-        """Independently recognize each segment's exported prompt audio with local Whisper.
+        """Independently recognize each segment's exported prompt audio with local transcription.
 
         Returns heard text, word similarity to the caption, and flags: caption_mismatch,
         start/end_may_be_clipped, extra_speech_at_start/end, no_speech_recognized. Use it to

@@ -29,6 +29,7 @@ from choicer_voicer_pack_creator.operations import (
     operation_scope,
     path_leases,
 )
+from choicer_voicer_pack_creator.parakeet_worker import TranscriptLine, transcribe_lines
 from choicer_voicer_pack_creator.process_worker import ProcessWorkerError, run_process_worker
 
 MODEL_KEY = "parakeet"
@@ -185,28 +186,20 @@ class ParakeetManager:
         progress(f"{MODEL_NAME} model setup complete.", 1.0)
         return self.model_dir
 
-    def transcribe(
+    def transcribe_lines(
         self,
         wav_path: Path,
-        language: str,
+        model: Path,
         hardware: HardwareProfile,
         progress: ProgressCallback,
         cancelled: CancelCallback,
-    ) -> tuple[list[AnalysisSuggestion], str | None]:
-        from choicer_voicer_pack_creator.parakeet_worker import transcribe_lines
-
-        if not supports_language(language):
-            raise AnalysisError(
-                f"{MODEL_NAME} supports 25 European languages. "
-                "Choose a Whisper model for this spoken language."
-            )
-        model = self.ensure_model(progress, cancelled)
+    ) -> tuple[list[TranscriptLine], float]:
+        """Run the worker on verified model files; return unpadded lines and the audio duration."""
         with wave.open(str(wav_path), "rb") as audio:
             duration = audio.getnframes() / max(1, audio.getframerate())
         threads = max(1, min(4, hardware.cpu_threads))
         diagnostic_event(
-            "parakeet_transcription_starting", language=language, threads=threads,
-            audio_duration_seconds=duration,
+            "parakeet_transcription_starting", threads=threads, audio_duration_seconds=duration,
         )
 
         def on_event(event: str, details: dict) -> bool:
@@ -230,6 +223,23 @@ class ParakeetManager:
                 remote_traceback=error.remote_traceback, worker_error_type=error.error_type,
             )
             raise AnalysisError(f"Local Parakeet transcription failed: {error}") from error
+        return lines, duration
+
+    def transcribe(
+        self,
+        wav_path: Path,
+        language: str,
+        hardware: HardwareProfile,
+        progress: ProgressCallback,
+        cancelled: CancelCallback,
+    ) -> tuple[list[AnalysisSuggestion], str | None]:
+        if not supports_language(language):
+            raise AnalysisError(
+                f"{MODEL_NAME} supports 25 European languages. "
+                "Choose a Whisper model for this spoken language."
+            )
+        model = self.ensure_model(progress, cancelled)
+        lines, duration = self.transcribe_lines(wav_path, model, hardware, progress, cancelled)
         suggestions = [
             AnalysisSuggestion(
                 max(0.0, min(duration, line.start)), max(0.0, min(duration, line.end)),

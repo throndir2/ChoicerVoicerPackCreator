@@ -343,3 +343,38 @@ def test_transcribe_segments_compares_heard_text(service, monkeypatch):
     assert rows[ids[0]]["heard"] == "Hello world" and rows[ids[0]]["flags"] == []
     assert "end_may_be_clipped" in rows[ids[1]]["flags"]
     assert result["flagged"] == 1
+
+
+def test_transcribe_segments_with_parakeet_assigns_lines_to_prompts(service, monkeypatch):
+    from choicer_voicer_pack_creator import parakeet
+    from choicer_voicer_pack_creator.parakeet_worker import TranscriptLine
+
+    ids = add_segments(service, (1, 2, "Hello world", ["Ann"]), (3, 4, "Goodbye now", ["Ann"]))
+
+    def fake_preview(source, start, duration, output):
+        with wave.open(str(output), "wb") as writer:
+            writer.setnchannels(1)
+            writer.setsampwidth(2)
+            writer.setframerate(16000)
+            writer.writeframes(b"\0\0" * int(16000 * duration))
+        return b""
+
+    def fake_lines(self, wav, model, hardware, progress, cancelled):
+        assert model == Path("model")
+        return [
+            TranscriptLine(1.6, 2.8, "Hello world.", 0.9),
+            TranscriptLine(4.6, 5.0, "Goodbye", 0.9),
+        ], 7.3
+
+    monkeypatch.setattr(service, "_wav_preview", fake_preview)
+    monkeypatch.setattr(parakeet.ParakeetManager, "ensure_model", lambda *_: Path("model"))
+    monkeypatch.setattr(parakeet.ParakeetManager, "transcribe_lines", fake_lines)
+    monkeypatch.setattr(automation_module, "detect_hardware", lambda: HARDWARE)
+    result = service.transcribe_segments(
+        None, True, "parakeet", "auto", lambda *_: None, lambda: False,
+    )
+    rows = {row["segment_id"]: row for row in result["segments"]}
+    assert rows[ids[0]]["heard"] == "Hello world." and rows[ids[0]]["flags"] == []
+    assert "end_may_be_clipped" in rows[ids[1]]["flags"]
+    with pytest.raises(ValueError, match="25 European languages"):
+        service.transcribe_segments(None, True, "parakeet", "ja", lambda *_: None, lambda: False)

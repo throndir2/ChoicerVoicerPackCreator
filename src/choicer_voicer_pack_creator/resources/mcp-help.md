@@ -74,11 +74,12 @@ download (`allow_download=true`) and only import media the user may use.
 4. Fix the draft: `merge_segments(groups=[{segment_ids, caption?}])` joins rows and
    can set the corrected sentence; `split_segment(segment_id, at, first_caption,
    second_caption)` divides a row; `edit_segments` retimes, rewrites, or deletes.
-5. `transcribe_segments(allow_download=true)` runs local Whisper on each exported prompt
+5. `transcribe_segments(allow_download=true)` runs local transcription (Parakeet by
+   default) on each exported prompt
    (with padding) and compares it with the caption. `caption_mismatch` means the text is
    probably wrong; `start/end_may_be_clipped` means the cut loses words;
    `extra_speech_at_start/end` means the cut includes a neighbor's words. Retime with
-   `edit_segments`, then check again. Whisper is also evidence, not the truth.
+   `edit_segments`, then check again. The recognized text is also evidence, not the truth.
 6. Name one clear line (about 2 s or more) per character with `edit_segments`, then call
    `match_speakers`. It returns `suggested_match` rows for unnamed lines and
    `possible_misattribution` rows where a named or automatic line sounds more like another
