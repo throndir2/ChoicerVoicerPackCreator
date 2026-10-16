@@ -1791,6 +1791,8 @@ class ProjectEditor(QWidget):
         if self._preview_end is not None and position >= self._preview_end:
             self.player.pause()
             self._preview_end = None
+            # Keep the previewed segment selected; the end tick can touch the next segment.
+            return
         self._follow_playback_segment(position)
 
     def _follow_playback_segment(self, position: float) -> None:
@@ -1804,6 +1806,9 @@ class ProjectEditor(QWidget):
             or self.edit_history.busy
             or self._segment_context_menu.isVisible()
             or len(self._selected_table_ids()) > 1
+            # Keep the segment that the user is typing into until focus leaves its fields.
+            or self.caption_edit.hasFocus()
+            or self.speakers_edit.hasFocus()
         ):
             return
         # Follow the latest start, keeping simultaneous-speaker selections stable.

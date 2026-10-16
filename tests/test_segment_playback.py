@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 from PySide6.QtCore import QSettings, Qt
+from PySide6.QtGui import QTextCursor
 from PySide6.QtMultimedia import QMediaPlayer
 
 from choicer_voicer_pack_creator.models import PackProject, Segment
@@ -208,3 +209,60 @@ def test_following_preserves_live_edits_to_the_previous_segment(window, qtbot, m
     assert window.segment_table.item(0, 3).text() == "Alice, Bob"
     assert window.segment_table.item(0, 4).text() == "Edited first line"
     assert window.dirty
+
+
+@pytest.mark.parametrize("field", ["caption_edit", "speakers_edit"])
+def test_playback_does_not_swap_the_segment_while_its_text_is_being_edited(
+    window, qtbot, monkeypatch, field,
+):
+    first = Segment(1, 2, "First", ["A"])
+    second = Segment(2, 3, "", ["B"])
+    window._set_project(
+        PackProject(video_duration=5, segments=[first, second]), None, mark_dirty=False
+    )
+    window.show()
+    qtbot.waitExposed(window)
+    window.activateWindow()
+    start_playback(window, monkeypatch, 1500)
+    assert_selected(window, first)
+
+    editor = getattr(window, field)
+    editor.setFocus()
+    qtbot.waitUntil(editor.hasFocus)
+    window.player.positionChanged.emit(2000)
+    assert_selected(window, first)
+    if field == "caption_edit":
+        editor.moveCursor(QTextCursor.MoveOperation.End)
+        qtbot.keyClicks(editor, " line")
+    else:
+        editor.end(False)
+        qtbot.keyClicks(editor, ", C")
+    window.player.positionChanged.emit(2500)
+    assert_selected(window, first)
+    assert (first.caption, first.characters) == (
+        ("First line", ["A"]) if field == "caption_edit" else ("First", ["A", "C"])
+    )
+    assert (second.caption, second.characters) == ("", ["B"])
+
+    window.segment_table.setFocus()
+    qtbot.waitUntil(lambda: not editor.hasFocus())
+    window.player.positionChanged.emit(2600)
+    assert_selected(window, second)
+
+
+def test_preview_end_keeps_the_previewed_segment_when_pause_is_asynchronous(
+    window, monkeypatch,
+):
+    first = Segment(1, 2, "First", ["A"])
+    second = Segment(2, 3, "", ["B"])
+    window._set_project(
+        PackProject(video_duration=5, segments=[first, second]), None, mark_dirty=False
+    )
+    window.select_segment(first.id)
+    window._preview_end = first.end
+    start_playback(window, monkeypatch, 1500)
+    pause = Mock()
+    monkeypatch.setattr(window.player, "pause", pause)
+    window.player.positionChanged.emit(2000)
+    pause.assert_called_once_with()
+    assert_selected(window, first)
