@@ -18,6 +18,7 @@ SpeakerAssignment = Literal["manual", "automatic", "excluded"]
 DEFAULT_VIDEO_HEIGHT = 480
 DEFAULT_VIDEO_FPS = 30
 TIMING_EPSILON = 1e-6
+SEGMENT_MOVE_GAP = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +308,64 @@ class PackProject:
         previous = len(self.segments)
         self.segments = [item for item in self.segments if item.id != segment_id]
         return len(self.segments) != previous
+
+    def move_segments(self, segment_ids: list[str], index: int) -> bool:
+        """Move segments in time so that they take list position *index*.
+
+        *index* is a row boundary in the current timeline-ordered list (0 is the top).
+        The moved segments keep their lengths and order. The free time between them
+        shrinks only when the destination gap is too small. Other segments do not change.
+        Returns False when the list order would not change.
+        """
+        identifiers = set(segment_ids)
+        group = [segment for segment in self.segments if segment.id in identifiers]
+        if not group or len(group) != len(identifiers):
+            raise ValueError("A selected segment no longer exists. Select the segments again.")
+        index = max(0, min(index, len(self.segments)))
+        rest = [segment for segment in self.segments if segment.id not in identifiers]
+        above = sum(1 for segment in self.segments[:index] if segment.id not in identifiers)
+        target = rest[:above] + group + rest[above:]
+        if [segment.id for segment in target] == [segment.id for segment in self.segments]:
+            return False
+
+        low = max((segment.end for segment in rest[:above]), default=0.0)
+        if above < len(rest):
+            high = rest[above].start
+        else:
+            high = self.video_duration if self.video_duration > 0 else math.inf
+        origin = group[0].start
+        cover_end = origin
+        gaps = 0.0
+        layout: list[tuple[Segment, float, float]] = []
+        for segment in group:
+            gaps += max(0.0, segment.start - cover_end)
+            layout.append((segment, segment.start - origin, gaps))
+            cover_end = max(cover_end, segment.end)
+        full = cover_end - origin
+        tight = full - gaps
+        room = high - low
+        if tight > room + TIMING_EPSILON:
+            count = "segment needs" if len(group) == 1 else f"{len(group)} segments need"
+            raise ValueError(
+                f"There is not enough free time at that place in the list. The moved {count} "
+                f"at least {tight:.3f} s, but the gap from {low:.3f} s to {high:.3f} s is only "
+                f"{max(0.0, room):.3f} s. Make room on the timeline first, or drop them in a "
+                "larger gap."
+            )
+        pad = min(SEGMENT_MOVE_GAP, (room - tight) / 4)
+        low_pad = pad if above > 0 else 0.0
+        high_pad = pad if above < len(rest) else 0.0
+        usable = room - low_pad - high_pad
+        scale = 1.0 if full <= usable or gaps <= 0 else max(0.0, (usable - tight) / gaps)
+        length = tight + gaps * scale
+        start = max(low, min(max(origin, low + low_pad), high - high_pad - length))
+        for segment, offset, removable in layout:
+            duration = segment.end - segment.start
+            segment.start = round(start + offset - removable * (1 - scale), 3)
+            segment.end = round(segment.start + duration, 6)
+        self.segments = target
+        self.sort_segments()
+        return True
 
     def combine_segments(
         self, segment_ids: list[str], *, discard_other_images: bool = False

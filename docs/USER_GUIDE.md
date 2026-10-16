@@ -137,6 +137,15 @@ as these builds are not code-signed.
   Press **Backspace** (or **Ctrl+Delete**) to delete the selected segments after confirmation;
   check **Don't ask again** to skip future segment confirmations. Backspace still works
   normally when editing text or numbers.
+- Drag selected rows in the **Segments** list up or down to move those segments to that place in
+  the timeline. Select the rows first (Ctrl-click or Shift-click), then press on one of them and
+  drag. A cyan line shows the drop place, and the list scrolls when you drag near its top or bottom
+  edge. The list always follows timeline order, so the moved segments get new In/Out times between
+  their new neighbors. They keep their lengths and order; other segments do not change. If the
+  free time there is too short, the gaps between the moved segments get smaller. If they still do
+  not fit, nothing moves and a message tells you how much time they need. Source-video prompts use
+  the new range on the next export; preserved recordings stay unchanged. Press **Esc** during the
+  drag to cancel it. The move is one undoable edit.
 - Keeps the latest **100 project edits** per open tab. Use **Ctrl+Z** to undo and
   **Ctrl+Y** or **Ctrl+Shift+Z** to redo. Text fields undo/redo their own typing first;
   empty local histories fall back to project history. **Project > Edit History** shows the history, restores a selected state,
@@ -601,6 +610,9 @@ attempt access-restriction workarounds. An authorized local copy can still be op
 - Drag the cyan **IN** or orange **OUT** handle to trim the range precisely.
 - Drag inside the highlighted waveform range to move it without changing its duration.
 - Drag the center of an existing segment block to move that segment, or either edge to trim it.
+- While you drag a segment, a range, a handle, or the playback line, hold the pointer near the
+  left or right edge of a zoomed-in timeline to scroll it automatically. Move the pointer further
+  past the edge to scroll faster. This lets you move a copied segment far along the video in one drag.
 - Press **Esc** during a drag to cancel it. The In/Out number fields remain available for exact
 	entry.
 

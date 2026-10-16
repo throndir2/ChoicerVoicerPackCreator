@@ -637,6 +637,82 @@ def test_segment_body_drag_moves_range_without_changing_duration(qtbot) -> None:
     assert seeks == []
 
 
+def test_segment_drag_near_right_edge_auto_scrolls_view_and_segment(qtbot) -> None:
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 220)
+    timeline.set_duration(100)
+    segment = Segment(10, 12, "Copy", ["Speaker"])
+    timeline.set_segments([segment])
+    timeline.set_selected(segment.id)
+    timeline.set_marks(segment.start, segment.end, segment.id)
+    timeline.set_zoom(5, anchor_time=0)
+    timeline.show()
+    assert timeline.offset == pytest.approx(0)
+    finished: list[tuple[object, ...]] = []
+    timeline.range_edit_finished.connect(lambda *values: finished.append(values))
+
+    center_y = round(timeline._segment_rect(segment).center().y())
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 11, center_y))
+    qtbot.mouseMove(timeline, QPoint(1050, center_y))
+    assert timeline._auto_scroll_timer.isActive()
+    qtbot.waitUntil(lambda: timeline.offset > 30, timeout=5000)
+
+    assert segment.duration == pytest.approx(2.0)
+    assert segment.start > 40
+    assert segment.end > timeline.offset
+    qtbot.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=QPoint(1050, center_y))
+    assert not timeline._auto_scroll_timer.isActive()
+    scrolled = timeline.offset
+    qtbot.wait(50)
+    assert timeline.offset == scrolled
+    assert finished == [(segment.id, 10.0, 12.0, segment.start, segment.end)]
+
+
+def test_drag_auto_scroll_runs_left_stops_at_bounds_and_in_middle(qtbot) -> None:
+    timeline = TimelineWidget()
+    qtbot.addWidget(timeline)
+    timeline.resize(1000, 220)
+    timeline.set_duration(100)
+    segment = Segment(60, 62, "Line", ["Speaker"])
+    timeline.set_segments([segment])
+    timeline.set_selected(segment.id)
+    timeline.set_marks(segment.start, segment.end, segment.id)
+    timeline.set_zoom(5, anchor_time=60)
+    timeline.show()
+    start_offset = timeline.offset
+    edge_y = round(timeline._segment_rect(segment).center().y())
+
+    qtbot.mousePress(timeline, Qt.MouseButton.LeftButton, pos=_point(timeline, 60, edge_y))
+    qtbot.mouseMove(timeline, QPoint(5, edge_y))
+    assert timeline._auto_scroll_timer.isActive()
+    for _ in range(5):
+        timeline._auto_scroll_step()
+    assert timeline.offset < start_offset
+    assert segment.start < timeline._x_to_time(6)
+    assert segment.end == pytest.approx(62)
+
+    qtbot.mouseMove(timeline, QPoint(500, edge_y))
+    assert not timeline._auto_scroll_timer.isActive()
+
+    qtbot.mouseMove(timeline, QPoint(-200, edge_y))
+    for _ in range(200):
+        timeline._auto_scroll_step()
+    assert timeline.offset == 0
+    assert not timeline._auto_scroll_timer.isActive()
+    qtbot.keyPress(timeline, Qt.Key.Key_Escape)
+    assert (segment.start, segment.end) == (60, 62)
+
+
+def test_right_drag_pan_does_not_auto_scroll(pannable_timeline, qtbot) -> None:
+    timeline = pannable_timeline
+    qtbot.mousePress(timeline, Qt.MouseButton.RightButton, pos=QPoint(500, 65))
+    qtbot.mouseMove(timeline, QPoint(995, 65))
+    assert timeline.is_panning
+    assert not timeline._auto_scroll_timer.isActive()
+    qtbot.mouseRelease(timeline, Qt.MouseButton.RightButton, pos=QPoint(995, 65))
+
+
 def test_dragging_empty_waveform_creates_new_range(qtbot) -> None:
     timeline = TimelineWidget()
     qtbot.addWidget(timeline)

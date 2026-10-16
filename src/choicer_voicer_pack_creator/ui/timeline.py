@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from heapq import heappop, heappush
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QContextMenuEvent,
@@ -18,6 +18,10 @@ from PySide6.QtWidgets import QApplication, QToolTip, QWidget
 
 from choicer_voicer_pack_creator.models import Segment
 from choicer_voicer_pack_creator.ui.theme import SEGMENT_COLORS
+
+AUTO_SCROLL_EDGE = 40.0
+AUTO_SCROLL_INTERVAL_MS = 16
+AUTO_SCROLL_MAX_STEP = 60.0
 
 
 def segment_lanes(segments: list[Segment]) -> dict[str, int]:
@@ -88,6 +92,10 @@ class TimelineWidget(QWidget):
         self._box_additive = False
         self._suppress_mouse_context_menu = False
         self._segment_lanes: dict[str, int] = {}
+        self._auto_scroll_x = 0.0
+        self._auto_scroll_timer = QTimer(self)
+        self._auto_scroll_timer.setInterval(AUTO_SCROLL_INTERVAL_MS)
+        self._auto_scroll_timer.timeout.connect(self._auto_scroll_step)
 
     @property
     def visible_duration(self) -> float:
@@ -450,6 +458,7 @@ class TimelineWidget(QWidget):
                     return
                 self._activate_drag()
             self._update_drag(event.position().x())
+            self._update_auto_scroll(event.position().x())
             return
 
         x = event.position().x()
@@ -725,11 +734,47 @@ class TimelineWidget(QWidget):
         return [segment.id for segment in self.segments if segment.id in self.selected_ids]
 
     def _clear_drag(self) -> None:
+        self._auto_scroll_timer.stop()
         self._drag_id = ""
         self._drag_kind = ""
         self._drag_active = False
         self._box_initial = []
         self._box_additive = False
+        self.update()
+
+    def _auto_scroll_step_pixels(self, x: float) -> float:
+        """Signed scroll speed in pixels per tick; faster the further past an edge."""
+        edge = min(AUTO_SCROLL_EDGE, self.width() / 4.0)
+        if x < edge:
+            return -min(AUTO_SCROLL_MAX_STEP, 2.0 + (edge - x) * 0.4)
+        if x > self.width() - edge:
+            return min(AUTO_SCROLL_MAX_STEP, 2.0 + (x - self.width() + edge) * 0.4)
+        return 0.0
+
+    def _can_auto_scroll(self) -> bool:
+        return self._drag_active and self._drag_kind not in {"", "pan"}
+
+    def _update_auto_scroll(self, x: float) -> None:
+        self._auto_scroll_x = x
+        if self._can_auto_scroll() and self._auto_scroll_step_pixels(x):
+            if not self._auto_scroll_timer.isActive():
+                self._auto_scroll_timer.start()
+        else:
+            self._auto_scroll_timer.stop()
+
+    def _auto_scroll_step(self) -> None:
+        step = self._auto_scroll_step_pixels(self._auto_scroll_x)
+        if not self._can_auto_scroll() or not step:
+            self._auto_scroll_timer.stop()
+            return
+        previous = self.offset
+        self.offset += step / max(1, self.width()) * self.visible_duration
+        self._clamp_offset()
+        if self.offset == previous:
+            self._auto_scroll_timer.stop()
+            return
+        # Re-apply the drag at the same cursor position so the edit follows the scrolled view.
+        self._update_drag(self._auto_scroll_x)
         self.update()
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
