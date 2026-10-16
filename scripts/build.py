@@ -220,6 +220,10 @@ def _caption_timing_distribution_names() -> list[str]:
     return _distribution_names(("ctranslate2", "tokenizers"))
 
 
+def _parakeet_distribution_names() -> list[str]:
+    return _distribution_names(("sherpa-onnx",))
+
+
 def _singing_distribution_names() -> list[str]:
     return _distribution_names(SINGING_PACKAGES)
 
@@ -278,6 +282,10 @@ def _write_spec() -> Path:
             from choicer_voicer_pack_creator.caption_timing_worker import smoke_main
 
             raise SystemExit(smoke_main(Path(sys.argv[2])))
+        if len(sys.argv) == 3 and sys.argv[1] == "--parakeet-smoke":
+            from choicer_voicer_pack_creator.parakeet_worker import smoke_main
+
+            raise SystemExit(smoke_main(Path(sys.argv[2])))
         """), encoding="utf-8")
     spec = BUILD / f"{APP_NAME}.spec"
     spec.write_text(
@@ -307,6 +315,7 @@ def _write_spec() -> Path:
                 "_kaldi_native_fbank",
                 "choicer_voicer_pack_creator.speaker_worker",
                 "choicer_voicer_pack_creator.caption_timing_worker",
+                "choicer_voicer_pack_creator.parakeet_worker",
                 "choicer_voicer_pack_creator.bandit_runtime",
                 "choicer_voicer_pack_creator.bandit_cuda_runtime",
                 *collect_submodules(
@@ -332,6 +341,16 @@ def _write_spec() -> Path:
                 data += package_data
                 binaries += package_binaries
                 hiddenimports += package_imports
+            # sherpa-onnx keeps its own ONNX Runtime DLL in sherpa_onnx/lib for the isolated
+            # Parakeet worker. Its link-time archives and C headers are not needed at runtime.
+            package_data, package_binaries, package_imports = collect_all(
+                "sherpa_onnx", exclude_datas=["**/*.lib", "**/*.h"],
+            )
+            data += package_data
+            binaries += [
+                item for item in package_binaries if not item[0].casefold().endswith(".lib")
+            ]
+            hiddenimports += package_imports
             for package in {SINGING_PACKAGES!r}:
                 # Only compiler/link-time archives and headers are excluded. Preserve
                 # torch's Python compilation machinery reached by checkpoint imports.
@@ -348,7 +367,7 @@ def _write_spec() -> Path:
                 (str(fbank.locate_file("kaldi-native-fbank-core.dll")), "."),
             ]
             # Include activated dependency extras too (e.g. PyJWT's crypto extra).
-            for package in {sorted(set(_mcp_distribution_names() + _caption_timing_distribution_names() + _singing_distribution_names()))!r}:
+            for package in {sorted(set(_mcp_distribution_names() + _caption_timing_distribution_names() + _parakeet_distribution_names() + _singing_distribution_names()))!r}:
                 data += copy_metadata(package)
             analysis = Analysis(
                 [str(path) for path in entrypoints],
@@ -464,6 +483,14 @@ def _copy_caption_timing_licenses(app_dir: Path) -> None:
         app_dir, _caption_timing_distribution_names(), "Local caption timing runtime",
         "Optional caption word alignment uses CTranslate2 and Tokenizers, without PyAV "
         "or faster-whisper. Model weights are not bundled.",
+    )
+
+
+def _copy_parakeet_licenses(app_dir: Path) -> None:
+    _copy_python_licenses(
+        app_dir, _parakeet_distribution_names(), "Local Parakeet transcription runtime",
+        "Local transcription runs NVIDIA Parakeet TDT 0.6B v3 through sherpa-onnx "
+        "(Apache-2.0), which includes its own ONNX Runtime DLL. Model weights are not bundled.",
     )
 
 
@@ -591,6 +618,7 @@ def build_candidate() -> int:
     shutil.copy2(ROOT / "README.md", app_dir / "README.md")
     _copy_mcp_licenses(app_dir)
     _copy_caption_timing_licenses(app_dir)
+    _copy_parakeet_licenses(app_dir)
     _copy_singing_licenses(app_dir)
     shutil.copy2(
         FFMPEG_STAGE / "licenses" / "FFmpeg-LGPL-3.0.txt",

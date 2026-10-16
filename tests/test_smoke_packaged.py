@@ -320,6 +320,7 @@ def test_main_checks_editor_youtube_mcp_both_separation_entrypoints_and_optional
     monkeypatch.setattr(
         SMOKE, "smoke_speaker_matching", lambda path: calls.append(("speaker", path)),
     )
+    monkeypatch.setattr(SMOKE, "smoke_parakeet", lambda path: calls.append(("parakeet", path)))
     monkeypatch.setattr(SMOKE, "smoke_update", lambda path: calls.append(("update", path)))
 
     assert SMOKE.main() == 0
@@ -333,6 +334,8 @@ def test_main_checks_editor_youtube_mcp_both_separation_entrypoints_and_optional
         ("bandit", mcp_executable),
         ("speaker", executable),
         ("speaker", mcp_executable),
+        ("parakeet", executable),
+        ("parakeet", mcp_executable),
         *([("update", executable)] if update_smoke else []),
     ]
 

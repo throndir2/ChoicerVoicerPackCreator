@@ -68,6 +68,8 @@ ALLOWED_DOWNLOAD_HOSTS = {
     "download.pytorch.org",
 }
 ALLOWED_DOWNLOAD_HOST_SUFFIXES = (".cdn.hf.co", ".xethub.hf.co")
+# Suggestion sources produced by a speech model, as opposed to audio-activity ranges.
+TRANSCRIPT_SOURCES = frozenset(("Whisper", "Parakeet"))
 
 
 class AnalysisError(RuntimeError):
@@ -278,7 +280,7 @@ def detect_hardware() -> HardwareProfile:
             memory_bytes = int(status.total_physical)
             available_memory_bytes = int(status.available_physical)
     recommended = (
-        "base"
+        "parakeet"
         if available_memory_bytes is None or available_memory_bytes >= 2 * 1024**3
         else "tiny"
     )
@@ -1081,7 +1083,22 @@ def _analyze_video(
             f"Video analysis needs approximately {required_temporary_disk / 1024**2:.0f} MiB "
             f"free in {temporary_root}, but only {temporary_free / 1024**2:.0f} MiB is available."
         )
-    if use_whisper:
+    if use_whisper and model_key == "parakeet":
+        from choicer_voicer_pack_creator.parakeet import (
+            MODEL_MEMORY_BYTES,
+            MODEL_NAME,
+            ParakeetManager,
+            supports_language,
+        )
+
+        if not supports_language(language):
+            raise AnalysisError(
+                f"{MODEL_NAME} supports 25 European languages. "
+                "Choose a Whisper model for this spoken language."
+            )
+        parakeet = ParakeetManager(data_root)
+        persistent_required = 32 * 1024**2 + (0 if parakeet.installed else parakeet.setup_bytes)
+    elif use_whisper:
         manager = WhisperManager(data_root, manifest_path)
         persistent_required = 32 * 1024**2
         if not manager.cli_path.is_file():
@@ -1090,6 +1107,7 @@ def _analyze_video(
             )
         if not manager.model_path(model_key).is_file():
             persistent_required += manager.model_download_bytes(model_key)
+    if use_whisper:
         persistent_root = data_root if data_root.exists() else data_root.parent
         while not persistent_root.exists() and persistent_root != persistent_root.parent:
             persistent_root = persistent_root.parent
@@ -1104,12 +1122,15 @@ def _analyze_video(
                 f"MiB free near {data_root}, but only {persistent_free / 1024**2:.0f} MiB is available."
             )
     if use_whisper and hardware.available_memory_bytes is not None:
-        model_memory = 1_100 * 1024**2 if model_key == "base" else 600 * 1024**2
+        model_memory = (
+            MODEL_MEMORY_BYTES if model_key == "parakeet"
+            else 1_100 * 1024**2 if model_key == "base" else 600 * 1024**2
+        )
         audio_memory = estimated_audio_bytes * 2
         if hardware.available_memory_bytes < model_memory + audio_memory:
             raise AnalysisError(
                 "This video/model combination exceeds the conservative local-memory budget. "
-                "Choose the Tiny model or analyze a shorter source."
+                "Choose the Whisper Tiny model or analyze a shorter source."
             )
     with tempfile.TemporaryDirectory(
         prefix="cvpc-analysis-", dir=temporary_root
@@ -1151,7 +1172,12 @@ def _analyze_video(
         transcripts: list[AnalysisSuggestion] = []
         detected_language: str | None = None
         model_name: str | None = None
-        if use_whisper:
+        if use_whisper and model_key == "parakeet":
+            transcripts, detected_language = parakeet.transcribe(
+                wav_path, language, hardware, progress, cancelled,
+            )
+            model_name = MODEL_NAME
+        elif use_whisper:
             manager = WhisperManager(data_root, manifest_path)
             transcripts, detected_language = manager.transcribe(
                 wav_path,

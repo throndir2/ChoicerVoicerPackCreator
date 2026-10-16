@@ -71,7 +71,8 @@ the client stops the process.**
   exact duration and `recording_padding`; replacing audio or regenerating from video
   clears that padding.
 - Optionally call `analyze_video` for deterministic activity suggestions.
-  Whisper transcription is off by default and requires explicit
+  Local transcription (`use_whisper`; `model` defaults to `parakeet`, with Whisper
+  `base`/`tiny` for languages Parakeet does not support) is off by default and requires explicit
   `allow_download=true`, even when cached components may only need repair.
   `language` accepts `auto` or a two-/three-letter lowercase code such as `en`.
 - For a project with original YouTube captions, `analyze_video` or `start_analysis`
@@ -210,7 +211,7 @@ Exports are staged, validated, and published transactionally.
 to its model provider.** Captions, project metadata, paths, and other tool results
 can also leave your machine through that client. Local stdio is not a promise of
 local-only AI processing. Check your client's data policy and approve sensitive
-media before requesting previews. Optional local Whisper analysis itself does
+media before requesting previews. Optional local transcription itself does
 not upload source audio or transcripts.
 
 Use media you have permission to process and redistribute. Credit the authors

@@ -863,7 +863,7 @@ def test_each_transcript_has_a_direct_use_button(
     ))
     assert dialog.selected_source == "refined"
     assert dialog.refined_add_button.text() == "Use YouTube Transcript"
-    assert dialog.local_add_button.text() == "Use Whisper Transcript"
+    assert dialog.local_add_button.text() == "Use Local Transcript"
     for panel, table, button in (
         (dialog.refined_panel, dialog.refined_table, dialog.refined_add_button),
         (dialog.local_panel, dialog.local_table, dialog.local_add_button),
@@ -953,7 +953,7 @@ def test_adding_captions_during_background_scan_waits_for_cancellation(
     accepted = []
     dialog.suggestions_accepted.connect(accepted.extend)
     qtbot.waitUntil(lambda: dialog.worker is not None and dialog.worker.isRunning())
-    assert dialog.scan_button.text() == "Whisper Running..."
+    assert dialog.scan_button.text() == "Transcribing..."
     assert dialog.scan_button.objectName() != "primary"
     assert dialog.add_button.objectName() == "primary"
     assert dialog.add_button.text() == "Use YouTube Transcript"
@@ -1338,8 +1338,8 @@ def test_no_youtube_captions_still_offers_whisper_source(qtbot, tmp_path):
     ], 1, 1, -30, "base", "en", detect_hardware()))
     assert dialog.add_button.isEnabled()
     assert dialog.checked_suggestions()[0].caption == "Whisper only"
-    assert dialog.scan_button.text() == "Rerun Whisper..."
-    assert dialog.add_button.text() == "Use Whisper Transcript"
+    assert dialog.scan_button.text() == "Transcribe Again..."
+    assert dialog.add_button.text() == "Use Local Transcript"
 
 
 def test_failed_rescan_keeps_previously_edited_local_draft(qtbot, tmp_path, monkeypatch):
@@ -1548,7 +1548,7 @@ def test_source_labels_and_play_action_identify_the_selected_transcript(qtbot, t
     assert dialog.refined_radio.text() == "Select YouTube transcript"
     assert dialog.refined_add_button.text() == "Use YouTube Transcript"
     assert dialog._recovery_hint(refine=True).startswith("No YouTube draft is available.")
-    assert dialog.local_panel.title() == "Whisper Transcript"
+    assert dialog.local_panel.title() == "Local Transcript"
     assert not dialog.preview_button.isEnabled()
     assert dialog.refined_status.text() == "Waiting for YouTube refinement."
     complete_refinement(dialog)
@@ -1568,10 +1568,10 @@ def test_source_labels_and_play_action_identify_the_selected_transcript(qtbot, t
         [AnalysisSuggestion(0.5, 3, "Whisper line", "Whisper")],
         1, 1, -30, "base", "en", detect_hardware(),
     ))
-    assert dialog.local_status.text() == "1 Whisper rows."
+    assert dialog.local_status.text() == "1 transcript rows."
     dialog.local_radio.setChecked(True)
-    assert dialog.preview_button.text() == "Play Selected Whisper Line"
-    assert dialog.add_button.text() == "Use Whisper Transcript"
+    assert dialog.preview_button.text() == "Play Selected Transcript Line"
+    assert dialog.add_button.text() == "Use Local Transcript"
     assert dialog.add_button.isDefault()
     assert not dialog.scan_button.autoDefault()
     dialog.preview_button.click()
@@ -1697,7 +1697,7 @@ def test_refinement_interruption_keeps_all_drafts(qtbot, tmp_path, monkeypatch, 
     assert dialog.source_captions[0].text == "Original"
     if outcome == "fail":
         assert "failed" in dialog.refined_status.text()
-        assert "Saved Whisper draft" in dialog.local_status.text()
+        assert "Saved transcript draft" in dialog.local_status.text()
     elif outcome == "cancel":
         assert "canceled" in dialog.refined_status.text()
         assert dialog.refined_table.isEnabled()
@@ -1937,15 +1937,15 @@ def test_model_switch_recovery_can_use_current_whisper_without_rerunning(
     assert dialog.analysis_result is tiny_result
     assert dialog.local_table.isEnabled()
     assert dialog.scan_button.isEnabled()
-    assert dialog.scan_button.text() == "Rerun Whisper..."
+    assert dialog.scan_button.text() == "Transcribe Again..."
     assert dialog.model_combo.currentData() == "base"
     assert dialog.language_combo.currentData() == "ja"
     assert "tiny; detected en" in dialog.local_draft_label.text()
     assert "base" not in dialog.local_draft_label.text()
-    assert "Use Whisper Transcript" in dialog.progress_label.text()
+    assert "Use Local Transcript" in dialog.progress_label.text()
     assert bool(errors) == (outcome in {"memory", "runtime", "invalid", "setup"})
     if errors:
-        assert "Use Whisper Transcript" in errors[0]
+        assert "Use Local Transcript" in errors[0]
     assert len(calls) == (0 if outcome in {
         "decline-replacement", "decline-download", "setup",
     } else 1)
@@ -1963,7 +1963,7 @@ def test_model_switch_recovery_can_use_current_whisper_without_rerunning(
         pos=dialog.local_table.visualItemRect(dialog.local_table.item(0, 3)).center(),
     )
     assert dialog.selected_source == "local"
-    assert dialog.add_button.text() == "Use Whisper Transcript"
+    assert dialog.add_button.text() == "Use Local Transcript"
     assert dialog.add_button.isEnabled()
     accepted = []
     dialog.suggestions_accepted.connect(accepted.extend)
@@ -2061,8 +2061,8 @@ def test_first_whisper_attempt_without_draft_can_retry(
     qtbot.waitUntil(lambda: dialog.worker is None)
     assert not dialog.local_radio.isEnabled()
     assert not dialog.add_button.isEnabled()
-    assert dialog.scan_button.text() == "Run Whisper"
-    assert "No Whisper draft is available" in dialog.progress_label.text()
+    assert dialog.scan_button.text() == "Transcribe"
+    assert "No Local draft is available" in dialog.progress_label.text()
     dialog.model_combo.setCurrentIndex(dialog.model_combo.findData("tiny"))
     dialog.start_scan()
     qtbot.waitUntil(lambda: dialog.worker is None)
@@ -2202,7 +2202,7 @@ def test_switching_to_activity_scan_keeps_whisper_draft_until_success(
     dialog.start_scan()
     qtbot.waitUntil(lambda: dialog.worker is None)
     assert dialog.review_state() == before
-    assert dialog.add_button.text() == "Use Whisper Transcript"
+    assert dialog.add_button.text() == "Use Local Transcript"
     assert not dialog.model_combo.isEnabled()
     assert not dialog.language_combo.isEnabled()
     monkeypatch.setattr(
@@ -2218,3 +2218,62 @@ def test_switching_to_activity_scan_keeps_whisper_draft_until_success(
     assert dialog.review_state().local_model_name == ""
     assert dialog.review_state().local_detected_language == ""
     assert dialog.checked_suggestions() == [AnalysisSuggestion(3, 4, "", "Audio activity")]
+
+
+def _parakeet_default(monkeypatch):
+    from dataclasses import replace
+
+    monkeypatch.setattr(
+        analysis_dialog, "detect_hardware",
+        lambda: replace(detect_hardware(), recommended_model="parakeet"),
+    )
+
+
+def test_parakeet_is_default_and_unsupported_languages_select_whisper(qtbot, tmp_path, monkeypatch):
+    _parakeet_default(monkeypatch)
+    dialog = AnalysisDialog(UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0)
+    qtbot.addWidget(dialog)
+    assert dialog.model_combo.currentData() == "parakeet"
+    assert "Parakeet model download" in dialog.setup_label.text()
+    dialog.language_combo.setCurrentIndex(dialog.language_combo.findData("fr"))
+    assert dialog.model_combo.currentData() == "parakeet"
+    dialog.language_combo.setCurrentIndex(dialog.language_combo.findData("ja"))
+    assert dialog.model_combo.currentData() == "base"
+    japanese = AnalysisDialog(
+        UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0,
+        caption_language="ja-JP",
+    )
+    qtbot.addWidget(japanese)
+    assert japanese.model_combo.currentData() == "base"
+
+
+def test_parakeet_download_needs_consent_and_runs_parakeet(qtbot, tmp_path, monkeypatch):
+    _parakeet_default(monkeypatch)
+    calls = []
+
+    def analyze(*_args, **kwargs):
+        calls.append(kwargs)
+        return AnalysisResult(
+            [AnalysisSuggestion(1, 2, "Bonjour.", "Parakeet", 0.9)],
+            1, 1, -30, "Parakeet TDT 0.6B v3", None, detect_hardware(),
+        )
+
+    monkeypatch.setattr(analysis_dialog, "analyze_video", analyze)
+    prompts = []
+
+    def accept(_parent, title, text, *_args):
+        prompts.append(text)
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", accept)
+    dialog = AnalysisDialog(UnusedMedia(), tmp_path / "video.mp4", 10, tmp_path / "analysis", 0)
+    qtbot.addWidget(dialog)
+    dialog.start_scan()
+    qtbot.waitUntil(lambda: bool(calls) and dialog.worker is None)
+    assert len(prompts) == 1 and "Parakeet" in prompts[0] and "465 MiB" in prompts[0]
+    assert calls[0]["use_whisper"] is True and calls[0]["model_key"] == "parakeet"
+    assert dialog.local_table.item(0, 3).text() == "Bonjour."
+    assert dialog.local_table.item(0, 4).text() == "Parakeet"
+    assert dialog.local_add_button.text() == "Use Local Transcript"
+    assert "Parakeet TDT 0.6B v3" in dialog.local_draft_label.text()
+    assert dialog.checked_suggestions() == [AnalysisSuggestion(1, 2, "Bonjour.", "Parakeet", 0.9)]

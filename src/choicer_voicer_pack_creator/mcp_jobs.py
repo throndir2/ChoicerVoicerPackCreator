@@ -72,7 +72,7 @@ class LiveJobs:
         self, automation: PackAutomation, kind: str, expected_revision: str,
         *, output_parent: str | None = None, overwrite: bool = False,
         use_whisper: bool = False, allow_download: bool = False,
-        sensitivity: str = "balanced", model: str = "base", language: str = "auto",
+        sensitivity: str = "balanced", model: str = "parakeet", language: str = "auto",
         align_captions: bool = False,
     ) -> dict[str, Any]:
         snapshot = automation.access.snapshot()
@@ -99,7 +99,7 @@ class LiveJobs:
                 )
         elif kind == "analysis":
             if (use_whisper or align_captions) and not allow_download:
-                raise ValueError("Whisper and word alignment require explicit allow_download=true permission.")
+                raise ValueError("Transcription and word alignment require explicit allow_download=true permission.")
             if align_captions and not snapshot.project.source_captions:
                 raise ValueError("Word alignment requires original imported YouTube captions.")
             reads = [local_path(snapshot.project.video_path)]

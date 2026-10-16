@@ -491,6 +491,29 @@ def smoke_speaker_matching(executable: Path) -> None:
 UPDATE_SMOKE_TIMEOUT = 600
 
 
+def smoke_parakeet(executable: Path) -> None:
+    app_dir = application_directory(executable)
+    job = ROOT / "build" / "parakeet-smoke" / uuid.uuid4().hex
+    job.mkdir(parents=True)
+    try:
+        report_path = job / "report.json"
+        completed = subprocess.run(
+            [str(executable), "--parakeet-smoke", str(report_path)],
+            env=mcp_environment(dict(os.environ), executable),
+            check=False, timeout=90,
+        )
+        report = json.loads(report_path.read_text()) if report_path.is_file() else {}
+        if completed.returncode != 0 or report != {
+            "sherpa_onnx": "1.13.8", "onnxruntime_imported": False, "qt_imported": False,
+        }:
+            raise RuntimeError(f"Packaged Parakeet worker failed: {report}")
+        if not (app_dir / "licenses" / "python" / "sherpa-onnx").is_dir():
+            raise RuntimeError("Missing sherpa-onnx license notices")
+        print("PACKAGED QT-FREE PARAKEET (SHERPA-ONNX) WORKER SMOKE PASSED")
+    finally:
+        shutil.rmtree(job)
+
+
 def _update_smoke_json(path: Path, pending: dict[str, str]) -> dict | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -715,6 +738,8 @@ def main() -> int:
     smoke_bandit(mcp_executable)
     smoke_speaker_matching(executable)
     smoke_speaker_matching(mcp_executable)
+    smoke_parakeet(executable)
+    smoke_parakeet(mcp_executable)
     if "--update-smoke" in sys.argv:
         smoke_update(executable)
     return 0

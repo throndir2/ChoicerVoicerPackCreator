@@ -33,6 +33,8 @@ dependencies = [
   "flatbuffers==25.12.19",
   "ctranslate2==4.8.1",
   "tokenizers==0.23.1",
+  "sherpa-onnx==1.13.8",
+  "sherpa-onnx-core==1.13.8",
 ]
 
 [project.optional-dependencies]

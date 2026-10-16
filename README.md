@@ -44,7 +44,7 @@ You can edit from the first second. All the slow work runs in the background, so
 ### 📝 Automatic transcripts
 
 - **YouTube captions, cleaned up:** the app splits captions into natural lines at the real pauses in the audio.
-- **Whisper speech recognition:** a second transcript is made on your computer. Compare it side by side with the YouTube captions and use the best one.
+- **Local speech recognition:** a second transcript is made on your computer with NVIDIA Parakeet (Whisper for languages that Parakeet does not support). Compare it side by side with the YouTube captions and use the best one.
 - **Align Words:** a larger model fits each caption word to the audio for precise cuts, and marks the lines that need a check.
 - **Quick scan:** suggest lines from audio activity, with no download.
 - **You stay in control:** nothing goes into your project until you choose **Use Transcript**.
@@ -149,7 +149,7 @@ explains every feature in detail.
 
 | Feature | Download size |
 | :--- | ---: |
-| Whisper transcripts | about 80–150 MB |
+| Local transcripts (Parakeet) | about 465 MB (Whisper: about 80–150 MB) |
 | Speaker matching | about 25 MB |
 | Music track (remove all vocals) | about 300 MB |
 | Music track (keep singing) | about 430 MB |

@@ -539,7 +539,7 @@ class PackAutomation:
     ) -> dict[str, Any]:
         if (use_whisper or align_captions) and not allow_download:
             raise ValueError(
-                "Whisper or caption alignment may download or repair pinned components. "
+                "Transcription or caption alignment may download or repair pinned components. "
                 "Obtain permission, then set "
                 "allow_download=true. Activity-only scanning never downloads anything."
             )

@@ -150,7 +150,7 @@ beside the MCP executable; MCP setup is not exposed in the editor menus.
 	visible editor. Honor the existing single-instance lock. `--headless` must not create a
 	QApplication/window and must remain independent of GUI state.
 - Preserve revision checks for metadata/segment edits and explicit permission for discarding
-	dirty projects, overwriting files, or downloading optional Whisper components.
+	dirty projects, overwriting files, or downloading optional transcription components.
 - Allow incomplete draft captions/speakers, but keep export validation fail-closed. Save editable
 	projects explicitly; process-local headless memory is not persistence.
 - Source media is immutable. Use the same project format, prompt-audio behavior, validation, and
