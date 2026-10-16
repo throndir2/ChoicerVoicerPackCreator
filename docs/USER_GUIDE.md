@@ -595,6 +595,9 @@ attempt access-restriction workarounds. An authorized local copy can still be op
 - Drag the cyan **IN** or orange **OUT** handle to trim the range precisely.
 - Drag inside the highlighted waveform range to move it without changing its duration.
 - Drag the center of an existing segment block to move that segment, or either edge to trim it.
+- While you drag a segment, a range, a handle, or the playback line, hold the pointer near the
+  left or right edge of a zoomed-in timeline to scroll it automatically. Move the pointer further
+  past the edge to scroll faster. This lets you move a copied segment far along the video in one drag.
 - Press **Esc** during a drag to cancel it. The In/Out number fields remain available for exact
 	entry.
 
