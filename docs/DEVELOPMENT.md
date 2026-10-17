@@ -69,8 +69,8 @@ isolated cache in its worker, not by changing your virtual environment. The GPU 
 .\Build-Portable.ps1
 ```
 
-The Windows application folder is written below `dist/v1.4.2/portable-<build-id>/`, with a
-shareable `Choicer-Voicer-Pack-Creator-1.4.2-Portable-Windows-x64.zip` beside it. The first build downloads
+The Windows application folder is written below `dist/v1.5.0/portable-<build-id>/`, with a
+shareable `Choicer-Voicer-Pack-Creator-1.5.0-Portable-Windows-x64.zip` beside it. The first build downloads
 about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. The stable sharing ZIP is not
 replaced until both the application folder and a clean ZIP extraction pass packaged smoke tests.
 Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or
@@ -129,8 +129,8 @@ non-commercial restrictions; the inference source is Apache-2.0. See About and t
 The finished outputs are:
 
 ```text
-dist/v1.4.2/portable-<build-id>/Choicer Voicer Pack Creator/
-dist/v1.4.2/Choicer-Voicer-Pack-Creator-1.4.2-Portable-Windows-x64.zip
+dist/v1.5.0/portable-<build-id>/Choicer Voicer Pack Creator/
+dist/v1.5.0/Choicer-Voicer-Pack-Creator-1.5.0-Portable-Windows-x64.zip
 ```
 
 The script prints the exact generated application-folder path. Each rebuild uses a new path to avoid
@@ -174,8 +174,8 @@ current user, run `winget install --id JRSoftware.InnoSetup -e --scope user`. Th
 `installer\ChoicerVoicerPackCreator.iss` and writes these files beside the ZIP:
 
 ```text
-dist/v1.4.2/Choicer-Voicer-Pack-Creator-1.4.2-Setup.exe
-dist/v1.4.2/Choicer-Voicer-Pack-Creator-1.4.2-Setup.exe.sha256
+dist/v1.5.0/Choicer-Voicer-Pack-Creator-1.5.0-Setup.exe
+dist/v1.5.0/Choicer-Voicer-Pack-Creator-1.5.0-Setup.exe.sha256
 ```
 
 The installer contains the same files as the ZIP, plus a `setup-install.json` marker. The marker
