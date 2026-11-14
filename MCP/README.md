@@ -1,5 +1,11 @@
 # MCP integration
 
+**Status:** Implemented  
+**Last Updated:** 2026-11-13  
+**Audience:** MCP client users and maintainers  
+**Last verified:** 2026-11-13 against `dac0e5b`  
+**Code:** `src/choicer_voicer_pack_creator/mcp_server.py`, `src/choicer_voicer_pack_creator/mcp_gui.py`, `src/choicer_voicer_pack_creator/mcp_jobs.py`, `src/choicer_voicer_pack_creator/ui_automation.py`, `src/choicer_voicer_pack_creator/automation.py`, `src/choicer_voicer_pack_creator/resources/mcp-help.md`, `scripts/build.py`, `tests/test_mcp_server.py`, `tests/test_mcp_gui.py`, `tests/test_mcp_native.py`
+
 **This folder is for MCP-compatible assistant clients, not normal editor use.**
 To use the editor, run `Choicer Voicer Pack Creator.exe` in the parent application folder.
 Do not double-click `Choicer Voicer MCP.exe`: it is a server that waits for a client,
@@ -265,8 +271,9 @@ the application's own rendered window, **not the desktop**. `get_frame` still re
 **source-media frame**, not a UI screenshot. UI images/text can reach the model provider too.
 
 `ui_interact(selector, action, project_id?, text?, index?, key?)` accepts `click`, `type`, `key`,
-`select`, `close_tab`, or `reveal`. Selection/closing uses zero-based tab/table/combobox indices;
-typing replaces editable text using Qt input (line fields commit by moving focus).
+`select`, `close_tab`, or `reveal`. Selection uses zero-based tab, table, or combobox indices;
+`close_tab` uses a tab index.
+Typing replaces editable text using Qt input (line fields commit by moving focus).
 Tab selection and closing use real mouse events on the tab bar.
 `reveal` explicitly scrolls ancestor areas to a known widget without editing anything; the next
 click/key input must still hit the real rendered widget. On short screens use it before field
@@ -278,7 +285,8 @@ Acceptance is not proof the intended workflow finished; inspect widgets, Tasks, 
 
 Stable selectors: `projectTabs`, `projectTitle`, `segmentCaption`, `segmentsTable`,
 `saveProject`, `exportProject`, `analyzeProject`, `showTasks`, `tasksWindow`, `taskProjectFilter`,
-`tasksTable`, `taskLog`, `taskRestoreProject`, `taskCancel`, `taskRetry`, `taskOpenOutput`, `taskDetails`.
+`tasksTable`, `taskLog`, `taskRestoreProject`, `taskCancel`, `taskRetry`, `taskOpenOutput`, `taskDetails`,
+`alignYouTubeTimings`.
 Click `showTasks` to open the separate nonmodal window before interacting with task controls.
 Send `Escape` to `tasksWindow` to close it without cancelling work. Switch open projects through
 `projectTabs`; `taskRestoreProject` only restores tabs closed with **Keep processing**.
