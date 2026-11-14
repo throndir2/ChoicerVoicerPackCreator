@@ -1,5 +1,11 @@
 # Third-party notices
 
+**Status:** Implemented<br>
+**Last Updated:** 2026-11-13<br>
+**Audience:** Users, developers, and maintainers<br>
+**Last verified:** 2026-11-13 against `dac0e5b`<br>
+**Code:** `pyproject.toml`, `Build-Portable.ps1`, `scripts/build.py`, `src/choicer_voicer_pack_creator/`, `src/choicer_voicer_pack_creator/resources/`
+
 ## Buy Me a Coffee button
 
 The support link in **Help > About** uses Buy Me a Coffee's
@@ -272,9 +278,12 @@ ONNX Runtime, NumPy and SoundFile are shared with backing-track separation above
 Training-matched preprocessing uses 16 kHz mono audio scaled by 32768, an 80-bin Hamming
 filterbank (25 ms frames, 10 ms shift, zero dither, snipped edges, 20 Hz low cutoff),
 and per-bin time mean normalization. Only the central 12 seconds of longer clips are
-sampled, with at least 1.5 seconds above the 0.005 RMS activity threshold required.
-Matching uses normalized human reference centroids, minimum cosine 0.72, minimum
-runner-up margin 0.12, and a stronger 0.78 minimum when only one character has references.
+sampled. A clip needs at least 0.75 seconds above the 0.005 RMS activity threshold.
+Matching uses normalized human reference centroids. A character's threshold is 0.45 if
+all its reference clips are shorter than two seconds, or 0.40 if any reference is at
+least two seconds. The threshold is 0.50 when only one character has references. The
+best score must also exceed the next score by at least 0.12 and meet the threshold
+against an individual reference.
 A matching individual human reference must also exceed the absolute threshold.
 These conservative, configurable constants are not calibrated percentage confidence.
 Silence, short/nonfinite clips, ambiguous and unknown voices are left unassigned.
