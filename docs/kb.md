@@ -3,11 +3,18 @@
 **Status:** Partial
 **Last Updated:** 2026-11-13
 **Audience:** Developers and maintainers
-**Last verified:** 2026-11-13 against `aab9b0b` plus the local checker change
-**Code:** `scripts/kb/check_kb.py`, `scripts/kb/test_check_kb.py`, `.repo-kb.json`
+**Last verified:** 2026-11-13 against `f905faf` plus the bootstrap changes
+**Code:** `AGENTS.md`, `.github/copilot-instructions.md`, `CONTRIBUTING.md`, `scripts/kb/check_kb.py`, `scripts/kb/test_check_kb.py`, `.repo-kb.json`
 
 This page defines the repository's documentation rules. The contract, top-level map, and local path and index checker exist.
 Page generation does not exist.
+
+## Agent bootstrap and pull requests
+
+[AGENTS.md](../AGENTS.md) and [Copilot instructions](../.github/copilot-instructions.md)
+require agents to search the KB before exploring the repository. They also require PRs
+to update affected KB pages and indexes, or explain why no doc change is needed.
+[Contributing](../CONTRIBUTING.md#pull-requests) requires the local diff check before merge.
 
 ## Page metadata
 

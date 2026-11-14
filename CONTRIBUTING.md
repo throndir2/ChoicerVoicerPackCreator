@@ -3,8 +3,8 @@
 **Status:** Implemented<br>
 **Last Updated:** 2026-11-13<br>
 **Audience:** Developers and maintainers<br>
-**Last verified:** 2026-11-13 against `dac0e5b`<br>
-**Code:** `pyproject.toml`, `tools/`, `Build-Portable.ps1`, `Build-Installer.ps1`, `scripts/`, `installer/`, `src/choicer_voicer_pack_creator/`, `tests/`
+**Last verified:** 2026-11-13 against `f905faf` plus the bootstrap changes<br>
+**Code:** `AGENTS.md`, `.github/copilot-instructions.md`, `pyproject.toml`, `tools/`, `Build-Portable.ps1`, `Build-Installer.ps1`, `scripts/`, `installer/`, `src/choicer_voicer_pack_creator/`, `tests/`
 
 Contributions are welcome. This project is an unofficial community utility and is not affiliated with the creators of *The Choicer Voicer*.
 
@@ -196,6 +196,10 @@ do not present engineering size estimates as measurements. Existing release chec
 ## Pull requests
 
 Explain the user-visible behavior, list validation performed, and include tests for format or export changes. Do not include copyrighted source video or voice assets in the repository.
+
+Update the knowledge base as required by [AGENTS.md](AGENTS.md). If no doc needs a
+change, put `KB: no change needed` and the reason in the PR body. Before merge, fetch
+`origin/main`, run `python scripts\kb\check_kb.py --diff origin/main`, and fix every error.
 
 Release candidates should pass `scripts/validate_external.py` with both required flags against an
 exported integration fixture, in addition to lint, pytest, and packaged-application smoke tests.
