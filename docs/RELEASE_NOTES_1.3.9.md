@@ -1,5 +1,13 @@
 # Choicer Voicer Pack Creator 1.3.9
 
+**Status:** Superseded
+**Last Updated:** 2026-11-13
+**Audience:** Users and maintainers
+**Last verified:** 2026-11-13 against `5466178`
+**Code:** `src/choicer_voicer_pack_creator/separation.py`, `src/choicer_voicer_pack_creator/ui/backing_dialog.py`
+
+These are historical release notes for version 1.3.9. See the [user guide](USER_GUIDE.md) for current behavior.
+
 ## Background voice preparation
 
 Speaker/voice preparation now has its own worker slot and runs independently of CPU jobs,

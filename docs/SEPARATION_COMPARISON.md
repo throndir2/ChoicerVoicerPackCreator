@@ -1,5 +1,13 @@
 # Singing-preserving separation experiment
 
+**Status:** Superseded
+**Last Updated:** 2026-11-13
+**Audience:** Developers and maintainers
+**Last verified:** 2026-11-13 against `5466178`
+**Code:** `scripts/compare_separation.py`, `tools/separation-comparison/Setup-Gpu.ps1`, `src/choicer_voicer_pack_creator/separation.py`, `src/choicer_voicer_pack_creator/bandit_cuda_runtime.py`
+
+This page records a historical experiment. See the [user guide](USER_GUIDE.md#audio-and-backing-tracks) for current application behavior.
+
 This optional, local-only developer workflow compares HTDemucs instrumental backing
 with singing-aware BandIt and SAM Audio's speech-removal residual. The comparison
 runner and GPU setup below are not part of the portable application.
