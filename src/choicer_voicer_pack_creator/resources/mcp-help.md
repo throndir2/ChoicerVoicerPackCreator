@@ -1,5 +1,11 @@
 # MCP setup and tool guide
 
+**Status:** Implemented
+**Last Updated:** 2026-11-13
+**Audience:** MCP client users and maintainers
+**Last verified:** 2026-11-13 against `dac0e5b`
+**Code:** `src/choicer_voicer_pack_creator/mcp_server.py`, `src/choicer_voicer_pack_creator/automation.py`, `src/choicer_voicer_pack_creator/mcp_jobs.py`, `src/choicer_voicer_pack_creator/mcp_gui.py`, `src/choicer_voicer_pack_creator/ui_automation.py`, `src/choicer_voicer_pack_creator/exporter.py`, `src/choicer_voicer_pack_creator/ui/`
+
 ## Connect an assistant
 
 MCP lets a compatible client ask Choicer Voicer Pack Creator to inspect media,
@@ -57,7 +63,8 @@ the client stops the process.**
 ## Make a complete pack headless
 
 All of these tools also work in live mode. Get the user's permission before any
-download (`allow_download=true`) and only import media the user may use.
+YouTube download. Transcription and model downloads require `allow_download=true`.
+Only import media the user may use.
 
 1. `import_youtube(url, destination_folder, authors?, title?)` downloads a public
    video and its captions into a new document. Or use `new_project` with a local video.
