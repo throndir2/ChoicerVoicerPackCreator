@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "repo-kb": {
+      "type": "local",
+      "command": "npx",
+      "args": [
+        "-y",
+        "github:throndir2/repo-kb",
+        "mcp"
+      ],
+      "tools": [
+        "*"
+      ]
+    }
+  }
+}
