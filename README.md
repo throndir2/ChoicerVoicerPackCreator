@@ -7,7 +7,7 @@
 **Status:** Implemented<br>
 **Last Updated:** 2026-11-13<br>
 **Audience:** Users, developers, and maintainers<br>
-**Last verified:** 2026-11-13 against `dac0e5b`<br>
+**Last verified:** 2026-11-13 against `aab9b0b` plus the local checker change<br>
 **Code:** `src/choicer_voicer_pack_creator/`, `src/choicer_voicer_pack_creator/ui/`, `src/choicer_voicer_pack_creator/resources/`, `Build-Portable.ps1`, `Build-Installer.ps1`
 
 ### Turn any video into a dub pack for *The Choicer Voicer*.
@@ -242,9 +242,12 @@ If the app saves you time, you can buy the developer a coffee.
 ## 📚 More information
 
 - [User guide](https://github.com/throndir2/ChoicerVoicerPackCreator/blob/main/docs/USER_GUIDE.md): every feature in detail.
-- [AI assistant (MCP) guide](https://github.com/throndir2/ChoicerVoicerPackCreator/blob/main/MCP/README.md): connect an AI assistant.
+- [AI assistant (MCP) guide](MCP/README.md): connect an AI assistant.
 - [For developers](https://github.com/throndir2/ChoicerVoicerPackCreator/blob/main/docs/DEVELOPMENT.md): run from source, build, and release.
-- [Contributing](https://github.com/throndir2/ChoicerVoicerPackCreator/blob/main/CONTRIBUTING.md): help improve the app.
+- [Contributing](CONTRIBUTING.md): help improve the app.
+- [Agent workflow](AGENTS.md): rules for local agent work and delivery.
+- [Documentation map](docs/README.md): find the repository's guides.
+- [Bundled resource guide index](src/choicer_voicer_pack_creator/resources/README.md): find the bundled help.
 - [Third-party notices](THIRD_PARTY_NOTICES.md): included components, models, and license terms.
 
 ## ⚖️ License
