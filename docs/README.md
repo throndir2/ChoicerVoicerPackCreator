@@ -3,8 +3,8 @@
 **Status:** Implemented
 **Last Updated:** 2026-11-13
 **Audience:** Users, developers, and maintainers
-**Last verified:** 2026-11-13 against `aab9b0b` plus the local checker change
-**Code:** `src/choicer_voicer_pack_creator/`, `MCP/`, `scripts/`, `installer/`, `Build-Portable.ps1`, `Build-Installer.ps1`
+**Last verified:** 2026-11-13 against `f905faf` plus the bootstrap changes
+**Code:** `AGENTS.md`, `.github/copilot-instructions.md`, `src/choicer_voicer_pack_creator/`, `MCP/`, `scripts/`, `installer/`, `Build-Portable.ps1`, `Build-Installer.ps1`
 
 ## Where knowledge lives
 
@@ -14,7 +14,7 @@
 - [Application code map](CODE_MAP.md) answers: Which source and test files own each application feature?
 - [Release notes for 1.3.9](RELEASE_NOTES_1.3.9.md) answer: What changed in 1.3.9, and what work was deferred? Historical.
 - [Separation comparison](SEPARATION_COMPARISON.md) answers: How was singing-preserving separation compared? Historical.
-- [Knowledge-base contract and local checker](kb.md) answers: What rules apply to KB pages, and how do I check paths, indexes, and branch coverage?
+- [Knowledge-base contract and local checker](kb.md) answers: How do agents find and update the KB, and how do I check paths, indexes, and branch coverage?
 
 The root [README](../README.md) gives the project overview and main features.
 The [MCP guide](../MCP/README.md) explains how to connect an MCP client.

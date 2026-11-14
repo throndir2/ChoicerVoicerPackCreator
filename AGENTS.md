@@ -1,7 +1,30 @@
 # Repository agent instructions
 
+**Status:** Implemented
+**Last Updated:** 2026-11-13
+**Audience:** Coding agents
+**Last verified:** 2026-11-13 against `f905faf` plus the bootstrap changes
+**Code:** `AGENTS.md`, `.github/copilot-instructions.md`, `scripts/kb/check_kb.py`
+
 These instructions apply to every LLM/coding agent working anywhere in this repository.
 Read `CONTRIBUTING.md` for development setup, design rules, and release requirements.
+Use [docs/README.md](docs/README.md) to find the knowledge base (KB).
+
+## Knowledge Base First (Required)
+
+To find, search, or move through the repository, call `kb_search` on the `repo-kb` MCP
+server. Open the cited sections with `kb_read_section`. Use their `**Code:**` lines to
+find the source, then read only the code you need. Do not use broad grep, glob, directory
+listings, or file reads to explore. Use them only to find an exact name given by the KB.
+If the KB has no answer or a wrong answer, find it in the code and fix the doc in the same PR.
+
+## Keep the KB true (Required)
+
+A PR that adds, renames, moves, or deletes code, config, scripts, commands, or behavior
+must update the KB in the same PR. Update the page, its `**Code:**` and
+`**Last verified:**` lines, and the folder index. Give a new feature a page or section.
+Delete a removed feature or mark it Superseded. If no doc needs a change, put
+`KB: no change needed` and the reason in the PR body.
 
 ## Default completion contract
 
@@ -76,7 +99,9 @@ main without disturbing another session.
    available, otherwise the GitHub CLI. Include the user-visible change, validation
    performed (or why it was not applicable), and any remaining limitations.
 4. Address review feedback and required checks. After refreshing from `main`, merge the
-   PR using a repository-supported merge method. Use a merge queue if required. Never
+   PR using a repository-supported merge method. Before merge, run
+   `python scripts\kb\check_kb.py --diff origin/main` and fix every error.
+   Use a merge queue if required. Never
    bypass protections or required approvals. Auto-merge or queue enrollment is not proof
    that the PR has actually merged.
 5. Confirm GitHub reports the PR as merged, refresh `origin/main`, and report the PR URL
