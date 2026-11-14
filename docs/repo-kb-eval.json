@@ -1,0 +1,122 @@
+[
+  {
+    "q": "Which files define editable project segments and track document revisions?",
+    "expect": ["docs/CODE_MAP.md"]
+  },
+  {
+    "q": "How does saving a cvpack.json keep media paths relocatable and recover unsaved edits?",
+    "expect": ["docs/USER_GUIDE.md"]
+  },
+  {
+    "q": "When importing a pack, how are original cuts restored without trusting a mismatched export manifest?",
+    "expect": ["docs/USER_GUIDE.md"]
+  },
+  {
+    "q": "Which code and tests handle importing a pack folder or ZIP while preserving prompt recordings?",
+    "expect": ["docs/CODE_MAP.md"]
+  },
+  {
+    "q": "What codecs, filenames, and metadata does the game-ready exported pack require?",
+    "expect": ["docs/USER_GUIDE.md"]
+  },
+  {
+    "q": "How does export protect an existing destination if staging or media validation fails?",
+    "expect": ["docs/USER_GUIDE.md"]
+  },
+  {
+    "q": "Which code owns full media decoding and validation before a pack is published?",
+    "expect": ["docs/CODE_MAP.md"]
+  },
+  {
+    "q": "Where should I change timeline dragging and add its regression tests?",
+    "expect": ["docs/CODE_MAP.md"]
+  },
+  {
+    "q": "Why does segment selection stop following playback while I type a speaker or line?",
+    "expect": ["docs/USER_GUIDE.md"]
+  },
+  {
+    "q": "How do undo and redo work across project tabs and text fields?",
+    "expect": ["docs/USER_GUIDE.md"]
+  },
+  {
+    "q": "Which files own editor history and background job cancellation?",
+    "expect": ["docs/CODE_MAP.md"]
+  },
+  {
+    "q": "How do I prevent an MCP edit from changing the wrong tab after the active project changes?",
+    "expect": ["MCP/README.md"]
+  },
+  {
+    "q": "Does an accepted MCP cancel_job response mean that export cleanup has finished?",
+    "expect": ["MCP/README.md"]
+  },
+  {
+    "q": "Which MCP arguments need explicit permission to overwrite files or download transcription models?",
+    "expect": ["MCP/README.md"]
+  },
+  {
+    "q": "Can local transcription still disclose media to an assistant model provider through MCP previews?",
+    "expect": ["MCP/README.md"]
+  },
+  {
+    "q": "How do I connect an assistant to a headless pack editor without an HTTP listener?",
+    "expect": ["MCP/README.md"]
+  },
+  {
+    "q": "How can an MCP client verify a visible Qt control instead of relying on semantic tool success?",
+    "expect": ["MCP/README.md"]
+  },
+  {
+    "q": "How can I compare YouTube captions with local transcription without replacing the original text and timings?",
+    "expect": ["docs/USER_GUIDE.md"]
+  },
+  {
+    "q": "Where are caption alignment and Parakeet recognition implemented and tested?",
+    "expect": ["docs/CODE_MAP.md"]
+  },
+  {
+    "q": "How do I install the optional singing-preserving CPU dependencies without replacing them with CUDA wheels?",
+    "expect": ["docs/DEVELOPMENT.md"]
+  },
+  {
+    "q": "Why does permission to download a separation model not authorize the NVIDIA runtime download?",
+    "expect": ["docs/USER_GUIDE.md"]
+  },
+  {
+    "q": "What driver, VRAM, and warmup conditions qualify BandIt for NVIDIA acceleration?",
+    "expect": ["docs/USER_GUIDE.md"]
+  },
+  {
+    "q": "How much RAM does a CUDA separation attempt reserve, and what happens when admission fails?",
+    "expect": ["CONTRIBUTING.md"]
+  },
+  {
+    "q": "Which source files and tests handle BandIt runtime isolation and CPU fallback?",
+    "expect": ["docs/CODE_MAP.md"]
+  },
+  {
+    "q": "How do I build a portable package in my own environment without changing another session's dependencies?",
+    "expect": ["docs/DEVELOPMENT.md"]
+  },
+  {
+    "q": "How are the editor and bundled MCP executable packaged with one shared runtime?",
+    "expect": ["docs/DEVELOPMENT.md"]
+  },
+  {
+    "q": "Why must portable version 1.4.0 update through 1.4.1 before installing the latest version?",
+    "expect": ["docs/USER_GUIDE.md"]
+  },
+  {
+    "q": "Which installer parameters wait for the old process and restart an installed update?",
+    "expect": ["CONTRIBUTING.md"]
+  },
+  {
+    "q": "Which generated build files can I remove without deleting projects or another session's environment?",
+    "expect": ["docs/CLEANUP.md"]
+  },
+  {
+    "q": "What local check must I run when changing a Code path or adding a documentation page before merge?",
+    "expect": ["docs/kb.md"]
+  }
+]
