@@ -1,5 +1,11 @@
 # Contributing
 
+**Status:** Implemented<br>
+**Last Updated:** 2026-11-13<br>
+**Audience:** Developers and maintainers<br>
+**Last verified:** 2026-11-13 against `dac0e5b`<br>
+**Code:** `pyproject.toml`, `tools/`, `Build-Portable.ps1`, `Build-Installer.ps1`, `scripts/`, `installer/`, `src/choicer_voicer_pack_creator/`, `tests/`
+
 Contributions are welcome. This project is an unofficial community utility and is not affiliated with the creators of *The Choicer Voicer*.
 
 ## Coding agents and concurrent sessions
@@ -77,7 +83,7 @@ fact explicitly; it is not GPU inference or checkpoint parity. Ordinary packaged
 checks the bundled CPU runtime and never downloads the optional CUDA runtime. Cache extraction
 and loading use extended-length Windows paths without requiring a system-wide long-path policy.
 
-Use `.\Build-Portable.ps1 -BuildEnvironment .\build\environments\<task-name>` for a task-owned
+Use `.\Build-Portable.ps1 -BuildEnvironment .\build\environments\feature-name` for a task-owned
 build environment; do not reset or install into another session's environment or the shared
 default during concurrent development. Reset requires this script's ownership marker and an
 ordinary directory containing `pyvenv.cfg`; unmarked older environments require a new path.

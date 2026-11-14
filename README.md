@@ -4,6 +4,12 @@
 
 # Choicer Voicer Pack Creator
 
+**Status:** Implemented<br>
+**Last Updated:** 2026-11-13<br>
+**Audience:** Users, developers, and maintainers<br>
+**Last verified:** 2026-11-13 against `dac0e5b`<br>
+**Code:** `src/choicer_voicer_pack_creator/`, `src/choicer_voicer_pack_creator/ui/`, `src/choicer_voicer_pack_creator/resources/`, `Build-Portable.ps1`, `Build-Installer.ps1`
+
 ### Turn any video into a dub pack for *The Choicer Voicer*.
 
 Drop in a video or paste a YouTube link. Get the lines, the speakers, and a voice-free music track
@@ -30,28 +36,28 @@ automatically. Polish everything on a visual timeline, then export a game-ready 
 | :--- | :--- | :--- |
 | Open a video file or paste a YouTube link. The app transcribes the dialogue and makes a music track without voices, all in the background. | Watch each line on the video and fix it on the waveform. Name one line for a character, and the app fills in the other lines with the same voice. | Click **Export**. You get a checked, game-ready pack folder and a ZIP to share with friends. |
 
-You can edit from the first second. All the slow work runs in the background, so you never wait.
+You can edit from the first second. Slow work runs in the background, so you can keep editing.
 
 ## ✨ Features
 
 ### 📥 Start from anything
 
 - **Any common video file:** MP4, MKV, MOV, WebM, OGV, or AVI. Drag files onto the window to open them.
-- **YouTube links:** paste a link to download one video together with its captions.
+- **YouTube links:** paste a link to download one video and its available captions.
 - **Existing packs:** import a pack folder or ZIP to fix or improve it. Its recordings and images stay as they are.
 - **Many projects at once:** each project opens in its own tab.
 
 ### 📝 Automatic transcripts
 
 - **YouTube captions, cleaned up:** the app splits captions into natural lines at the real pauses in the audio.
-- **Local speech recognition:** a second transcript is made on your computer with NVIDIA Parakeet (Whisper for languages that Parakeet does not support). Compare it side by side with the YouTube captions and use the best one.
+- **Local speech recognition:** create another transcript on your computer with NVIDIA Parakeet. The app uses Whisper for languages Parakeet does not support. Compare this draft with YouTube captions when available.
 - **Align Words:** a larger model fits each caption word to the audio for precise cuts, and marks the lines that need a check.
 - **Quick scan:** suggest lines from audio activity, with no download.
 - **You stay in control:** nothing goes into your project until you choose **Use Transcript**.
 
 ### 🗣️ Speakers fill in by themselves
 
-- **Name one line, get the rest:** the app finds other lines with the same voice and fills in the name.
+- **Name one line, suggest the rest:** the app can fill in names for other lines that match its voice.
 - **Your names are safe:** automatic matching never replaces a name that you typed.
 - **Easy to check:** automatic names show in italics until you confirm them.
 - **Next Unassigned:** jump straight to the next line that has no speaker.
@@ -103,11 +109,11 @@ You can edit from the first second. All the slow work runs in the background, so
 - **Backup on save:** each save keeps your previous version.
 - **Open Recent** remembers your last 10 projects.
 
-### 🔄 Easy to install, always up to date
+### 🔄 Easy to install and update
 
 - **Everything included:** no administrator rights, no Python, and no FFmpeg to install.
-- **Automatic updates:** the app updates itself when a new version is out.
-- **Portable option:** prefer no installation? Use the portable ZIP. It updates itself too.
+- **Automatic update checks:** by default, the app checks for new versions on startup. You choose whether to download and install them.
+- **Portable option:** use the portable ZIP without installing it. Update it from inside the app.
 
 ### 🖥️ A workspace that fits you
 
@@ -154,11 +160,11 @@ explains every feature in detail.
 
 | Feature | Download size |
 | :--- | ---: |
-| Local transcripts (Parakeet) | about 465 MB (Whisper: about 80–150 MB) |
-| Speaker matching | about 25 MB |
-| Music track (remove all vocals) | about 300 MB |
-| Music track (keep singing) | about 430 MB |
-| Align Words | about 1.5 GB |
+| Local transcripts (Parakeet) | about 465 MiB (Whisper: about 80–150 MiB) |
+| Speaker matching | about 25 MiB |
+| Music track (remove all vocals) | about 300 MiB |
+| Music track (keep singing) | about 430 MiB |
+| Align Words | about 1.5 GiB |
 
 ## ❓ Questions and answers
 
@@ -239,6 +245,7 @@ If the app saves you time, you can buy the developer a coffee.
 - [AI assistant (MCP) guide](https://github.com/throndir2/ChoicerVoicerPackCreator/blob/main/MCP/README.md): connect an AI assistant.
 - [For developers](https://github.com/throndir2/ChoicerVoicerPackCreator/blob/main/docs/DEVELOPMENT.md): run from source, build, and release.
 - [Contributing](https://github.com/throndir2/ChoicerVoicerPackCreator/blob/main/CONTRIBUTING.md): help improve the app.
+- [Third-party notices](THIRD_PARTY_NOTICES.md): included components, models, and license terms.
 
 ## ⚖️ License
 
