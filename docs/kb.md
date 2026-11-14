@@ -3,10 +3,10 @@
 **Status:** Partial
 **Last Updated:** 2026-11-13
 **Audience:** Developers and maintainers
-**Last verified:** 2026-11-13 against `f905faf` plus the bootstrap changes
-**Code:** `AGENTS.md`, `.github/copilot-instructions.md`, `CONTRIBUTING.md`, `scripts/kb/check_kb.py`, `scripts/kb/test_check_kb.py`, `.repo-kb.json`
+**Last verified:** 2026-11-13 against `25a1d36` plus the search evaluation changes
+**Code:** `AGENTS.md`, `.github/copilot-instructions.md`, `CONTRIBUTING.md`, `scripts/kb/check_kb.py`, `scripts/kb/test_check_kb.py`, `.repo-kb.json`, `docs/repo-kb-eval.json`
 
-This page defines the repository's documentation rules. The contract, top-level map, and local path and index checker exist.
+This page defines the repository's documentation rules. The contract, map, local checker, and search evaluation exist.
 Page generation does not exist.
 
 ## Agent bootstrap and pull requests
@@ -84,7 +84,59 @@ An explicit Code path must still exist, even if it names generated output.
 Run the focused tests with `python -m unittest discover -s scripts\kb -p test_check_kb.py`.
 No active local Git hooks exist. This step does not create a hook or change hosted workflows.
 
+## Local search evaluation
+
+[repo-kb-eval.json](repo-kb-eval.json) contains 30 real engineering questions with one expected
+authoritative doc path for each question. The CLI format is a JSON array of
+`{"q": "question", "expect": ["docs/path.md"]}` objects.
+The published repo-kb CLI's `eval --help` lists the command; its `src/eval.js` defines this format.
+
+Run these commands from the repository root:
+
+```powershell
+npx -y github:throndir2/repo-kb index --full
+npx -y github:throndir2/repo-kb eval docs\repo-kb-eval.json --json
+```
+
+The default evaluation uses hybrid search: keyword matching plus local embeddings.
+Wait for a complete embedding index. Confirm that the output says `repo-kb (hybrid)`,
+not keyword search. Do not add `--keyword`, `--no-embed`, or `--wkb`.
+The repository wiki is disabled; no wiki comparison is required.
+
+Each hit measures whether the expected page appears within the first 1, 3, or 5 ranked files.
+The CLI reports `hit@1`, `hit@3`, and `hit@5` as fractions, rounded to three decimal places.
+Its `misses` array includes every question not answered at rank 1, including successful lower ranks.
+
+### Measured retrieval quality
+
+The local hybrid evaluation on 2026-11-13 used all 30 unchanged questions.
+It covered project formats, import/export, editor state, MCP permissions and privacy,
+captions, singing separation, resource admission, packaging, updates, cleanup, and KB work.
+Questions ask about engineering tasks, not page titles.
+
+| Measure | Before page improvements | After page improvements |
+| --- | --- | --- |
+| hit@1 | 0.600 (18/30) | 0.633 (19/30) |
+| hit@3 | 0.900 (27/30) | 1.000 (30/30) |
+| hit@5 | 1.000 (30/30) | 1.000 (30/30) |
+| Mean reciprocal rank | 0.757 | 0.806 |
+
+Mean reciprocal rank averages the reciprocal of each expected page's rank.
+Missing pages contribute zero.
+The final index contained 14 files and 193 fully embedded chunks.
+The local path/index checker counts pages differently; its page count is not the search index count.
+
+The weakest source-ownership results concerned document revisions, caption recognition, and BandIt runtime isolation.
+The [code map](CODE_MAP.md) now explains their inputs, operations, source files, and tests.
+Those expected paths moved from ranks 4, 5, and 4 to ranks 2, 3, and 1.
+All expected paths now appear in the top three; 11 questions still return another page first.
+Do not change expected paths or weaken questions merely to improve scores.
+
+These results measure document retrieval, not answer correctness or runtime behavior.
+The questions guided the page improvements; this is not an independent unseen-question evaluation.
+Historical performance, real GPU behavior, and in-game compatibility were not reproduced.
+No product code or hosted workflow changed for this evaluation.
+
 ## Planned local support
 
 - Page generation and checks for metadata and verification dates are Planned. No generator or metadata check exists.
-- A local evaluation of the map against code and documentation is Planned. No evaluation exists.

@@ -3,7 +3,7 @@
 **Status:** Implemented
 **Last Updated:** 2026-11-13
 **Audience:** Users, developers, and maintainers
-**Last verified:** 2026-11-13 against `f905faf` plus the bootstrap changes
+**Last verified:** 2026-11-13 against `25a1d36` plus the search evaluation changes
 **Code:** `AGENTS.md`, `.github/copilot-instructions.md`, `src/choicer_voicer_pack_creator/`, `MCP/`, `scripts/`, `installer/`, `Build-Portable.ps1`, `Build-Installer.ps1`
 
 ## Where knowledge lives
@@ -11,10 +11,11 @@
 - [User guide](USER_GUIDE.md) answers: How do I create, edit, save, and export a pack?
 - [Development guide](DEVELOPMENT.md) answers: How do I set up, build, validate, and release the application?
 - [Cleanup guide](CLEANUP.md) answers: Which generated files can I remove, and how?
-- [Application code map](CODE_MAP.md) answers: Which source and test files own each application feature?
+- [Application code map](CODE_MAP.md) answers: Which source and test files own each feature, including revisions, caption alignment, and BandIt isolation?
 - [Release notes for 1.3.9](RELEASE_NOTES_1.3.9.md) answer: What changed in 1.3.9, and what work was deferred? Historical.
 - [Separation comparison](SEPARATION_COMPARISON.md) answers: How was singing-preserving separation compared? Historical.
-- [Knowledge-base contract and local checker](kb.md) answers: How do agents find and update the KB, and how do I check paths, indexes, and branch coverage?
+- [Knowledge-base contract, checker, and evaluation](kb.md) answers: How do agents find and update the KB, check paths and indexes, and measure search quality?
+- [Search evaluation questions](repo-kb-eval.json) define: Which 30 engineering questions and expected doc paths measure retrieval quality?
 
 The root [README](../README.md) gives the project overview and main features.
 The [MCP guide](../MCP/README.md) explains how to connect an MCP client.
