@@ -1,0 +1,14 @@
+{
+  "include": [
+    "docs/**/*.md",
+    "AGENTS.md",
+    "README.md",
+    "CONTRIBUTING.md",
+    ".github/copilot-instructions.md",
+    ".github/instructions/**/*.md",
+    ".github/skills/**/*.md",
+    ".github/agents/**/*.md",
+    "MCP/README.md",
+    "src/choicer_voicer_pack_creator/resources/mcp-help.md"
+  ]
+}
