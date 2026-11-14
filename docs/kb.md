@@ -3,9 +3,11 @@
 **Status:** Partial
 **Last Updated:** 2026-11-13
 **Audience:** Developers and maintainers
-**Last verified:** 2026-11-13 against `17a278b`
+**Last verified:** 2026-11-13 against `aab9b0b` plus the local checker change
+**Code:** `scripts/kb/check_kb.py`, `scripts/kb/test_check_kb.py`, `.repo-kb.json`
 
-This page defines the repository's documentation rules. The contract and top-level map exist. Page generation and automated checks do not exist.
+This page defines the repository's documentation rules. The contract, top-level map, and local path and index checker exist.
+Page generation does not exist.
 
 ## Page metadata
 
@@ -37,7 +39,45 @@ Name the page and state the question it answers.
 Scripts must generate KB pages from their source data. Do not edit generated pages by hand.
 Change their source data and run the generator.
 
+## Local checker
+
+Run `python scripts\kb\check_kb.py` from the repository root.
+The checker uses only the Python standard library. It needs no package installation.
+Run `python scripts\kb\check_kb.py --diff origin/main` to add branch warnings.
+The diff compares the named local Git reference with tracked working-tree changes, including staged changes.
+Fetch the reference before this check. Untracked files are not in the diff.
+
+The checker reports these results:
+
+- Error: A path in a `**Code:**` line does not exist.
+- Error: A folder index does not link to a KB page or a KB subfolder.
+- Warning: A changed non-Markdown file has no Code path that names the file or a parent folder.
+- Warning: A deletion or rename removes a path named by a current or base-reference Code line.
+
+Errors return exit status 1. Warnings do not change the exit status.
+An unreadable file, invalid configuration, or failed Git command is an error.
+Code paths must be repository-relative. Use backticks, Markdown link targets, or comma-separated plain paths.
+Backticks support spaces in paths. Both slash styles work. Parent traversal and absolute paths are errors.
+The checker does not search other folders to repair invalid paths. It ignores Code examples inside fenced blocks.
+
+### Discovery boundaries
+
+`.repo-kb.json` supplies the indexed pages. Root Markdown guides and Markdown siblings of indexed guides are also pages.
+This includes `THIRD_PARTY_NOTICES.md`, `MCP/README.md`, and the bundled resource index and help.
+Standalone `.github` instruction files get Code checks but do not require a `.github/README.md`.
+The checker checks all folders below `docs`, including empty folders.
+Outside `docs`, it checks guide folders and subfolders that contain indexed pages, not resource-only folders.
+The root index links to root pages and the top-level guide indexes. Each guide index links to its direct pages and KB subfolders.
+Directory links and links to `README.md` both count. External URLs do not replace local index links.
+
+The checker skips `.git`, `.cache`, `.venv`, `.build-venv`, `.pytest_cache`, `.ruff_cache`, and `__pycache__`.
+It also skips `build`, `dist`, `htmlcov`, `node_modules`, and `_internal` folders.
+An explicit Code path must still exist, even if it names generated output.
+
+Run the focused tests with `python -m unittest discover -s scripts\kb -p test_check_kb.py`.
+No active local Git hooks exist. This step does not create a hook or change hosted workflows.
+
 ## Planned local support
 
-- Page generation and a local check for metadata, code paths, indexes, and verification dates are Planned. No generator or check exists.
+- Page generation and checks for metadata and verification dates are Planned. No generator or metadata check exists.
 - A local evaluation of the map against code and documentation is Planned. No evaluation exists.
