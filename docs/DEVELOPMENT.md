@@ -1,5 +1,11 @@
 # Development, building, and releases
 
+**Status:** Implemented
+**Last Updated:** 2026-11-13
+**Audience:** Developers and release maintainers
+**Last verified:** 2026-11-13 against `5466178`
+**Code:** `Build-Portable.ps1`, `Build-Installer.ps1`, `scripts/build.py`, `scripts/smoke_packaged.py`, `scripts/validate_external.py`, `src/choicer_voicer_pack_creator/media.py`, `third_party/ffmpeg-windows-x64.json`, `.github/workflows/release.yml`, `pyproject.toml`
+
 This document is for developers and release maintainers. Users do not need any of these steps:
 the [Setup installer and portable ZIP](https://github.com/throndir2/ChoicerVoicerPackCreator/releases/latest)
 include everything. For editor features, see the [user guide](USER_GUIDE.md). For project
@@ -73,8 +79,8 @@ The Windows application folder is written below `dist/v1.5.0/portable-<build-id>
 shareable `Choicer-Voicer-Pack-Creator-1.5.0-Portable-Windows-x64.zip` beside it. The first build downloads
 about 64 MiB of pinned FFmpeg input and emits a self-contained bundle. The stable sharing ZIP is not
 replaced until both the application folder and a clean ZIP extraction pass packaged smoke tests.
-Startup rejects a missing/mismatched tool pair or builds lacking `libtheora`, `libvorbis`, or
-`libmp3lame`.
+Startup rejects a missing FFmpeg/FFprobe pair or an FFmpeg build lacking `libtheora`, `libvorbis`,
+or `libmp3lame`.
 
 ## Build a portable Windows package locally
 

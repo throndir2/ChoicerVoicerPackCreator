@@ -1,5 +1,11 @@
 # Choicer Voicer Pack Creator user guide
 
+**Status:** Implemented
+**Last Updated:** 2026-11-13
+**Audience:** Users
+**Last verified:** 2026-11-13 against `5466178`
+**Code:** `src/choicer_voicer_pack_creator/`, `installer/`, `Build-Installer.ps1`, `Build-Portable.ps1`
+
 This guide explains every feature of the editor in detail. For a short overview, see the
 [README](../README.md). For build and release steps, see [DEVELOPMENT.md](DEVELOPMENT.md).
 
@@ -396,12 +402,11 @@ scan with Balanced, Sensitive, and Conservative modes. This scan measures determ
 energy and suggests possible regions; music, effects, and silence changes can still be false
 positives.
 
-Local transcription is optional. The default model is NVIDIA **Parakeet TDT 0.6B v3**, the same
-speech model that AudioTranscriber uses. It is more accurate and much faster on the CPU than
-Whisper, and it detects which of its 25 European languages is spoken. On first use, the app asks
-before it downloads the pinned int8 model (about 465 MiB) and unpacks it (about 640 MiB on disk).
-The app splits long audio at quiet points into chunks of at most 30 seconds and runs the model in
-a separate worker process.
+Local transcription is optional. The default model is NVIDIA **Parakeet TDT 0.6B v3**.
+It detects which of its 25 European languages is spoken.
+On first use, the app asks before it downloads the pinned int8 model (about 465 MiB) and unpacks
+it (about 640 MiB on disk). The app splits long audio at quiet points into chunks of at most
+30 seconds and runs the model in a separate worker process.
 
 For other languages, such as Japanese, Chinese, or Korean, choose a Whisper model in
 **Transcription model (next scan)**. When you select a language that Parakeet does not support,
@@ -528,13 +533,13 @@ suggested boundary: this pass measures audio energy, not speaker identity, so mu
 hide pauses and two speakers without a pause can still share a row. It does not correct
 misrecognized words, perform forced alignment, or separate overlapping voices.
 
-For more accurate cuts, choose **Align Words...** in the **YouTube** panel. This optional
+For additional word-level timing evidence, choose **Align Words...** in the **YouTube** panel. This optional
 pass uses a larger local Whisper model to align the original caption words against audio
 with neighboring-caption context. It corroborates the alignment with independent recognition,
 corrects shared boundaries together, adds bounded real-source audio margins, and recognizes
 the proposed cuts again to flag missing opening/closing words or neighboring speech. Caption
 text is preserved; the independent transcript is evidence, not replacement text. This is
-especially useful for creator captions that contain only whole-line display timestamps.
+useful for creator captions that contain only whole-line display timestamps. Review the proposed cuts.
 
 The first use requests permission for approximately 1.5 GB of checksum-verified model files.
 Valid cached files are reused; permission also covers repairing invalid components. The model

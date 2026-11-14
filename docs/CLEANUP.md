@@ -1,5 +1,11 @@
 # Disk cleanup
 
+**Status:** Implemented
+**Last Updated:** 2026-11-13
+**Audience:** Developers and maintainers
+**Last verified:** 2026-11-13 against `5466178`
+**Code:** `Clean-Workspace.ps1`, `Build-Portable.ps1`, `scripts/ffmpeg_bundle.py`, `pyproject.toml`
+
 Builds, tests, and agent sessions in this repository make a large quantity of generated
 output. This guide tells you what the output is, where it is, and how to remove it safely.
 
@@ -60,13 +66,16 @@ Use `-Include` to select other categories:
 | `Caches` | `.cache\`, `.pytest_cache\`, `.ruff_cache\`, `__pycache__\`, `htmlcov\`, `.coverage` |
 | `Venvs` | `.venv\` and `.build-venv\` |
 | `Worktrees` | Stale Git worktree records whose folders were already deleted |
-| `Branches` | Local branches that are in `origin/main` or whose tip is the head of a merged pull request |
-| `All` | All of the categories above |
+| `Branches` | Local branches in `origin/main`, or whose tip exactly matches a merged pull request head found by `gh` |
+| `All` | All categories above, including eligible files, stale worktree records, and eligible local branches |
+
+File cleanup considers ignored, untracked paths. It skips targets that contain tracked files.
+Review the dry run before applying any category.
 
 Examples:
 
 ```powershell
-# Remove everything that the script can remove, including the development environment.
+# Remove all categories, including the development environment and current dist folder.
 .\Clean-Workspace.ps1 -Include All -IncludeCurrentDist -Apply
 
 # Remove only merged local branches. Fetch first so that origin/main is current.
@@ -83,7 +92,8 @@ git fetch origin main
 - Untracked files that Git does not ignore. These can be uncommitted work.
 - Ignored files that are not in a category, for example `.env`, `*.local.json`, and editor
   settings. The script lists them as "not touched".
-- The targets of links and junctions. The script removes a link, not the folder that it points to.
+- Links and junctions. The script skips cleanup targets that are links or junctions, or are inside
+  them. It does not traverse or delete their targets.
 - Other worktree folders. The script only prunes records for worktrees that are already gone.
 - `main`, branches that a worktree has checked out, and branches that are not merged.
 - Data outside the checkout, for example the shared build environment and application data.
@@ -104,11 +114,13 @@ Use these commands when the script is not available. Run them from the checkout 
 
    The second command must show nothing.
 
-2. Remove the generated output:
+2. Remove these generated-output directories:
 
    ```powershell
    Remove-Item -LiteralPath build, dist, .cache -Recurse -Force -ErrorAction SilentlyContinue
    ```
+
+   This command does not remove `.venv`, `.build-venv`, or the test and Python caches listed above.
 
 3. To remove the shared build environment, make sure that no build runs in any checkout. Then
    either delete it or let the build script make it again:

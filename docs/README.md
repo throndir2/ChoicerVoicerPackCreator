@@ -3,7 +3,7 @@
 **Status:** Implemented
 **Last Updated:** 2026-11-13
 **Audience:** Users, developers, and maintainers
-**Last verified:** 2026-11-13 against `17a278b`
+**Last verified:** 2026-11-13 against `5466178`
 **Code:** `src/choicer_voicer_pack_creator/`, `MCP/`, `scripts/`, `installer/`, `Build-Portable.ps1`, `Build-Installer.ps1`
 
 ## Where knowledge lives
@@ -11,8 +11,9 @@
 - [User guide](USER_GUIDE.md) answers: How do I create, edit, save, and export a pack?
 - [Development guide](DEVELOPMENT.md) answers: How do I set up, build, validate, and release the application?
 - [Cleanup guide](CLEANUP.md) answers: Which generated files can I remove, and how?
-- [Release notes for 1.3.9](RELEASE_NOTES_1.3.9.md) answer: What changed in 1.3.9, and what work was deferred?
-- [Separation comparison](SEPARATION_COMPARISON.md) answers: How was singing-preserving separation compared, and what are its limits?
+- [Application code map](CODE_MAP.md) answers: Which source and test files own each application feature?
+- [Release notes for 1.3.9](RELEASE_NOTES_1.3.9.md) answer: What changed in 1.3.9, and what work was deferred? Historical.
+- [Separation comparison](SEPARATION_COMPARISON.md) answers: How was singing-preserving separation compared? Historical.
 - [Knowledge-base contract](kb.md) answers: What rules apply to KB pages, indexes, code maps, and generated pages?
 
 The root [README](../README.md) gives the project overview and main features.
